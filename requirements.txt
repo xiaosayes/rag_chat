@@ -1,0 +1,76 @@
+# === 核心依赖 ===
+# 阿里云百炼 SDK（DashScope）
+dashscope>=1.20.0
+
+# 向量数据库
+qdrant-client>=1.9.0
+
+# Embedding 相关
+sentence-transformers>=3.0.0  # 备用本地 embedding
+
+# 文档处理
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+
+# 数据处理
+pandas>=2.1.0
+numpy>=1.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# HTTP 客户端
+httpx>=0.27.0
+aiohttp>=3.9.0
+
+# 工具
+python-dotenv>=1.0.0
+tqdm>=4.66.0
+rich>=13.7.0           # 美化输出
+loguru>=0.7.2          # 日志
+
+# 检索增强
+rank-bm25>=0.2.2       # BM25 检索
+scikit-learn>=1.5.0    # 本地 rerank 备用
+
+# 开发/测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+
+# ============================================
+# Web UI (Gradio)
+# ============================================
+gradio>=4.44.0
+
+# ============================================
+# 多格式文档支持
+# ============================================
+
+# --- PDF 解析 ---
+pypdf>=3.17.0
+
+# --- Word 文档 ---
+python-docx>=1.1.0
+
+# --- PPT 解析 ---
+python-pptx>=0.6.23
+
+# --- Markdown ---
+markdown>=3.5.0
+
+# --- 图片 OCR ---
+# 方案一：PaddleOCR（GPU 加速，中文效果最好）
+# 安装: pip install paddlepaddle-gpu paddleocr
+# 方案二：Tesseract OCR（备选）
+# 安装: pip install pytesseract Pillow
+#       系统还需安装 tesseract-ocr
+
+# Pillow (图片处理)
+Pillow>=10.1.0
+
+# PaddleOCR 相关（GPU 服务器上安装）
+# paddlepaddle-gpu>=2.6.0
+# paddleocr>=2.7.0
+
+# pytesseract 备选
+# pytesseract>=0.3.10
