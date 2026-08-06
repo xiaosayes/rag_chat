@@ -54,15 +54,24 @@ tar -czf project.tar.gz ^
   .
 ```
 
-或者使用 PowerShell：
+或者使用 PowerShell（没有 `-Exclude` 参数时，手动删除不需要的文件后打包）：
 
 ```powershell
 # PowerShell 中执行
 cd E:/project/agent_project/pi/test
-Compress-Archive -Path .\* -DestinationPath project.zip -Exclude @("__pycache__", ".pytest_cache", "venv", "logs", "data/processed")
+
+# 先删除不需要的目录
+Remove-Item -Recurse -Force __pycache__/, .pytest_cache/, venv/, logs/, data/processed/ -ErrorAction SilentlyContinue
+
+# 再打包
+Compress-Archive -Path .\* -DestinationPath ..\project.zip
 ```
 
 > **注意**：打包时不包含 `data/processed/`（知识库数据），因为需要在服务器上重新构建。
+> **替代方案**：Windows 10+ 自带 `tar` 命令，无需安装：
+> ```cmd
+> tar -czf project.tar.gz --exclude=__pycache__ --exclude=.pytest_cache --exclude=venv --exclude=logs --exclude=data/processed .
+> ```
 
 ---
 
