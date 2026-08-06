@@ -30,7 +30,27 @@
 
 ## 更新日志
 
-### v1.3.3 (2024-08) — 当前版本
+### v1.3.4 (2024-08) — 当前版本
+
+#### Bug 修复（第八轮生产环境修复，P0×3 + P1×1 + P2×1 + 环境×2）
+
+> 本轮修复全部来自 Linux 服务器生产环境实测暴露的问题（构建失败、Web UI 白屏、防幻觉误报）。
+
+- **P0 Embedding 批大小超 API 上限**：`text-embedding-v3` 单请求最多 10 条文本，默认 `embedding_batch_size=16` 导致构建知识库时全部批次 400 失败；默认值改为 10，并在 `BailianEmbedding` 构造时对超限配置钳制（>10 → 10，非整数回退）并告警，存量 `.env` 无需修改
+- **P0 确定性 API 错误被无效重试且无详情**：Embedding / LLM / Reranker 非 200 分支补全服务端 `resp.message`（此前只记状态码，根因不可见）；4xx（除 429 限流）为确定性客户端错误，新增 `FatalAPIError` 快速失败不再重试，429/5xx 仍按原退避重试
+- **P0 Web UI 白屏（Gradio 6 兼容）**：Gradio 6.0 移除 `Chatbot(show_copy_button/bubble_full_width)` 与 `Blocks(theme/css)` 参数，按主版本分支兼容（6.x 用 `buttons=["copy"]`/`layout="bubble"`，theme/css 移到 `launch()`），4/5/6.x 均可运行
+- **P1 防幻觉检查误报**：`verify_answer_grounding` 将 LLM 回答中的结构化字段标签（`**推荐理由**` 等）当作名称、且名称变体（`清明上河图（北宋张择端本）` vs `清明上河图`）精确比较不匹配导致大面积误报；新增字段标签黑名单 + 名称变体（包含关系）匹配，真实幻觉仍能检出
+- **P2 Web UI 白屏（依赖版本约束）**：Gradio 6.x 依赖 `starlette>=1.0.1`，但 starlette 1.4.0 的 `GZipResponder` 新增必填 keyword-only `thread_minimum_size` 与 gradio 6.22 不兼容（ASGI 请求崩溃）；requirements.txt 显式约束 `starlette>=1.0.1,<1.4` + `fastapi>=0.115.2,<1.0` 并注释说明
+- **环境加固**：requirements.txt 补充配套版本约束与注释，防止新环境装到不兼容组合
+
+#### 修改文件
+- `src/embeddings.py`、`src/llm.py`、`src/reranker.py`、`src/utils.py`、`src/config.py`、`src/rag_pipeline.py`、`src/chunking.py`、`app.py`、`requirements.txt`、`tests/test_review_findings.py`、`tests/test_edge_cases.py`
+
+**全量测试**：`pytest tests/ -q` → **203 passed**（第七轮 186 + 本轮新增 17）
+
+---
+
+### v1.3.3 (2024-08)
 
 #### Bug 修复（第七轮复测，P0×2 + P1×6 + 连带 P0×1）
 - **P0 重建时向量库残留陈旧数据**：`build_knowledge_base` / `build_knowledge_base_from_documents` 在 `overwrite=False` 重建后调用新增的 `VectorStore.delete_stale_chunks()`，清理已移除/变更切片的旧向量，避免语义检索返回知识库中已不存在的陈旧结果（与 BM25/缓存不一致）
@@ -1047,6 +1067,20 @@ A: 只需 3 步：
 
 ### Q: Conda 环境的名称是什么？
 A: `cultural-relics-rag`。使用 `conda activate cultural-relics-rag` 激活。
+
+### Q: 构建知识库报 Embedding 400 错误怎么办？
+A: 先看报错中的 `resp.message`（bug-095 起已输出服务端详情），常见三种原因：
+1. **批量超限**：`text-embedding-v3` 单请求最多 10 条，报 `batch size ... larger than 10`。代码已默认 `EMBEDDING_BATCH_SIZE=10` 且自动钳制超限配置，无需手工处理；
+2. **维度不匹配**：`EMBEDDING_DIMENSION` 需为模型支持值（1024/768/512/256/128/64）；
+3. **文本超长**：单条文本超过模型 token 上限（8192 tokens），需缩短数据。
+
+### Q: Web UI 白屏 / 页面无内容怎么排查？
+A: 两步排查（bug-098/099/100）：
+1. 看启动日志是否报 `Chatbot.__init__() got an unexpected keyword argument`——Gradio 6.0 移除了 `show_copy_button` 等参数，代码已按版本分支兼容（4/5/6.x 均可），请同步最新 `app.py`；
+2. 看访问日志是否报 `GZipResponder.__init__() missing ... 'thread_minimum_size'`——**starlette 不能升到 1.4.x**（与 gradio 6.22 不兼容），请保持 `starlette>=1.0.1,<1.4`（已验证组合：gradio 6.22.0 + starlette 1.3.1 + fastapi 0.141.1）。
+
+### Q: 重排模型报 `Model not exist` 怎么办？
+A: 说明 `RERANKER_MODEL` 配置的模型在当前账号未开通或不存在。模型名因账号而异（如 `qwen3-reranker-4b` / `qwen3-reranker-8b`，部分账号仅 `qwen3-rerank`）；请到百炼控制台模型广场搜索确认可用模型名后更新 `.env`，或设 `RERANKER_ENABLED=false` 关闭重排（自动降级本地 TF-IDF，功能不受影响）。
 
 ---
 

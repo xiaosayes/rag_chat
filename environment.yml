@@ -52,7 +52,10 @@ dependencies:
   - aiohttp>=3.9.0
 
   # === Web UI ===
+  # bug-099/100：Gradio 6.x 需配套 starlette>=1.0.1,<1.4（1.4.0 与 gradio 6.22 不兼容）
   - gradio>=4.44.0
+  - starlette>=1.0.1,<1.4
+  - fastapi>=0.115.2,<1.0
 
   # === 测试 ===
   - pytest>=8.0.0

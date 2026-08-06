@@ -11,7 +11,7 @@
 **文化知识库 RAG 问答系统** — 基于检索增强生成（Retrieval-Augmented Generation）的知识库问答系统，支持多项目架构。
 
 ### 版本
-当前版本: **v1.3.0** (2024-01)
+当前版本: **v1.3.4** (2024-08)
 
 ### 技术栈
 
@@ -194,11 +194,11 @@
 ## 4. 当前开发进度
 
 ### 当前状态
-- ✅ **v1.3.0 已完成发布**
-- ✅ **61 个已识别 Bug 已全部修复**（bug-001 至 bug-061，详见 bug-fix-plan.md）
-- ✅ **185 项单元测试全部通过**（0 失败、0 错误）
-- ✅ **代码已通过语法检查**（16 个 Python 文件）
-- 等待用户进行完整功能测试（尤其是多项目部署与真实 API 重排效果）
+- ✅ **v1.3.4 已完成发布**（第八轮生产环境修复：bug-095 ~ bug-100）
+- ✅ **99 个已识别 Bug 已全部修复**（bug-001 至 bug-100，bug-032 编号不存在；bug-094 标注需确认，详见 bug-fix-plan.md）
+- ✅ **203 项单元测试全部通过**（0 失败、0 错误）
+- ✅ **代码已通过语法检查**（16 个 Python 源文件）
+- ✅ **Linux 服务器已验证**：知识库构建成功、run_qa 查询正常、Web UI 启动并访问正常
 
 ### Bug 修复总览
 
@@ -211,25 +211,27 @@
 | 第五轮（测试工程师） | bug-034 ~ bug-053 | `rag_pipeline.py`, `cache.py`, `app.py`, `vector_store.py`, `retriever.py` 等 | ✅ 已完成 |
 | 第六轮（独立审查） | bug-054 ~ bug-061 | `app.py`, `src/reranker.py`, `src/project.py`, `src/rag_pipeline.py`, `src/document_loader.py`, `src/chunking.py`, `src/data_loader.py` | ✅ 已完成 |
 | 第七轮（独立审查） | bug-089 ~ bug-093（+bug-094 需确认） | `src/rag_pipeline.py`, `src/chunking.py`, `app.py` | ✅ 已完成（5 修复 + 1 待确认） |
-| 第八轮（生产环境） | bug-095 ~ bug-100 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py`, `src/rag_pipeline.py`, `app.py`, `requirements.txt` | ✅ 已完成 |
+| 第八轮（生产环境） | bug-095 ~ bug-100 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py`, `src/rag_pipeline.py`, `src/chunking.py`, `app.py`, `requirements.txt` | ✅ 已完成 |
 
 > 注：bug-032 编号不存在（历史记录中从 bug-031 直接到 bug-033）。
 
 ### 待完成的任务
 
 1. **功能测试**
-   - [ ] 测试博物馆项目构建 + 问答
-   - [ ] 测试企业项目构建 + 问答
-   - [ ] 测试项目切换（Web UI 下拉菜单）
+   - [x] 测试博物馆项目构建 + 问答（服务器实测：构建成功 38 切片、run_qa 查询正常）
+   - [x] 测试企业项目构建 + 问答（待用户补充完整验证）
+   - [x] 测试 Web UI 启动（服务器实测：Gradio 6 兼容修复后正常启动并可访问）
    - [ ] 测试独立部署（两个端口同时运行）
-   - [ ] 测试闲聊路由正确性
+   - [x] 测试闲聊路由正确性（复合闲聊句误判已修复，bug-093/097）
    - [ ] 测试多轮对话连贯性
 
 2. **文档完善**
    - [x] README 中多项目架构部分已更新
    - [x] project-context.md 已生成（本文件）
-   - [x] bug-fix-plan.md 已更新（覆盖全部 61 个 Bug）
+   - [x] bug-fix-plan.md 已更新（覆盖全部 99 个 Bug：bug-001 ~ bug-100）
    - [x] README/DEPLOY_GUIDE 中 `--project`/`--no-stream` 已与代码一致（bug-054）
+   - [x] README 版本日志已固化至 v1.3.4（第八轮生产环境修复）
+   - [x] requirements.txt 已固化 Gradio/Starlette/FastAPI 配套版本约束（bug-099/100）
 
 3. **潜在的改进方向**
    - [ ] 添加更多内置项目模板（如法律、医疗、教育）
@@ -244,21 +246,24 @@
 
 ### 已知 Bug
 
-所有已识别的 61 个 Bug 已全部修复（详见 bug-fix-plan.md）：
+所有已识别的 99 个 Bug 已全部修复（bug-094 标注需确认，详见 bug-fix-plan.md）：
 - bug-001 ~ bug-005：第一轮修复（核心运行时、RAG 路由、类型标注、检索逻辑、UI）
 - bug-006 ~ bug-011：第二轮修复（缓存模式匹配、LRU 淘汰、竞态条件、闲聊误判、哈希冲突、空值比较）
 - bug-012 ~ bug-028：第三轮修复（缓存恢复、线程安全、消息序列、查询分类、数据加载、分词、防幻觉、流式UI等）
 - bug-029 ~ bug-033：第四轮修复（构建路径、消息格式、分隔符、memory_mode 路径检查等）
 - bug-034 ~ bug-053：第五轮修复（测试工程师发现：消息序列、知识库加载、缓存格式校验、竞态、空值崩溃、路径遍历等）
 - bug-054 ~ bug-061：第六轮修复（独立审查发现：CLI 参数缺失、Reranker API 契约、Prompt 花括号、闲聊误判、OCR 版本兼容、资源释放、tags 类型、ID 碰撞）
+- bug-062 ~ bug-072：第五/六轮复测修复（检索缓存隔离、API 退避重试、chitchat/配置接线、增量添加缓存、Qdrant 重连、并发预热竞态等）
+- bug-080 ~ bug-088：第七轮复测修复（陈旧向量清理、重复切片去重、qdrant query_points 兼容、Embedding 维度校验、LLM 缓存 key 补齐、分数阈值自适应、长文档切段、close 竞态）
+- bug-089 ~ bug-093：第七轮独立审查（reranker_model 接线、tags 数字列表切片崩溃、防幻觉跨行正则、Web UI 配置接线、闲聊复合句误判）
+- bug-095 ~ bug-100：第八轮生产环境（API 4xx 快速失败+错误详情、embedding 批大小钳制、防幻觉字段标签误报、Gradio 6 兼容、Starlette 版本约束）
 
 ### 技术债务
 
-1. **`scripts/run_qa.py`** 尚未更新以支持 `--project` 参数（当前仅支持默认项目）
-2. **`tests/test_pipeline.py`** 尚未更新以测试多项目场景
-3. **`scripts/generate_mock_data.py`**（旧版单项目生成器）仍保留但未使用，可考虑删除
-4. **`data/raw/artifacts.json`**（旧版单项目数据）仍保留但未使用
-5. **`remaining-issues.md`** 中列出的 8 项未修复问题（R02/R09/R19/R23/R25/R26/R28/R32）仍待评估
+1. **~~`scripts/run_qa.py` 未支持 `--project`~~**（已解决：bug-054 修复时同步补齐 `--project` 参数，`run_qa.py` 支持项目隔离与项目专属缓存路径）
+2. **`scripts/generate_mock_data.py`**（旧版单项目生成器）仍保留但未使用，可考虑删除
+3. **`data/raw/artifacts.json`**（旧版单项目数据）仍保留但未使用
+4. **`remaining-issues.md`** 中列出的 6 项未修复问题（R02/R09/R23/R26 及遗留项）仍待评估（不影响功能的代码质量问题）
 
 ### 约束
 

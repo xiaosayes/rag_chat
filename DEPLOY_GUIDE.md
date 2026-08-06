@@ -128,6 +128,12 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+> ⚠️ **版本配套注意（bug-099/100）**：Gradio 6.x 与 Starlette 版本强绑定。
+> requirements.txt 已固化约束 `starlette>=1.0.1,<1.4` + `fastapi>=0.115.2,<1.0`，
+> 请勿手动升级 starlette 到 1.4.x（其 `GZipResponder` 新增必填参数 `thread_minimum_size`，
+> 会导致 Web UI 白屏：`TypeError: GZipResponder.__init__() missing 1 required keyword-only argument`）。
+> 已验证兼容组合：gradio 6.22.0 + starlette 1.3.1 + fastapi 0.141.1。
+
 ### 3.5 安装 PaddleOCR（可选，如需 OCR 图片识别）
 
 ```bash
