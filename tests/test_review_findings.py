@@ -231,9 +231,10 @@ class TestIsKBRelatedFalsePositives:
         assert pipeline.is_kb_related("谢谢你的帮助") == True
 
     def test_hello_with_punctuation(self):
-        """'你好，你是谁？' 是纯闲聊但被判为知识库相关。"""
+        """'你好，你是谁？' 是纯闲聊，应判为闲聊（bug-093 修复：复合闲聊句
+        剥离关键词后剩标点/语气词 → 判为闲聊）。"""
         pipeline = RAGPipeline(local_mode=True)
-        assert pipeline.is_kb_related("你好，你是谁？") == True
+        assert pipeline.is_kb_related("你好，你是谁？") == False
 
 
 # =============================================================================
@@ -698,3 +699,123 @@ class TestClassifyDeterminism:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# =============================================================================
+# 44. bug-095：API 确定性错误（4xx 非 429）应快速失败并带出服务端详情
+#     （生产环境 Embedding 返回 400 时，此前只记状态码 + 无效重试 3 次，
+#       根因不可见。修复后日志/异常携带 resp.message，且不重试确定性错误）
+# =============================================================================
+class TestFatalAPIErrorFastFail:
+    def _resp(self, status, message):
+        r = MagicMock()
+        r.status_code = status
+        r.message = message
+        return r
+
+    def test_embed_batch_400_fails_fast_with_detail(self):
+        """400（确定性客户端错误）：仅调用 1 次即失败，异常携带服务端详情"""
+        emb = BailianEmbedding(dimension=1024, max_retries=3)
+        resp = self._resp(400, "InvalidParameter: dimension not supported")
+        with patch("src.embeddings.TextEmbedding.call", return_value=resp) as mock_call, patch("time.sleep"):
+            with pytest.raises(RuntimeError) as exc_info:
+                emb.embed_batch(["文本1", "文本2"])
+            assert "dimension not supported" in str(exc_info.value), "异常应携带 resp.message"
+        assert mock_call.call_count == 1, "确定性错误不应重试"
+
+    def test_embed_one_400_fails_fast(self):
+        """embed_one 400：仅调用 1 次，异常携带服务端详情"""
+        emb = BailianEmbedding(dimension=1024, max_retries=3)
+        resp = self._resp(400, "InvalidParameter: bad input")
+        with patch("src.embeddings.TextEmbedding.call", return_value=resp) as mock_call, patch("time.sleep"):
+            with pytest.raises(RuntimeError) as exc_info:
+                emb.embed_one("文本")
+            assert "bad input" in str(exc_info.value)
+        assert mock_call.call_count == 1
+
+    def test_429_still_retries(self):
+        """429 限流：仍按退避重试（3 次）"""
+        emb = BailianEmbedding(dimension=1024, max_retries=3)
+        resp = self._resp(429, "rate limit")
+        with patch("src.embeddings.TextEmbedding.call", return_value=resp) as mock_call, patch("time.sleep"):
+            with pytest.raises(RuntimeError):
+                emb._embed_batch(["文本"])
+        assert mock_call.call_count == 3, "429 应重试"
+
+    def test_500_still_retries(self):
+        """5xx 服务端错误：仍按退避重试（3 次）"""
+        emb = BailianEmbedding(dimension=1024, max_retries=3)
+        resp = self._resp(500, "internal error")
+        with patch("src.embeddings.TextEmbedding.call", return_value=resp) as mock_call, patch("time.sleep"):
+            with pytest.raises(RuntimeError):
+                emb._embed_batch(["文本"])
+        assert mock_call.call_count == 3
+
+    def test_llm_chat_400_fails_fast(self):
+        """LLM chat 400：仅调用 1 次，异常携带服务端详情"""
+        from src.llm import BailianLLM
+        llm = BailianLLM(max_retries=3)
+        resp = self._resp(400, "InvalidParameter: messages too long")
+        with patch("src.llm.Generation.call", return_value=resp) as mock_call, patch("time.sleep"):
+            with pytest.raises(RuntimeError) as exc_info:
+                llm.chat([{"role": "user", "content": "hi"}])
+            assert "messages too long" in str(exc_info.value)
+        assert mock_call.call_count == 1
+
+    def test_llm_chat_stream_400_fails_fast(self):
+        """LLM chat_stream 400：仅调用 1 次，异常携带服务端详情"""
+        from src.llm import BailianLLM
+        llm = BailianLLM(max_retries=3)
+        resp = self._resp(400, "InvalidParameter: messages too long")
+        with patch("src.llm.Generation.call", return_value=[resp]) as mock_call, patch("time.sleep"):
+            with pytest.raises(RuntimeError) as exc_info:
+                list(llm.chat_stream([{"role": "user", "content": "hi"}]))
+            assert "messages too long" in str(exc_info.value)
+        assert mock_call.call_count == 1
+
+    def test_reranker_400_fails_fast(self):
+        """Reranker 400：仅调用 1 次后降级本地重排（不向调用方抛错）"""
+        from src.chunking import Chunk
+        reranker = BailianReranker(max_retries=3)
+        resp = self._resp(400, "InvalidParameter: bad model")
+        candidates = [(Chunk(id="1", artifact_id="a", artifact_name="A", text="文本1"), 0.5),
+                      (Chunk(id="2", artifact_id="b", artifact_name="B", text="文本2"), 0.4)]
+        with patch("src.reranker.TextReRank.call", return_value=resp) as mock_call, patch("time.sleep"):
+            # rerank() 内部捕获异常后降级本地重排，不会抛错
+            result = reranker.rerank("问题", candidates)
+            assert len(result) == 2
+        assert mock_call.call_count == 1
+
+
+# =============================================================================
+# 45. bug-096：embedding_batch_size 超过 API 上限（10）导致构建 400 失败
+#     （生产环境实测：默认 16 > 10，text-embedding-v3 单请求最多 10 条）
+# =============================================================================
+class TestEmbeddingBatchSizeClamp:
+    def test_default_batch_size_within_api_limit(self):
+        """默认配置不得超过 API 上限 10"""
+        from src.config import settings
+        assert settings.embedding_batch_size <= BailianEmbedding.MAX_BATCH_SIZE
+
+    def test_batch_size_16_clamped_to_10(self):
+        """超过上限的配置被钳制"""
+        emb = BailianEmbedding(batch_size=16)
+        assert emb.batch_size == 10
+
+    def test_batch_size_8_kept(self):
+        """合法配置保持不变"""
+        emb = BailianEmbedding(batch_size=8)
+        assert emb.batch_size == 8
+
+    def test_batch_size_non_int_falls_back(self):
+        """非整数配置回退到上限值（防御）"""
+        from unittest.mock import MagicMock
+        emb = BailianEmbedding(batch_size=MagicMock())
+        assert emb.batch_size == 10
+
+    def test_embed_batch_splits_within_limit(self):
+        """38 个文本按 batch_size=10 分批，每批不超过 API 上限"""
+        emb = BailianEmbedding(batch_size=16)  # 钳制为 10
+        texts = ["t"] * 38
+        batches = [texts[i : i + emb.batch_size] for i in range(0, len(texts), emb.batch_size)]
+        assert all(len(b) <= 10 for b in batches)
+        assert [len(b) for b in batches] == [10, 10, 10, 8]

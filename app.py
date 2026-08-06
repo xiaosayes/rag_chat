@@ -146,7 +146,7 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
         first_token_received = False
         try:
             for item in pipe.query_stream(
-                question=question, top_k=10, rerank=True,
+                question=question, top_k=settings.retriever_top_k, rerank=settings.reranker_enabled,
                 conversation_history=conversation_history,
             ):
                 if isinstance(item, dict) and item.get("type") == "meta":
@@ -186,7 +186,7 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             yield history, ""
 
             result = pipe.query(
-                question=question, top_k=10, rerank=True,
+                question=question, top_k=settings.retriever_top_k, rerank=settings.reranker_enabled,
                 conversation_history=conversation_history,
             )
             answer = result["answer"]

@@ -9,6 +9,16 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 
+class FatalAPIError(RuntimeError):
+    """
+    确定性 API 错误（4xx 非 429 限流），重试无意义，直接向调用方抛出。
+
+    bug-095 修复：HTTP 400（参数非法/文本超长等）为客户端错误，
+    重试无法解决且会浪费 API 调用与时间；抛出后由调用方展示服务端错误详情，
+    便于定位根因（此前只记录状态码，服务端错误原因不可见）。
+    """
+
+
 def setup_logger(level: str = "INFO") -> None:
     """配置日志"""
     logger.remove()

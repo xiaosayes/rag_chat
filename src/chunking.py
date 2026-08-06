@@ -97,7 +97,9 @@ class SmartChunking(ChunkingStrategy):
                     first_sentence = artifact.description[:100] + ("..." if len(artifact.description) > 100 else "")
 
             tags = artifact.tags if isinstance(artifact.tags, list) else []  # bug-060：tags 为标量时按空处理
-            tags_str = "、".join(tags[:5]) if tags else ""
+            # bug-090 修复：tags 元素可能为非字符串（如 JSON 数字列表 [1,2,3]），
+            # join 前统一转 str，避免 "、".join 抛 TypeError 导致整件文物切片被静默丢弃
+            tags_str = "、".join(str(t) for t in tags[:5]) if tags else ""
             summary_parts = [
                 f"名称：{artifact.name}",
                 f"朝代：{artifact.dynasty}",

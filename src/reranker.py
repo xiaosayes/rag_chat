@@ -16,6 +16,7 @@ from dashscope import TextReRank
 
 from src.config import settings
 from src.chunking import Chunk
+from src.utils import FatalAPIError
 
 
 class BailianReranker:
@@ -120,9 +121,17 @@ class BailianReranker:
                         f"{resp.status_code} - {resp.message}"
                     )
                     # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试
+                    # bug-095 修复：4xx（除 429 外）为确定性客户端错误，直接失败并带出服务端详情
+                    if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                        raise FatalAPIError(
+                            f"Qwen3-Reranker API 返回 {resp.status_code}: {resp.message}"
+                        )
                     if attempt < self.max_retries - 1:
                         time.sleep(1 * (attempt + 1))
             except Exception as e:
+                # bug-095 修复：确定性客户端错误直接抛出，不进入重试循环
+                if isinstance(e, FatalAPIError):
+                    raise
                 logger.warning(
                     f"Qwen3-Reranker 请求失败 (attempt {attempt + 1}): {e}"
                 )

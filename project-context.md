@@ -210,6 +210,8 @@
 | 第四轮 | bug-029 ~ bug-033 | `build_knowledge_base.py`, `app.py`, `rag_pipeline.py` | ✅ 已完成 |
 | 第五轮（测试工程师） | bug-034 ~ bug-053 | `rag_pipeline.py`, `cache.py`, `app.py`, `vector_store.py`, `retriever.py` 等 | ✅ 已完成 |
 | 第六轮（独立审查） | bug-054 ~ bug-061 | `app.py`, `src/reranker.py`, `src/project.py`, `src/rag_pipeline.py`, `src/document_loader.py`, `src/chunking.py`, `src/data_loader.py` | ✅ 已完成 |
+| 第七轮（独立审查） | bug-089 ~ bug-093（+bug-094 需确认） | `src/rag_pipeline.py`, `src/chunking.py`, `app.py` | ✅ 已完成（5 修复 + 1 待确认） |
+| 第八轮（生产环境） | bug-095、bug-096 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py` | ✅ 已完成 |
 
 > 注：bug-032 编号不存在（历史记录中从 bug-031 直接到 bug-033）。
 

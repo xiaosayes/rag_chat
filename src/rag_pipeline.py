@@ -122,6 +122,13 @@ class RAGPipeline:
     # bug-057 修复：避免此类天气/寒暄问题被误判为知识库问题
     CHITCHAT_SUFFIXES = ("怎么样", "怎样", "如何")
 
+    # 闲聊判定中允许出现的语气词（bug-057 补充"呢"；bug-093 补充"啦/喽/哟"）
+    CHITCHAT_PARTICLES = "，。！？,。!? ～~啊呀哦嗯吧呗吗呢啦喽哟"
+
+    # 按长度降序排列的闲聊关键词（bug-093：长关键词优先剥离，
+    # 避免"今天天气怎么样"先被"天气"拆散成"今天怎么样"导致残渣误判）
+    _CHITCHAT_KEYWORDS_SORTED = sorted(CHITCHAT_KEYWORDS, key=len, reverse=True)
+
     # 查询分类模式（定义为类常量，避免每次调用重建）
     _RECOMMEND_PATTERNS = [
         (["推荐", "给我推荐", "帮我推荐", "推荐几个", "推荐一些"], 10),
@@ -203,6 +210,9 @@ class RAGPipeline:
             bm25_weight=1.0 - settings.retriever_hybrid_weight,
         )
         self.reranker = BailianReranker(
+            # bug-089 修复：接线 RERANKER_MODEL 配置。此前未传 model 参数，
+            # .env 中 reranker_model=qwen3-reranker-8b 永远不生效（始终用默认 4b）
+            model=settings.reranker_model,
             top_k=settings.reranker_top_k,
         )
         self.llm = BailianLLM(
@@ -691,22 +701,28 @@ class RAGPipeline:
 
         q_lower = q.lower()
 
-        # 使用精确匹配 + 前缀匹配，避免子串误判
-        for pattern in RAGPipeline.CHITCHAT_KEYWORDS:
-            # 精确匹配：问题完全等于闲聊关键词
-            if q_lower == pattern.lower():
-                return False
-            # 前缀匹配：问题以闲聊关键词开头且剩余部分仅为标点/语气词
-            # bug-057 修复：白名单补充"呢"，并允许"怎么样/怎样/如何"等常见语气后缀，
-            # 避免"今天天气怎么样""你好呢"被误判为知识库问题
-            if q_lower.startswith(pattern.lower()):
-                extra = q_lower[len(pattern):].strip()
-                if (
-                    not extra
-                    or extra in RAGPipeline.CHITCHAT_SUFFIXES
-                    or all(c in '，。！？,。!? ～~啊呀哦嗯吧呗吗呢' for c in extra)
-                ):
-                    return False
+        # bug-093 修复：复合闲聊判定（替换原"精确+前缀匹配"，覆盖其全部场景）：
+        #   1. 按长度降序剥离问题中出现的所有闲聊关键词（避免"今天天气"被"天气"先拆散）
+        #   2. 剩余部分为空 / 仅为标点语气词 / 命中语气后缀（怎么样/怎样/如何）→ 判为闲聊
+        # 这样可正确处理多关键词组合的纯闲聊句，如"你好，你是谁"（旧实现误判为知识库问题）、
+        # "谢谢啦""再见啦"（语气词"啦"不在旧白名单中）。
+        remaining = q_lower
+        for pattern in RAGPipeline._CHITCHAT_KEYWORDS_SORTED:
+            remaining = remaining.replace(pattern.lower(), "")
+        remaining = remaining.strip()
+
+        if not remaining:
+            # 全部由闲聊关键词构成（如"你好""谢谢你""今天天气怎么样"）
+            return False
+        if remaining in RAGPipeline.CHITCHAT_SUFFIXES:
+            return False
+        # 去掉语气词后只剩语气后缀（如"怎么样啊"→"怎么样"）
+        pure = "".join(c for c in remaining if c not in RAGPipeline.CHITCHAT_PARTICLES)
+        if pure in RAGPipeline.CHITCHAT_SUFFIXES:
+            return False
+        if all(c in RAGPipeline.CHITCHAT_PARTICLES for c in remaining):
+            # 仅剩标点/语气词（如"你好，你是谁"剥离后剩"，"）
+            return False
 
         return True
 
@@ -1141,8 +1157,10 @@ class RAGPipeline:
 
         # 从上下文中提取来源名称（支持多种格式： 【】、**加粗**、【】、「」、《》）
         # bug-019 修复：增加 **加粗**、「」、《》 等格式支持
+        # bug-091 修复：与 answer 侧一致补充 re.DOTALL，支持跨行名称提取，
+        # 避免 context 中跨行名称无法匹配导致合法引用被误判为"不在上下文中"
         context_names = set()
-        for match in re.finditer(r"【(.+?)】|\*\*(.+?)\*\*|[「『](.+?)[」』]|[《](.+?)[》]", context):
+        for match in re.finditer(r"【(.+?)】|\*\*(.+?)\*\*|[「『](.+?)[」』]|[《](.+?)[》]", context, re.DOTALL):
             name = next(g for g in match.groups() if g is not None).strip()
             if name and len(name) >= 2:
                 context_names.add(name)

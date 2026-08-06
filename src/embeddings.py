@@ -14,6 +14,7 @@ from dashscope import TextEmbedding
 
 from src.config import settings
 from src.cache import embedding_cache
+from src.utils import FatalAPIError
 
 
 class BailianEmbedding:
@@ -21,6 +22,12 @@ class BailianEmbedding:
     阿里云百炼 Embedding API 封装
     文档：https://help.aliyun.com/zh/dashscope/developer-reference/text-embedding
     """
+
+    # 单请求最大批次数（text-embedding-v3 API 限制：input.contents 不超过 10 条）
+    # 实测超限报错：<400> InternalError.Algo.InvalidParameter: Value error,
+    #   batch size is invalid, it should not be larger than 10.: input.contents
+    # bug-096 修复：默认 batch_size=16 超出该上限，导致构建知识库时全部批次 400 失败
+    MAX_BATCH_SIZE = 10
 
     def __init__(
         self,
@@ -33,6 +40,19 @@ class BailianEmbedding:
         self.model = model
         self.dimension = dimension
         self.api_key = api_key or settings.dashscope_api_key
+        # bug-096 修复：批大小超过 API 上限（10）时钳制；非整数配置回退到上限值，
+        # 避免 .env 中配置的 batch_size 过大/异常导致构建时全部批次 400 失败
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+            logger.warning(
+                f"embedding_batch_size 配置异常（{batch_size!r}），使用默认 {self.MAX_BATCH_SIZE}"
+            )
+            batch_size = self.MAX_BATCH_SIZE
+        elif batch_size > self.MAX_BATCH_SIZE:
+            logger.warning(
+                f"embedding_batch_size={batch_size} 超过 API 上限 "
+                f"{self.MAX_BATCH_SIZE}，已钳制为 {self.MAX_BATCH_SIZE}"
+            )
+            batch_size = self.MAX_BATCH_SIZE
         self.batch_size = batch_size
         self.max_retries = max_retries
 
@@ -64,9 +84,16 @@ class BailianEmbedding:
                         f"{resp.status_code} - {resp.message}"
                     )
                     # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试
+                    # bug-095 修复：4xx（除 429 外）为确定性客户端错误，直接失败并带出服务端详情
+                    if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                        raise FatalAPIError(
+                            f"Embedding API 返回 {resp.status_code}: {resp.message}"
+                        )
                     if attempt < self.max_retries - 1:
                         time.sleep(1 * (attempt + 1))
             except Exception as e:
+                if isinstance(e, FatalAPIError):
+                    raise
                 logger.warning(
                     f"Embedding 请求失败 (attempt {attempt + 1}): {e}"
                 )
@@ -153,12 +180,22 @@ class BailianEmbedding:
                 else:
                     logger.warning(
                         f"Batch Embedding 返回异常 (attempt {attempt + 1}): "
-                        f"{resp.status_code}"
+                        # bug-095 修复：补全服务端错误详情（resp.message），
+                        # 此前只记录状态码（如 400），真实原因不可见，难以定位根因
+                        f"{resp.status_code} - {resp.message}"
                     )
                     # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试
+                    # bug-095 修复：4xx（除 429 外）为确定性客户端错误，直接失败并带出服务端详情
+                    if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                        raise FatalAPIError(
+                            f"Batch Embedding API 返回 {resp.status_code}: {resp.message}"
+                        )
                     if attempt < self.max_retries - 1:
                         time.sleep(1 * (attempt + 1))
             except Exception as e:
+                # bug-095 修复：确定性客户端错误直接抛出，不进入重试循环
+                if isinstance(e, FatalAPIError):
+                    raise
                 logger.warning(
                     f"Batch Embedding 请求失败 (attempt {attempt + 1}): {e}"
                 )

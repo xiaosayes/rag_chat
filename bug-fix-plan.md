@@ -1347,3 +1347,211 @@
 | bug-072 | 实验：预热期间并发请求阻塞至 `_is_built=True` 才返回 | ✅ 已修复 |
 
 **全量测试**：`pytest tests/ -q` → **185 passed**（3 项修复全部完成，0 失败 0 错误）。
+
+---
+
+## 新增问题（第七轮复测审查 - 精准修复）
+
+> 审查方式：全量源码复读 + 定向实验验证（数字 tags 数据丢失、跨行名称防幻觉、闲聊复合句路由）
+> 本轮发现 P1×2、P2×3、P3×1（需确认），共 **6 项**，5 项修复完成，1 项标注需确认
+> 全量测试：`pytest tests/ -q` → **186 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-089 | `settings.reranker_model` 未接线，RERANKER_MODEL 配置永远不生效（始终用默认 4b） | `src/rag_pipeline.py` | P1 | 已修复 |
+| bug-090 | `SmartChunking.chunk` 中 `"、".join(tags)` 对 tags 数字列表抛 TypeError，整件文物切片静默丢失 | `src/chunking.py` | P1 | 已修复 |
+| bug-091 | `verify_answer_grounding` context 侧正则缺 `re.DOTALL`（bug-027 修复不完整），跨行名称误报"不在上下文中" | `src/rag_pipeline.py` | P2 | 已修复 |
+| bug-092 | `app.py` 硬编码 `top_k=10, rerank=True` 绕过 settings.retriever_top_k / settings.reranker_enabled（bug-065 接线不完整） | `app.py` | P2 | 已修复 |
+| bug-093 | `is_kb_related` 复合闲聊句与语气词缺口："你好，你是谁"（UI 示例按钮）、"谢谢啦"、"再见啦"、"嗨喽" 被误判为知识库问题 | `src/rag_pipeline.py` | P2 | 已修复 |
+| bug-094 | `DocumentLoader.load_file` 路径遍历修复不完整（bug-023 声明的"根目录限制"未实现） | `src/document_loader.py` | P3 | 需确认（不改代码） |
+
+## 问题详情
+
+### [bug-089] `settings.reranker_model` 未接线，重排模型配置永远不生效（P1）
+
+- **根因分析**：`RAGPipeline.__init__` 中创建 `BailianReranker(top_k=settings.reranker_top_k)` 未传 `model` 参数，而 `BailianReranker` 的 model 默认值为 `"qwen3-reranker-4b"`。`grep` 全项目仅 `src/config.py:119` 定义处引用 `reranker_model`，无任何调用方。`.env` 中 `RERANKER_MODEL=qwen3-reranker-8b` 完全无效。
+- **影响范围**：所有启用重排的查询（Web UI / CLI / API）。文档宣称"高精度重排可选 qwen3-reranker-8b"，实际永远使用 4b。
+- **修复方案**：`BailianReranker(model=settings.reranker_model, top_k=settings.reranker_top_k)`。
+- **风险分析**：低。仅接线配置，默认值 `qwen3-reranker-4b` 不变，行为不变。
+- **测试验证**：设置 `settings.reranker_model='qwen3-reranker-8b'` 后构造 pipeline，`pipeline.reranker.model == 'qwen3-reranker-8b'`。
+
+### [bug-090] tags 为数字列表时整件文物切片静默丢失（P1）
+
+- **根因分析**：`SmartChunking.chunk()` 中 `tags_str = "、".join(tags[:5])`，当 `artifact.tags` 为数字列表（如 JSON `"tags": [1, 2, 3]`）时 `join` 抛 `TypeError: sequence item 0: expected str instance, int found`。异常被 `ChunkingPipeline.process()` 的 try/except 捕获后 `continue`，**整件文物无任何切片产出**（实测：同一批 2 件文物，正常文物 2 切片、数字 tags 文物 0 切片）。bug-060 只处理了标量 tags（`tags=123`），未处理列表内元素为非字符串的情况。
+- **影响范围**：JSON/CSV 数据源中 tags 字段为数字/布尔数组的文物记录，构建知识库时静默丢失。
+- **修复方案**：join 前统一转字符串：`tags_str = "、".join(str(t) for t in tags[:5]) if tags else ""`。
+- **风险分析**：低。仅增加类型防御，正常字符串列表路径行为不变。
+- **测试验证**：`Artifact(name='数字tags文物', tags=[1,2,3])` 经 `ChunkingPipeline.process` 正常产出切片（不再被丢弃）。
+
+### [bug-091] `verify_answer_grounding` context 侧正则缺 `re.DOTALL`（P2）
+
+- **根因分析**：bug-027 只给 answer 侧正则补了 `re.DOTALL`，context 侧 `re.finditer(..., context)` 未加标志。当 context 中名称跨行（如 `**司母戊\n鼎**`）时无法提取，而 answer 侧能提取 → 回答中合法引用被误判为"不在上下文中"（实测 `passed=False`，reason 列出跨行名称）。
+- **影响范围**：防幻觉检查的误报告警（仅日志，不影响回答内容）。
+- **修复方案**：context 正则补充 `re.DOTALL`，与 answer 侧保持一致。
+- **风险分析**：低。`【】` 非贪婪匹配在 context 中跨 chunk 时仍止于最近的 `】`，不会过度吞并。
+- **测试验证**：context 含 `**司母戊\n鼎**`、answer 含同名跨行引用 → `passed=True`。
+
+### [bug-092] `app.py` 硬编码 `top_k=10, rerank=True` 绕过配置（P2）
+
+- **根因分析**：bug-065 将 `settings.retriever_top_k` / `settings.reranker_enabled` 接线为 `query()`/`query_stream()` 的默认参数，但 `app.py` 的 `answer_question` 在两处调用中显式传 `top_k=10, rerank=True`，默认参数永不生效 → Web UI 中 `.env` 的 `RETRIEVER_TOP_K` / `RERANKER_ENABLED` 配置无效。
+- **影响范围**：Web UI 场景（CLI/SDK 走默认参数不受影响）。
+- **修复方案**：两处调用改用 `top_k=settings.retriever_top_k, rerank=settings.reranker_enabled`。
+- **风险分析**：低。默认值 10/True 与原有硬编码一致，行为不变。
+- **测试验证**：源码检查确认 app.py 两处调用均使用 settings 值。
+
+### [bug-093] `is_kb_related` 复合闲聊句与语气词缺口（P2）
+
+- **根因分析**：① 白名单缺常见语气词"啦/喽/哟"：`"谢谢啦"`、`"再见啦"`、`"嗨喽"` 剩余部分不在白名单 → 误判为知识库问题（实测 True）；② 前缀匹配无法处理多关键词组合的纯闲聊句：`"你好，你是谁"`（app.py 示例按钮）剥离前缀"你好"后剩余"你是谁"非白名单 → 误判为知识库问题（实测 True）。
+- **影响范围**：Web UI 示例按钮"你好，你是谁"及常见口语寒暄；KB 未构建时点击示例直接报"知识库未构建"错误，已构建时做一次无意义检索。
+- **修复方案**：改为"关键词剥离 + 残渣判定"：按长度降序剥离问题中所有闲聊关键词，剩余部分为空 / 仅为语气词（白名单补充"啦/喽/哟"）/ 命中语气后缀（"怎么样/怎样/如何"，含去语气词后命中）→ 判为闲聊。覆盖原精确+前缀匹配的全部场景，且能处理复合闲聊句。
+- **风险分析**：低。对真实知识库问题（剩余部分含实质内容）不影响；"说再见""谢谢你的帮助"（测试断言 True）等边界保持原语义。
+- **测试验证**：`"你好，你是谁"→False`、`"谢谢啦"→False`、`"再见啦"→False`、`"嗨喽"→False`、`"天气对文物保存有影响吗"→True`、`"谢谢你的帮助是什么文物"→True`、`"说再见"→True`；同步更新 1 个断言旧行为的测试（`test_hello_with_punctuation` 由 True 改为 False）。
+
+### [bug-094] `DocumentLoader.load_file` 路径遍历修复不完整（P3，需确认）
+
+- **根因分析**：bug-023 声明的修复方案为"添加路径解析检查，确保路径在允许的根目录内"，但当前实现仅 `path.resolve()` 规范化 + 存在性检查，**无任何根目录限制**。`load_file(Path("../secret.txt"))` 在文件存在时仍可读取项目根目录外的任意路径文件（仅文件不存在时才抛 `FileNotFoundError`）。
+- **影响范围**：当前 `load_file` 仅被内部代码路径调用（`load_directory` / `load_all_as_artifacts`，路径来自 CLI 参数），无外部暴露入口，实际风险低。且 `build_knowledge_base_from_documents` 允许用户指定任意目录（如 `--doc-path /home/user/docs`），硬性根目录限制会破坏合法用法。
+- **处理决定**：**需确认，不改代码**。修复方案的"根目录限制"与真实用法（任意路径）冲突，待产品层面确认是否有外部文件加载入口后，再决定是否引入白名单/根目录策略。
+- **测试验证**：无代码变更；记录待确认项。
+
+## 修复顺序
+
+1. bug-089：`src/rag_pipeline.py`（P1，配置不生效）
+2. bug-090：`src/chunking.py`（P1，数据静默丢失）
+3. bug-091：`src/rag_pipeline.py`（P2，防幻觉误报）
+4. bug-092：`app.py`（P2，配置接线不完整）
+5. bug-093：`src/rag_pipeline.py`（P2，闲聊路由误判）
+6. bug-094：`src/document_loader.py`（P3，需确认，暂不改）
+
+## 验证结果（第七轮）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-089 | `settings.reranker_model='qwen3-reranker-8b'` 后 pipeline.reranker.model 生效 | ✅ 已修复 |
+| bug-090 | `ChunkingPipeline.process([正常, 数字tags])` 均产出切片，不再静默丢弃 | ✅ 已修复 |
+| bug-091 | context 含跨行 `**司母戊\n鼎**` → grounding `passed=True` | ✅ 已修复 |
+| bug-092 | 源码确认 app.py 两处调用使用 `settings.retriever_top_k` / `settings.reranker_enabled` | ✅ 已修复 |
+| bug-093 | 复合闲聊句与语气词全部正确路由；`test_hello_with_punctuation` 断言更新 | ✅ 已修复 |
+| bug-094 | 记录待确认，无代码变更 | ⏸ 需确认 |
+
+**全量测试**：`pytest tests/ -q` → **186 passed**（0 失败 0 错误；同步更新 1 个断言旧行为的测试）。
+
+## 验证步骤（第七轮）
+
+### bug-089 验证
+1. `python -c "from src.config import settings; settings.reranker_model='qwen3-reranker-8b'; from src.rag_pipeline import RAGPipeline; print(RAGPipeline(local_mode=True).reranker.model)"` → `qwen3-reranker-8b`
+
+### bug-090 验证
+1. `python -c "from src.data_loader import Artifact; from src.chunking import ChunkingPipeline; print(sorted(set(c.artifact_name for c in ChunkingPipeline().process([Artifact(name='A', tags=[1,2,3]), Artifact(name='B', tags=['国宝'])]))))"` → 两件文物均在结果中
+
+### bug-091 验证
+1. `python -c` 构造 context 含 `**司母戊\n鼎**`、answer 含同名跨行引用 → `passed=True`（修复前为 False）
+
+### bug-092 验证
+1. `grep -n "top_k=settings\|rerank=settings" app.py` → 两处调用均使用 settings 值
+
+### bug-093 验证
+1. `python -c "from src.rag_pipeline import RAGPipeline; [print(q, RAGPipeline.is_kb_related(q)) for q in ['你好，你是谁','谢谢啦','再见啦','嗨喽','天气对文物保存有影响吗','说再见','谢谢你的帮助']]"` → 前三 False、后四 True
+2. `pytest tests/test_review_findings.py::TestIsKBRelatedFalsePositives -v` → 通过
+
+---
+
+## 新增问题（第八轮 - 生产环境修复）
+
+> 触发场景：服务器执行 `python scripts/build_knowledge_base.py --project museum --source json`
+> 时 Embedding API 返回 400，日志仅显示 `Batch Embedding 返回异常 (attempt N): 400`，
+> 服务端错误原因完全不可见，且确定性错误被无效重试 3 次（约浪费 10 秒）后才失败。
+> 全量测试：`pytest tests/ -q` → **193 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-095 | API 非 200 响应缺少错误详情且确定性错误（4xx 非 429）被无效重试：`_embed_batch`/`chat_stream` 只记状态码不记 `resp.message`；400 等客户端错误重试无意义 | `src/embeddings.py`、`src/llm.py`、`src/reranker.py`、`src/utils.py` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-095] API 确定性错误（4xx 非 429）无详情且被无效重试（P1）
+
+- **根因分析**：
+  1. **错误详情缺失**：`_embed_batch`（`src/embeddings.py:155-156`）与 `chat_stream`（`src/llm.py:164`）的非 200 分支只记录 `resp.status_code`（如 `400`），不记录 `resp.message`。而 `embed_one`/`chat`/`_rerank_with_api` 均记录 `status_code - resp.message`，行为不一致。生产环境 Embedding 返回 400 时，服务端的真实原因（如 `InvalidParameter: dimension not supported`、`input too long`、模型未开通等）完全不可见，用户无法定位根因。
+  2. **确定性错误被无效重试**：所有 API 调用路径对任何非 200 都退避重试 3 次。HTTP 400/401/403 等为确定性客户端错误，重试不可能成功，只浪费 API 调用与时间（实测 2 个批次 × 3 次 × ~2s ≈ 10s+），且掩盖真实错误。
+- **影响范围**：所有 API 调用路径（Embedding / LLM / Reranker）的云端/本地构建与查询；生产环境 API 配置错误（模型名、维度、订阅、文本超长）时故障不可诊断。
+- **修复方案**：
+  1. `src/utils.py` 新增共享异常 `FatalAPIError(RuntimeError)`；
+  2. `_embed_batch` / `chat_stream` 非 200 日志补全 `resp.message`；
+  3. 全部 5 条 API 路径（`embed_one` / `_embed_batch` / `chat` / `chat_stream` / `_rerank_with_api`）在 `400 <= status < 500 and status != 429` 时抛 `FatalAPIError`（携带 `resp.message`），`except` 中识别后直接向上抛出、不重试；429 限流与 5xx 仍按原退避重试逻辑。
+- **风险分析**：低。仅改变确定性 4xx 的处理（从"重试 3 次后失败"变为"立即失败"），成功路径与瞬时错误（429/5xx）行为不变；Reranker 路径的 `FatalAPIError` 仍被 `rerank()` 捕获后降级本地 TF-IDF，不向调用方抛错。
+- **测试验证**：新增 `TestFatalAPIErrorFastFail`（7 项）：400 → 仅 1 次调用且异常携带服务端详情；429/500 → 仍重试 3 次；LLM chat/chat_stream 400 快速失败；Reranker 400 → 降级本地重排。全部通过；`pytest tests/ -q` → **193 passed**。
+
+## 验证结果（第八轮）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-095 | `TestFatalAPIErrorFastFail`（7 项）通过——400 快速失败且携带 `resp.message`，429/5xx 仍重试 3 次 | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **193 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮）
+
+### bug-095 验证
+1. `python -c` mock `TextEmbedding.call` 返回 400（message="InvalidParameter: ..."），调用 `embed_batch` → 仅 1 次调用即抛 `RuntimeError`，异常信息含服务端详情
+2. mock 返回 429 / 500 → 仍退避重试 3 次后抛错
+3. `pytest tests/test_review_findings.py::TestFatalAPIErrorFastFail -v` → 7 passed
+
+### 生产环境排查指引（bug-095 修复后，重新运行构建命令即可看到真实原因）
+- `python scripts/build_knowledge_base.py --project museum --source json` 若仍报 400，日志/异常会显示 `- {resp.message}`，常见原因：
+  - `dimension not supported`：`.env` 中 `EMBEDDING_DIMENSION` 与模型不匹配（text-embedding-v3 支持 1024/768/512/256/128/64）
+  - `input too long`：数据中单条文本超过模型 token 上限（text-embedding-v3 单条上限 8192 tokens）
+  - `model not found / 未开通`：`EMBEDDING_MODEL_NAME` 拼写错误或账号未开通该模型
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #2）
+
+> 触发场景：应用 bug-095 修复后重跑 `python scripts/build_knowledge_base.py --project museum --source json`，
+> 错误详情已可见：`<400> InternalError.Algo.InvalidParameter: Value error, batch size is invalid,
+> it should not be larger than 10.: input.contents`
+> 根因明确：**text-embedding-v3 单请求最多 10 条文本，而默认 `embedding_batch_size=16` 超限**，
+> 全部批次 400 失败。本地测试 mock 不校验批大小，故此前从未暴露。
+> 全量测试：`pytest tests/ -q` → **198 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-096 | `embedding_batch_size` 默认 16 超过 text-embedding-v3 API 单请求上限（10），构建知识库时全部批次 400 失败 | `src/config.py`、`src/embeddings.py` | P0 | 已修复 |
+
+## 问题详情
+
+### [bug-096] Embedding 批大小超过 API 上限（10），构建知识库必然失败（P0）
+
+- **根因分析**：`src/config.py` 的 `embedding_batch_size` 默认值为 16，`BailianEmbedding.__init__` 默认参数同样为 16。dashscope `text-embedding-v3` 单请求 `input.contents` 最多 10 条，超出即返回 400（实测报错：`InternalError.Algo.InvalidParameter: batch size is invalid, it should not be larger than 10`）。`embed_batch` 按 `batch_size=16` 分批后，每批都 400 → 构建失败。本地测试的 mock 不校验批大小，故该缺陷在 CI 中从未暴露。
+- **影响范围**：所有使用 Embedding 批处理的场景（`build_knowledge_base` / `build_knowledge_base_from_documents` / `add_artifacts`）。默认配置下知识库构建必然失败。
+- **修复方案**：
+  1. `src/config.py`：默认 `embedding_batch_size` 16 → **10**（API 上限）；
+  2. `src/embeddings.py`：新增 `MAX_BATCH_SIZE = 10` 类常量，`__init__` 中对超限值钳制（>10 → 10，非整数配置回退到 10）并告警，防御 .env 中仍配置旧值 16 的存量环境。
+- **风险分析**：低。批变小仅增加请求次数（38 切片：3 批 → 4 批），不影响正确性；钳制逻辑对合法配置（≤10）行为不变。
+- **测试验证**：新增 `TestEmbeddingBatchSizeClamp`（5 项）：默认 ≤ 10、16→10 钳制、8 保持、MagicMock 回退、38 文本按 [10,10,10,8] 分批。全部通过；`pytest tests/ -q` → **198 passed**。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-096 | `TestEmbeddingBatchSizeClamp`（5 项）通过；默认值 10，超限钳制，分批均 ≤ 10 | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **198 passed**（bug-095 的 7 项 + bug-096 的 5 项 + 原 186 项）。
+
+## 验证步骤（第八轮补）
+
+### bug-096 验证
+1. `python -c "from src.config import settings; print(settings.embedding_batch_size)"` → 10
+2. `python -c "from src.embeddings import BailianEmbedding; print(BailianEmbedding(batch_size=16).batch_size)"` → 10（钳制）
+3. `pytest tests/test_review_findings.py::TestEmbeddingBatchSizeClamp -v` → 5 passed
+
+### 生产环境操作指引
+1. 同步 `src/config.py` / `src/embeddings.py` 到服务器；
+2. 若服务器 `.env` 中仍配置 `EMBEDDING_BATCH_SIZE=16`，无需手工修改——代码会钳制为 10 并打印告警；
+3. 重新执行 `python scripts/build_knowledge_base.py --project museum --source json` 应构建成功。

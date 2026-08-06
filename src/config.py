@@ -49,8 +49,8 @@ class Settings(BaseSettings):
         description="Embedding 向量维度",
     )
     embedding_batch_size: int = Field(
-        default=16,
-        description="Embedding 批处理大小",
+        default=10,
+        description="Embedding 批处理大小（text-embedding-v3 单请求上限 10 条，bug-096）",
     )
 
     # ========== LLM 配置 ==========

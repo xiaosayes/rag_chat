@@ -13,6 +13,7 @@ from dashscope import Generation
 
 from src.config import settings
 from src.cache import llm_cache
+from src.utils import FatalAPIError
 
 
 class BailianLLM:
@@ -106,10 +107,18 @@ class BailianLLM:
                         f"{resp.status_code} - {resp.message}"
                     )
                     # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试，避免无间隔连续请求
+                    # bug-095 修复：4xx（除 429 外）为确定性客户端错误，直接失败并带出服务端详情
+                    if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                        raise FatalAPIError(
+                            f"LLM API 返回 {resp.status_code}: {resp.message}"
+                        )
                     if attempt < self.max_retries - 1:
                         time.sleep(2 ** attempt)
 
             except Exception as e:
+                # bug-095 修复：确定性客户端错误直接抛出，不进入重试循环
+                if isinstance(e, FatalAPIError):
+                    raise
                 logger.warning(
                     f"LLM 请求失败 (attempt {attempt + 1}): {e}"
                 )
@@ -161,13 +170,19 @@ class BailianLLM:
                             yield content
                             has_yielded = True
                     else:
-                        logger.warning(f"Stream 返回异常: {resp.status_code}")
+                        logger.warning(f"Stream 返回异常: {resp.status_code} - {resp.message}")
                         # P1-1 修复：非 200 响应走重试逻辑（含退避）；
                         # 若已 yield 过 token 则由 except 分支直接中断，避免重复内容
-                        raise RuntimeError(f"Stream 返回异常: {resp.status_code}")
+                        # bug-095 修复：4xx（除 429 外）为确定性客户端错误，直接抛出
+                        if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                            raise FatalAPIError(f"Stream 返回异常: {resp.status_code} - {resp.message}")
+                        raise RuntimeError(f"Stream 返回异常: {resp.status_code} - {resp.message}")
                 return
 
             except Exception as e:
+                # bug-095 修复：确定性客户端错误（4xx 非 429）直接抛出，不重试
+                if isinstance(e, FatalAPIError):
+                    raise
                 # 如果已经 yield 过 token，直接抛出异常，避免重试产生重复内容
                 if has_yielded:
                     raise RuntimeError(f"Stream 输出中断: {e}")
