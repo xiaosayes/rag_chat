@@ -20,6 +20,24 @@ from src.config import settings
 from src.utils import setup_logger
 from src.rag_pipeline import RAGPipeline
 
+# Gradio 6.0 破坏性变更兼容（bug-098）：
+#   - Chatbot 的 show_copy_button / bubble_full_width 参数被移除，改用 buttons / layout
+#   - Blocks 构造器的 theme / css 参数被移除，改到 launch() 传入
+# 通过主版本号分支，保证 4.x / 5.x / 6.x 均可运行。
+_GRADIO_MAJOR = int(gr.__version__.split(".")[0])
+
+_UI_THEME = gr.themes.Soft(
+    primary_hue="amber",
+    secondary_hue="stone",
+    neutral_hue="slate",
+)
+_UI_CSS = """
+.gradio-container { max-width: 1100px !important; margin: auto; }
+.chat-message { font-size: 15px; line-height: 1.6; }
+footer { display: none !important; }
+.chunks-panel { border-left: 3px solid #e5a23b; padding-left: 12px; }
+"""
+
 # 对话历史与检索来源的分隔符
 # 注意：此分隔符与 src/rag_pipeline.py 中的 CHUNK_SEPARATOR 用途不同：
 #   - HISTORY_SEPARATOR（本文件）：用于对话历史与检索来源标注之间的分隔
@@ -279,17 +297,8 @@ def create_ui(default_stream: bool = True):
     """
     with gr.Blocks(
         title="文物知识库 RAG 问答系统",
-        theme=gr.themes.Soft(
-            primary_hue="amber",
-            secondary_hue="stone",
-            neutral_hue="slate",
-        ),
-        css="""
-        .gradio-container { max-width: 1100px !important; margin: auto; }
-        .chat-message { font-size: 15px; line-height: 1.6; }
-        footer { display: none !important; }
-        .chunks-panel { border-left: 3px solid #e5a23b; padding-left: 12px; }
-        """
+        # bug-098：Gradio 6.0 将 theme/css 移到 launch()，构造器传参会警告并失效
+        **({} if _GRADIO_MAJOR >= 6 else {"theme": _UI_THEME, "css": _UI_CSS}),
     ) as demo:
         # 项目选择器
         with gr.Row():
@@ -308,10 +317,12 @@ def create_ui(default_stream: bool = True):
                 chatbot = gr.Chatbot(
                     label="对话",
                     height=500,
-                    show_copy_button=True,
-                    bubble_full_width=False,
                     render_markdown=True,
                     avatar_images=(None, "🏛️"),
+                    # bug-098：Gradio 6.0 移除 show_copy_button / bubble_full_width，
+                    # 改用 buttons=["copy"] / layout="bubble"
+                    **({"buttons": ["copy"], "layout": "bubble"} if _GRADIO_MAJOR >= 6
+                       else {"show_copy_button": True, "bubble_full_width": False}),
                 )
 
                 with gr.Row():
@@ -407,7 +418,17 @@ def main():
 
     demo = create_ui(default_stream=not args.no_stream)
     logger.info(f"启动 Web UI: http://{args.host}:{args.port}")
-    demo.launch(server_name=args.host, server_port=args.port, share=args.share, show_error=True)
+    launch_kwargs = {
+        "server_name": args.host,
+        "server_port": args.port,
+        "share": args.share,
+        "show_error": True,
+    }
+    if _GRADIO_MAJOR >= 6:
+        # bug-098：Gradio 6.0 将 theme/css 移到 launch()
+        launch_kwargs["theme"] = _UI_THEME
+        launch_kwargs["css"] = _UI_CSS
+    demo.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":

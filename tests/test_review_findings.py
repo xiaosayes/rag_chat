@@ -819,3 +819,71 @@ class TestEmbeddingBatchSizeClamp:
         batches = [texts[i : i + emb.batch_size] for i in range(0, len(texts), emb.batch_size)]
         assert all(len(b) <= 10 for b in batches)
         assert [len(b) for b in batches] == [10, 10, 10, 8]
+
+
+# =============================================================================
+# 46. bug-097：verify_answer_grounding 误报——字段标签被当名称 + 名称变体不匹配
+#     （生产实测：回答中 **推荐理由**/**材质** 等字段标签与
+#       "清明上河图（北宋张择端本）" 变体均被误报为"不在上下文中"）
+# =============================================================================
+class TestAnswerGroundingFalsePositives:
+    def _grounding(self):
+        from src.rag_pipeline import RAGPipeline
+        return RAGPipeline.__new__(RAGPipeline)
+
+    def test_field_labels_not_flagged(self):
+        """结构化字段标签（**推荐理由** 等）不应被当作名称误报"""
+        p = self._grounding()
+        context = "【司母戊鼎】\n商代青铜器"
+        answer = "**推荐理由**：这是**司母戊鼎**，**材质**为青铜，**朝代**商代晚期"
+        result = p.verify_answer_grounding(answer, context)
+        assert result["passed"] is True, f"字段标签不应误报: {result['reason']}"
+
+    def test_name_variant_not_flagged(self):
+        """名称变体（回答补充括号描述）应命中上下文名称"""
+        p = self._grounding()
+        context = "【清明上河图】\n北宋风俗画"
+        answer = "**清明上河图（北宋张择端本）**是风俗画长卷"
+        result = p.verify_answer_grounding(answer, context)
+        assert result["passed"] is True, f"名称变体不应误报: {result['reason']}"
+
+    def test_real_hallucination_still_detected(self):
+        """真实幻觉（上下文完全没有的名称）仍应检出"""
+        p = self._grounding()
+        context = "【司母戊鼎】\n商代青铜器"
+        answer = "**司母戊鼎**是重器，**越王勾践剑**是春秋兵器"
+        result = p.verify_answer_grounding(answer, context)
+        assert result["passed"] is False
+        assert "越王勾践剑" in result["missing"]
+
+
+# =============================================================================
+# =============================================================================
+# 47. bug-098：Gradio 6.0 破坏性变更导致 Web UI 无法启动
+#     （服务器实测：Chatbot.__init__() got an unexpected keyword argument
+#       'show_copy_button'；Blocks 的 theme/css 也已在 6.0 移除）
+# =============================================================================
+class TestGradio6Compatibility:
+    def test_create_ui_succeeds_on_installed_gradio(self):
+        """安装的 Gradio 版本下，create_ui 应能成功构建（不抛 TypeError）"""
+        import gradio as gr
+        import app
+        try:
+            demo = app.create_ui(default_stream=True)
+            assert demo is not None
+        except TypeError as e:
+            pytest.fail(f"create_ui 在 Gradio {gr.__version__} 下抛 TypeError: {e}")
+
+    def test_chatbot_parameters_are_valid(self):
+        """传给 gr.Chatbot 的参数在当前版本签名中必须存在"""
+        import gradio as gr
+        import inspect
+        import app as app_mod
+        sig = inspect.signature(gr.Chatbot.__init__)
+        valid = set(sig.parameters)
+        if app_mod._GRADIO_MAJOR >= 6:
+            # 6.x：使用 buttons/layout，不再用 show_copy_button/bubble_full_width
+            assert "buttons" in valid and "layout" in valid
+        else:
+            # 4/5.x：使用 show_copy_button/bubble_full_width
+            assert "show_copy_button" in valid and "bubble_full_width" in valid

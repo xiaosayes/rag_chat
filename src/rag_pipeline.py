@@ -1155,6 +1155,17 @@ class RAGPipeline:
         """
         import re
 
+        # 常见结构化字段标签（LLM 常用加粗标记字段名，如"**推荐理由**"、"**材质**"，
+        # 不是文物名称）。bug-097 修复：排除这些标签，避免防幻觉检查大面积误报。
+        FIELD_LABELS = {
+            "推荐理由", "简介", "材质", "朝代", "历史意义", "文化价值", "名称", "别名",
+            "参观建议", "地域", "亮点", "标签", "现藏", "出土地", "类别", "分类",
+            "年份", "年代", "评分", "推荐指数", "说明", "总结", "结论", "建议",
+            "原因", "特点", "背景", "意义", "价值", "位置", "收藏地", "时代",
+            "理由", "介绍", "概述", "详情", "正文", "来源", "注意事项",
+            "具体介绍", "简要介绍", "推荐指数", "推荐理由", "特色", "亮点", "体验",
+        }
+
         # 从上下文中提取来源名称（支持多种格式： 【】、**加粗**、【】、「」、《》）
         # bug-019 修复：增加 **加粗**、「」、《》 等格式支持
         # bug-091 修复：与 answer 侧一致补充 re.DOTALL，支持跨行名称提取，
@@ -1177,7 +1188,17 @@ class RAGPipeline:
         if not answer_names:
             return {"passed": True, "reason": "回答中未提及具体名称", "mentioned": [], "missing": []}
 
-        missing = [n for n in answer_names if n not in context_names]
+        # bug-097 修复：误报消治——
+        #   1) 排除结构化字段标签（"**推荐理由**" 等，LLM 常用加粗做字段名而非引用名称）；
+        #   2) 名称变体匹配：回答名包含上下文名（或反之）视为命中，
+        #      如回答"**清明上河图（北宋张择端本）**"对应上下文"【清明上河图】"。
+        missing = []
+        for n in answer_names:
+            if n in FIELD_LABELS:
+                continue
+            if any(n == cn or cn in n or n in cn for cn in context_names):
+                continue
+            missing.append(n)
         if missing:
             return {
                 "passed": False,
