@@ -50,12 +50,22 @@ class BailianEmbedding:
                     dimension=self.dimension,
                 )
                 if resp.status_code == 200:
-                    return resp.output["embeddings"][0]["embedding"]
+                    embedding = resp.output["embeddings"][0]["embedding"]
+                    # P1-2 修复：校验向量维度，避免模型/维度配置不一致时
+                    # 向量维度与集合不符，导致后续 upsert/search 报出晦涩错误
+                    if len(embedding) != self.dimension:
+                        raise ValueError(
+                            f"Embedding 维度不匹配: 期望 {self.dimension}，实际 {len(embedding)}"
+                        )
+                    return embedding
                 else:
                     logger.warning(
                         f"Embedding API 返回异常 (attempt {attempt + 1}): "
                         f"{resp.status_code} - {resp.message}"
                     )
+                    # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试
+                    if attempt < self.max_retries - 1:
+                        time.sleep(1 * (attempt + 1))
             except Exception as e:
                 logger.warning(
                     f"Embedding 请求失败 (attempt {attempt + 1}): {e}"
@@ -127,6 +137,11 @@ class BailianEmbedding:
                     # 按原始顺序排列
                     ordered = [None] * len(texts)
                     for emb in embeddings:
+                        # P1-2 修复：校验每个返回向量的维度，避免维度不一致静默入库
+                        if len(emb["embedding"]) != self.dimension:
+                            raise ValueError(
+                                f"Embedding 维度不匹配: 期望 {self.dimension}，实际 {len(emb['embedding'])}"
+                            )
                         ordered[emb["text_index"]] = emb["embedding"]
                     # bug-020 修复：检查 ordered 中是否有 None（API 返回不完整）
                     none_idx = [i for i, v in enumerate(ordered) if v is None]
@@ -140,6 +155,9 @@ class BailianEmbedding:
                         f"Batch Embedding 返回异常 (attempt {attempt + 1}): "
                         f"{resp.status_code}"
                     )
+                    # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试
+                    if attempt < self.max_retries - 1:
+                        time.sleep(1 * (attempt + 1))
             except Exception as e:
                 logger.warning(
                     f"Batch Embedding 请求失败 (attempt {attempt + 1}): {e}"

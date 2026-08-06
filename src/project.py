@@ -151,7 +151,9 @@ class ProjectConfig:
     def get_prompt(self, prompt_type: str, context: str = "") -> str:
         """获取指定类型的 Prompt 并填充上下文"""
         template = self.prompts.get(prompt_type, self.prompts.get("default", ""))
-        return template.format(context=context)
+        # bug-056 修复：仅替换 {context} 占位符，避免模板中字面花括号
+        # （如 JSON 示例 {"key": "value"}）触发 str.format() 的 KeyError/ValueError
+        return template.replace("{context}", context)
 
     @property
     def chunk_cache_path(self) -> Path:
@@ -241,6 +243,13 @@ class ProjectManager:
         pid = config.get("id", "")
         if not pid:
             raise ValueError("项目配置必须包含 'id' 字段")
+        # bug-048 修复：校验项目 ID 格式，防止路径遍历（如 id="../evil"）
+        # 将 JSON 文件写入项目目录之外
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", pid):
+            raise ValueError(
+                f"项目 ID 只能包含字母、数字、下划线、中划线: {pid!r}"
+            )
         self._projects[pid] = ProjectConfig(pid, config)
         # 保存到 JSON 文件
         save_path = self.projects_dir / f"{pid}.json"

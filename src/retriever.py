@@ -35,6 +35,14 @@ class BM25Retriever:
 
     def build(self, chunks: List[Chunk]) -> None:
         """构建 BM25 索引"""
+        # bug-043 修复：空文档列表直接返回，避免 rank_bm25 内部除零崩溃（ZeroDivisionError）
+        if not chunks:
+            self.chunks = []
+            self.corpus = []
+            self.bm25 = None
+            self._is_built = False
+            logger.warning("BM25 索引构建跳过：文档列表为空")
+            return
         self.chunks = chunks
         self.corpus = [chunk.text for chunk in chunks]
         # 中文分词（简单按字/词切分）
@@ -146,7 +154,11 @@ class HybridRetriever:
 
         # 检查缓存（使用排序后的 filter_conditions 确保键确定性）
         filter_str = str(sorted(filter_conditions.items())) if filter_conditions else "None"
-        cache_key = f"retrieve:{query}:{top_k}:{filter_str}"
+        # bug-047 修复：缓存 key 包含 semantic_top_k / bm25_top_k，
+        # 避免不同召回量参数的检索共享同一缓存条目导致结果错误
+        # P0-1 修复：缓存 key 加入 collection_name，避免多项目共享 retrieval_cache 时
+        # 不同项目（museum/enterprise）的相同问题命中彼此缓存导致结果串数据
+        cache_key = f"retrieve:{self.vector_store.collection_name}:{query}:{top_k}:{semantic_top_k}:{bm25_top_k}:{filter_str}"
         if use_cache:
             cached = retrieval_cache.get(cache_key)
             if cached is not None:

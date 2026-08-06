@@ -30,7 +30,17 @@ class LRUCache:
         self._lock = threading.Lock()
 
     def _make_key(self, *args, **kwargs) -> str:
-        key_str = str(args) + str(kwargs)
+        # bug-039 修复：使用 json.dumps 规范化参数表示：
+        #   - sort_keys=True 保证 dict（含嵌套 dict）键顺序不影响 key
+        #   - kwargs 按内容序列化，相同语义的不同传参顺序生成相同 key
+        # 之前用 str() 拼接，"a=1,b=2" 与 "b=2,a=1" 会生成不同 key，导致缓存未命中
+        def _normalize(value):
+            try:
+                return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                return str(value)
+
+        key_str = _normalize(args) + _normalize(kwargs)
         return hashlib.md5(key_str.encode()).hexdigest()
 
     def get(self, key: str) -> Optional[Any]:
@@ -173,7 +183,23 @@ class EmbeddingCache:
         try:
             if self._pattern_file.exists():
                 with open(self._pattern_file, "r", encoding="utf-8") as f:
-                    self._pattern_cache = json.load(f)
+                    raw = json.load(f)
+                # bug-037 修复：校验模式缓存格式必须是 dict，
+                # 损坏/格式异常时降级为空字典，避免 get() 遍历时崩溃
+                # P1-5 修复：与 exact_cache 一致，校验值为 list[float]，
+                # 避免损坏文件中非列表值被当作 embedding 返回
+                if isinstance(raw, dict):
+                    validated = {
+                        k: v for k, v in raw.items()
+                        if isinstance(k, str) and isinstance(v, list)
+                        and all(isinstance(x, (int, float)) for x in v)
+                    }
+                    if len(validated) != len(raw):
+                        logger.warning(f"跳过 {len(raw) - len(validated)} 个无效模式缓存条目")
+                    self._pattern_cache = validated
+                else:
+                    logger.warning("模式缓存格式异常，忽略")
+                    self._pattern_cache = {}
                 logger.info(f"加载模式缓存: {len(self._pattern_cache)} 条")
         except Exception as e:
             logger.warning(f"加载模式缓存失败: {e}")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import csv
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
@@ -40,7 +41,12 @@ class Artifact:
     def __post_init__(self):
         if not self.id:
             # 使用多字段组合生成 ID，降低同名同朝代文物碰撞概率
-            self.id = generate_id(self.name + self.dynasty + self.category + self.material)
+            base = self.name + self.dynasty + self.category + self.material
+            if base:
+                self.id = generate_id(base)
+            else:
+                # bug-061 修复：全空字段时追加随机串，避免多件空文物共享 md5("") 导致 ID 碰撞、向量互相覆盖
+                self.id = generate_id(base + uuid.uuid4().hex)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

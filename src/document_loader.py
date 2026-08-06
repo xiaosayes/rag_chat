@@ -306,11 +306,18 @@ class ImageParser(DocumentParser):
                 metadata={"ocr_engine": "paddleocr", "text_found": False},
             )
 
-        # 提取文本
+        # 提取文本（bug-058 修复：兼容 PaddleOCR 2.x 与 3.x 输出格式）
         lines = []
         for line in result[0]:
-            text = line[1][0]  # (bbox, (text, confidence))
-            confidence = line[1][1]
+            if not isinstance(line, (list, tuple)) or len(line) < 2:
+                continue
+            # 2.x: [box, (text, confidence)]；3.x: [text, confidence]
+            if isinstance(line[1], (list, tuple)):
+                text = line[1][0]
+                confidence = line[1][1]
+            else:
+                text = line[0]
+                confidence = line[1]
             if confidence > 0.3:  # 低置信度过滤
                 lines.append(text)
 
@@ -503,8 +510,27 @@ class DocumentLoader:
 
         artifacts = []
         for doc in docs:
-            artifact = self.document_to_artifact(doc, category=category)
-            artifacts.append(artifact)
+            # P1-5 修复：长文档按段切分为多个 Artifact，
+            # 避免 document_to_artifact 的 5000 字符截断导致后续内容完全无法被检索
+            content = doc.content
+            if len(content) <= 5000:
+                artifacts.append(self.document_to_artifact(doc, category=category))
+                continue
+            title = doc.title or doc.path.stem
+            segment_size = 4500
+            total_segments = (len(content) + segment_size - 1) // segment_size
+            for idx, start in enumerate(range(0, len(content), segment_size)):
+                seg_doc = Document(
+                    path=doc.path,
+                    content=content[start:start + segment_size],
+                    title=f"{title}（第{idx + 1}/{total_segments}部分）",
+                    metadata={**doc.metadata, "segment": idx + 1, "segment_total": total_segments},
+                    format=doc.format,
+                )
+                artifacts.append(self.document_to_artifact(seg_doc, category=category))
+            logger.info(
+                f"长文档 {doc.path.name} 已切分为 {total_segments} 段（总 {len(content)} 字符）"
+            )
 
         logger.info(f"文档转换完成: {len(docs)} 个文档 → {len(artifacts)} 个 Artifact")
         return artifacts

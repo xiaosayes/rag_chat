@@ -348,23 +348,23 @@ class TestRerankerAPIFieldNames:
     """测试 Reranker 的 API 响应字段名处理"""
 
     def test_reranker_score_field_fallback(self):
-        """测试 API 返回不同字段名时的处理"""
+        """测试重排 API 返回 results 格式（bug-055 修复后按 index/relevance_score 解析）"""
         from src.reranker import BailianReranker
         chunk = Chunk(id="1", artifact_id="a1", artifact_name="测试",
                       text="测试文本", metadata={})
 
         reranker = BailianReranker()
 
-        # 模拟 API 返回 relevance_score 字段
+        # 模拟 TextReRank API 返回 results 格式
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.output = {
-            "embeddings": [
-                {"text_index": 0, "relevance_score": 0.95}
+            "results": [
+                {"index": 0, "relevance_score": 0.95}
             ]
         }
 
-        with patch("dashscope.TextEmbedding.call", return_value=mock_response):
+        with patch("dashscope.TextReRank.call", return_value=mock_response):
             result = reranker._rerank_with_api("测试", [(chunk, 0.5)])
             assert len(result) == 1
             assert result[0][0].id == "1"
@@ -384,7 +384,7 @@ class TestRerankerAPIFieldNames:
 
         reranker = BailianReranker()
         # 模拟 API 失败，触发本地降级
-        with patch("dashscope.TextEmbedding.call", side_effect=Exception("API error")):
+        with patch("dashscope.TextReRank.call", side_effect=Exception("API error")):
             result = reranker.rerank("青铜器", candidates)
             assert len(result) <= 3
             assert len(result) > 0, "本地降级应返回结果"
@@ -534,12 +534,23 @@ class TestConvertHistoryEdgeCases:
         assert result[1]["content"] == "回答内容", "应去掉检索来源部分"
 
     def test_convert_history_old_separator(self):
-        """测试旧版分隔符 \n---\n"""
+        """测试旧版分隔符 \n---\n（仅当后跟检索来源标记时才算分隔符）"""
         from app import _convert_history
-        history = [("用户问题", "回答内容\n---\n来源信息")]
+        # 旧版存储格式：分隔符后跟随检索来源标记 → 应截断
+        history = [("用户问题", "回答内容\n---\n**📚 检索来源**\n1. 文物A")]
         result = _convert_history(history)
         assert len(result) == 2
         assert result[1]["content"] == "回答内容"
+
+    def test_convert_history_markdown_rule_not_truncated(self):
+        """P1-1 修复：回答正文中的 Markdown 水平线不应被截断"""
+        from app import _convert_history
+        history = [("用户问题", "结论：司母戊鼎是青铜器。\n---\n补充：重832公斤")]
+        result = _convert_history(history)
+        assert len(result) == 2
+        assert result[1]["content"] == "结论：司母戊鼎是青铜器。\n---\n补充：重832公斤", (
+            "P1-1 修复后：无检索来源标记的 \n---\n 应保留"
+        )
 
     def test_convert_history_empty_assistant_content(self):
         """测试助手消息只有检索来源的情况（助手内容为空，尾部 user 被清理）"""

@@ -569,8 +569,8 @@ def main():
         help="输出文件路径（默认: data/raw/artifacts.json）"
     )
     parser.add_argument(
-        "--stats", action="store_true", default=True,
-        help="打印统计信息"
+        "--stats", action=argparse.BooleanOptionalAction, default=True,
+        help="打印统计信息（--no-stats 关闭）"
     )
     parser.add_argument(
         "--seed", type=int, default=None,

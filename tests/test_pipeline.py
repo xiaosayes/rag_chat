@@ -277,7 +277,8 @@ class TestQueryClassification:
         assert self.pipeline.is_kb_related("谢谢") == False
         # bug-009 修复后："今天天气怎么样" 前缀匹配 "今天天气" 后剩余 "怎么样" 有实质内容
         # 判为知识库相关（可接受，知识库检索无结果时 LLM 用自己的知识回答）
-        assert self.pipeline.is_kb_related("今天天气怎么样") == True
+        # bug-057 修复后："怎么样" 归入常见语气后缀，天气寒暄问题改走闲聊路由
+        assert self.pipeline.is_kb_related("今天天气怎么样") == False
 
     def test_empty_query(self):
         """测试空字符串查询"""
@@ -390,6 +391,8 @@ class TestHybridRetriever:
         # 使用 mock 的 vector_store 和 embedding
         mock_vector_store = MagicMock(spec=VectorStore)
         mock_vector_store.search.return_value = []
+        # P0-1 修复配套：检索缓存 key 现包含 collection_name，mock 需提供该属性
+        mock_vector_store.collection_name = "test_collection"
 
         mock_embedding = MagicMock(spec=BailianEmbedding)
         mock_embedding.embed_query.return_value = [0.0] * 1024

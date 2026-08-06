@@ -96,7 +96,8 @@ class SmartChunking(ChunkingStrategy):
                 if not first_sentence:
                     first_sentence = artifact.description[:100] + ("..." if len(artifact.description) > 100 else "")
 
-            tags_str = "、".join(artifact.tags[:5]) if artifact.tags else ""
+            tags = artifact.tags if isinstance(artifact.tags, list) else []  # bug-060：tags 为标量时按空处理
+            tags_str = "、".join(tags[:5]) if tags else ""
             summary_parts = [
                 f"名称：{artifact.name}",
                 f"朝代：{artifact.dynasty}",

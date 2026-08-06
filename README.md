@@ -30,7 +30,54 @@
 
 ## 更新日志
 
-### v1.3.0 (2024-01) — 当前版本
+### v1.3.3 (2024-08) — 当前版本
+
+#### Bug 修复（第七轮复测，P0×2 + P1×6 + 连带 P0×1）
+- **P0 重建时向量库残留陈旧数据**：`build_knowledge_base` / `build_knowledge_base_from_documents` 在 `overwrite=False` 重建后调用新增的 `VectorStore.delete_stale_chunks()`，清理已移除/变更切片的旧向量，避免语义检索返回知识库中已不存在的陈旧结果（与 BM25/缓存不一致）
+- **P0 重复添加产生重复切片**：`add_artifacts` 合并新旧切片时按 `chunk.id` 去重，避免同一文物重复添加导致 BM25 索引与缓存文件出现重复切片（向量库按 ID 幂等覆盖不重复），修复三大存储状态不一致
+- **P0 连带（语义检索不可用）**：qdrant-client ≥1.12 已移除弃用的 `search` 方法，`vector_store.search` 直接调用会 AttributeError 导致语义检索永远失败；改为按客户端能力选择 `query_points`（新版）/ `search`（旧版）并保持返回格式一致
+- **多轮对话上下文截断**：`_convert_history` 改为按检索来源标记 `**📚 检索来源**` 定位截断，不再用旧分隔符 `\n---\n` 盲目分割，避免 LLM 回答正文中的 Markdown 水平线被误伤、后续内容丢失
+- **Embedding 维度未校验**：`embed_one` / `_embed_batch` 校验返回向量维度与配置一致，维度不匹配时明确报错重试，不再以晦涩的 Qdrant 错误失败
+- **LLM 响应缓存 key 不全**：`llm.chat` 缓存 key 补齐 `max_tokens` / `top_p` / 额外 kwargs，不同生成参数不再共享缓存条目
+- **相关度分数阈值失真**：`format_answer` 分数阈值自适应——RRF 融合分（约 0.01 量级）按显示排名上色（第1名 🟢、第2-3名 🟡、其余 ⚪），重排分数（0~1）仍用固定阈值，不再所有结果恒为灰色
+- **长文档内容静默丢失**：`load_all_as_artifacts` 对超长文档按 4500 字符切分为多个 Artifact（标题带"第 N/M 部分"），全文均可被切片检索，不再只索引前 5000 字符
+- **项目切换关闭竞态**：`VectorStore.close()` 与懒连接共用 `_connect_lock`，避免项目切换关闭旧连接与在途请求建连交错执行
+
+#### 修改文件
+- `src/vector_store.py`、`src/rag_pipeline.py`、`src/embeddings.py`、`src/llm.py`、`src/document_loader.py`、`app.py`、`tests/test_edge_cases.py`、`tests/test_review_findings.py`
+
+---
+
+### v1.3.2 (2024-08)
+
+#### Bug 修复（第六轮复测，P0×1 + P1×2）
+- **P0 增量添加后检索缓存未失效**：`add_artifacts` 增量添加完成后清空检索缓存，避免旧检索结果在 TTL 内继续被命中（与知识库重建的 P0-1 修复保持一致）
+- **项目切换后向量库客户端重连**：`VectorStore.reset_connection()` 在 pipeline 切换项目时关闭并重置 Qdrant 客户端，确保数据写入新项目的存储目录，不再写入旧项目目录
+- **初始化并发预热竞态**：`init_pipeline` 将知识库预热移入锁内完成后才返回，并发请求在预热期间不再误报"知识库尚未构建"
+
+#### 修改文件
+- `src/rag_pipeline.py`、`src/vector_store.py`、`app.py`
+
+---
+
+### v1.3.1 (2024-08)
+
+#### Bug 修复（第五轮复测，P0×1 + P1×7）
+- **P0 检索缓存跨项目串数据**：缓存 key 加入 collection_name 隔离不同项目；知识库重建后自动清空检索缓存，避免多项目 Web UI 下相同问题命中他项目结果 / 重建后 TTL 内返回旧数据
+- **API 非 200 响应退避重试**：LLM / Embedding / Reranker 三处 API 封装在 429 限流、5xx 等非 200 响应时同样退避后重试（此前仅异常分支退避）；流式模式非 200 响应正确进入重试逻辑
+- **项目专属闲聊人设生效**：`_select_chitchat_prompt()` 优先使用项目自定义 chitchat 模板（博物馆/企业助手），此前 4 处硬编码全局模板导致项目人设从未生效
+- **配置项全线接线**：`llm_temperature` / `llm_max_tokens` / `llm_top_p` / `embedding_batch_size` / `retriever_top_k` / `retriever_hybrid_weight` / `reranker_enabled` 全部接入对应模块与查询默认参数（修改 .env 即生效）
+- **增量添加健壮性**：`add_artifacts` 在 Qdrant 集合缺失时自动创建，不再崩溃
+- **缓存防御加固**：Embedding 模式缓存加载校验值类型（list[float]），损坏文件不再导致查询崩溃
+- **并发安全**：`VectorStore.close()` 后禁止惰性重连，避免切换项目时新旧实例在同一 Qdrant 本地路径双客户端冲突
+- **构建一致性**：`build_knowledge_base` / `build_knowledge_base_from_documents` 不再静默忽略传入的 `project_id`，并同步更新向量库指向
+
+#### 修改文件
+- `src/retriever.py`、`src/rag_pipeline.py`、`src/cache.py`、`src/llm.py`、`src/embeddings.py`、`src/reranker.py`、`src/vector_store.py`、`tests/test_pipeline.py`
+
+---
+
+### v1.3.0 (2024-01)
 
 #### 新增功能
 - **多项目架构**：新增 `ProjectManager` 项目管理模块，支持多项目独立配置、独立 Qdrant 集合、独立 BM25 索引、独立 Prompt 模板
@@ -719,11 +766,14 @@ bash setup_gpu.sh
 #### 1. 创建 Conda 环境
 
 ```bash
-# 从 environment.yml 创建环境
+# 从 environment.yml 创建环境（仅包含 conda 包，速度更快）
 conda env create -f environment.yml
 
 # 激活环境
 conda activate cultural-relics-rag
+
+# 安装 pip 包（pip 包与 conda 包分离，避免 conda 卡住）
+pip install -r requirements.txt
 ```
 
 #### 2. 安装 PaddleOCR GPU 支持（可选）
@@ -955,7 +1005,9 @@ python app.py --project museum --no-stream
 │
 └── tests/                           # 单元测试
     ├── __init__.py
-    └── test_pipeline.py             # 流水线测试（75 个测试用例）
+    ├── test_pipeline.py             # 流水线测试（75 个测试用例）
+    ├── test_edge_cases.py           # 边界条件测试（65 个测试用例）
+    └── test_review_findings.py      # 审查发现回归测试（45 个测试用例）
 ```
 
 ---

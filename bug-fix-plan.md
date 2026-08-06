@@ -354,7 +354,7 @@
 | bug-023 | `DocumentLoader.load_file` 未检查路径遍历 | `src/document_loader.py` | 中 | 已修复 |
 | bug-024 | `BailianEmbedding.embed_batch` 空列表输入行为不明确 | `src/embeddings.py` | 低 | 已修复 |
 | bug-025 | `src/cache.py` 中 `import pickle` 未使用 | `src/cache.py` | 低 | 已修复 |
-| bug-026 | `_trim_context` 中 chunk 文本包含分隔符时错误分割 | `src/rag_pipeline.py` | 低 | 待修复 |
+| bug-026 | `_trim_context` 中 chunk 文本包含分隔符时错误分割 | `src/rag_pipeline.py` | 低 | 已修复 |
 | bug-027 | `verify_answer_grounding` 正则匹配未考虑跨行名称 | `src/rag_pipeline.py` | 低 | 已修复 |
 | bug-028 | `_convert_history` 中 assistant 消息为空未处理 | `app.py` | 低 | 已修复 |
 
@@ -553,13 +553,16 @@
 
 ### [bug-026] `_trim_context` 中 chunk 文本包含 `CHUNK_SEPARATOR` 时错误分割
 
-- **根因分析**：`context.split(CHUNK_SEPARATOR)` 如果 chunk 文本包含分隔符，会错误分割。
+- **根因分析**：`context.split(CHUNK_SEPARATOR)` 如果 chunk 文本包含分隔符，会错误分割，导致上下文信息丢失。
 
 - **影响范围**：概率极低，但一旦触发会导致上下文信息丢失。
 
-- **修复方案**：当前分隔符已经足够独特，仅做文档说明，不做代码修改。
+- **修复方案**：
+  1. 将 `CHUNK_SEPARATOR` 改为更独特的字符串 `\n\n=====CHUNK_SEPARATOR=====\n\n`，避免与正文冲突（bug-031）
+  2. `_build_context` 直接传入列表给 `_trim_context`，避免 `split()` 操作（bug-031）
+  3. `_trim_context` 支持接收列表参数，已分割好无需再分割
 
-- **风险分析**：无风险。
+- **风险分析**：低风险。改为传入列表后完全避免分割问题。
 
 ### [bug-027] `verify_answer_grounding` 正则匹配未考虑跨行名称
 
@@ -587,27 +590,97 @@
 
 ---
 
+## 新增问题（第三轮审查）
+
+## 问题总览
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-029 | `build_knowledge_base.py` 输出路径未使用项目专属路径 | `scripts/build_knowledge_base.py` | 低 | 已修复 |
+| bug-030 | `_convert_history` 最后一条消息为 user 角色时未处理，违反 LLM API 格式要求 | `app.py` | 低 | 已修复 |
+| bug-031 | `CHUNK_SEPARATOR` 不够独特，可能被 chunk 正文匹配导致错误分割 | `src/rag_pipeline.py` | 低 | 已修复 |
+| bug-033 | `memory_mode` 下 `_ensure_knowledge_base` 路径检查错误，误判知识库为已构建 | `src/rag_pipeline.py` | 中 | 已修复 |
+
+## 问题详情
+
+### [bug-029] `build_knowledge_base.py` 输出路径未使用项目专属路径
+
+- **根因分析**：`build_knowledge_base.py` 的输出路径硬编码为通用路径，未根据项目 ID 动态调整，导致多项目场景下输出路径混乱。
+
+- **影响范围**：多项目构建时，输出路径可能覆盖其他项目的构建结果。
+
+- **修复方案**：使用 `pipeline.project_cfg` 和 `pipeline.vector_store.local_path` 获取项目专属路径。
+
+- **风险分析**：低风险。
+
+- **测试验证**：
+  1. `tests/test_edge_cases.py::TestBuildScriptOutputPaths::test_output_paths_project_aware`
+  2. 检查 `build_knowledge_base.py` 中是否使用 `pipeline.project_cfg` 和 `pipeline.vector_store.local_path`
+
+### [bug-030] `_convert_history` 最后一条消息为 user 角色时未处理
+
+- **根因分析**：当最后一条消息的 assistant 回复为空时，user 消息被添加但对应的 assistant 消息未添加，导致最终消息列表最后一条是 user 角色，违反 LLM API 的消息格式要求（不能以 user 消息结尾，或出现连续 user 消息）。
+
+- **影响范围**：对话历史中某条回答只有检索来源时，LLM API 调用可能因格式错误失败。
+
+- **修复方案**：在 `_convert_history` 返回前，检查最后一条消息是否为 user 角色，如果是则删除。
+
+- **风险分析**：低风险。
+
+- **测试验证**：`_convert_history([("user1", None), ("user2", "")])` 返回空列表。
+
+### [bug-031] `CHUNK_SEPARATOR` 不够独特可能导致错误分割
+
+- **根因分析**：`CHUNK_SEPARATOR` 使用 `\n=====\n` 作为分隔符，但某些 chunk 正文可能包含类似内容，导致 `context.split(CHUNK_SEPARATOR)` 错误分割 chunk 正文。
+
+- **影响范围**：概率极低，但一旦触发会导致上下文信息丢失。
+
+- **修复方案**：
+  1. 将 `CHUNK_SEPARATOR` 改为更独特的字符串 `\n\n=====CHUNK_SEPARATOR=====\n\n`
+  2. `_build_context` 直接传入列表给 `_trim_context`，避免 `split()` 操作
+
+- **风险分析**：低风险。
+
+- **测试验证**：运行 `pytest tests/ -v` 确认所有测试通过。
+
+### [bug-033] `memory_mode` 下知识库路径检查错误
+
+- **根因分析**：`RAGPipeline._ensure_knowledge_base()` 中，当 `memory_mode=True` 时，Qdrant 数据实际存储在 `self.vector_store._snapshot_path` 子目录中，但代码检查的是 `qdrant_base` 路径，导致知识库已构建时被误判为未构建，触发重复构建。
+
+- **影响范围**：使用 `memory_mode=True` 时，每次启动 Web UI 都会重复构建知识库，浪费时间和 API 费用。
+
+- **修复方案**：在 `_ensure_knowledge_base` 中根据 `memory_mode` 选择正确的路径检查：`memory_mode=True` 时检查 `_snapshot_path`，否则检查 `qdrant_base`。
+
+- **风险分析**：低风险。
+
+- **测试验证**：
+  1. 使用 `memory_mode=True` 构建知识库后重启，验证不再重复构建
+  2. 运行 `pytest tests/ -v` 确认所有测试通过
+
+---
+
 ## 修复顺序（新增）
 
 1. bug-012：`src/cache.py`（高优先级，缓存损坏后崩溃）
 2. bug-014：`app.py`（高优先级，线程安全）
 3. bug-015：`app.py`（中优先级，消息序列错乱）
 4. bug-016：`src/rag_pipeline.py`（中优先级，查询分类错误）
-5. bug-017：`src
-_data_loader.py`（中优先级，数据丢失）
+5. bug-017：`src/data_loader.py`（中优先级，数据丢失）
 6. bug-018：`src/retriever.py`（中优先级，英文检索失败）
 7. bug-019：`src/rag_pipeline.py`（中优先级，防幻觉检测失效）
 8. bug-020：`src/embeddings.py`（中优先级，静默数据损坏）
 9. bug-013：`src/cache.py`（中优先级，潜在崩溃）
 10. bug-022：`src/rag_pipeline.py`（低优先级，无意义查询）
 11. bug-021：`app.py`（低优先级，UI 更新频率）
-12. bug-023：`src/document_loader.py`（中优先级，安全风险）
-13. bug-024：`src/embeddings.py`（低优先级，边界情况）
-14. bug-025：`src/cache.py`（低优先级，代码冗余）
-15. bug-027：`src/rag_pipeline.py`（低优先级，正则改进）
-16. bug-028：`app.py`（低优先级，边界情况）
-
-（注：bug-026 仅文档说明，不做代码修改）
+12. bug-026：`src/rag_pipeline.py`（低优先级，分割符冲突）
+13. bug-023：`src/document_loader.py`（中优先级，安全风险）
+14. bug-024：`src/embeddings.py`（低优先级，边界情况）
+15. bug-025：`src/cache.py`（低优先级，代码冗余）
+16. bug-027：`src/rag_pipeline.py`（低优先级，正则改进）
+17. bug-028：`src/app.py`（低优先级，边界情况）
+18. bug-029：`scripts/build_knowledge_base.py`（低优先级，输出路径）
+19. bug-030：`app.py`（低优先级，消息格式）
+20. bug-031：`src/rag_pipeline.py`（低优先级，分隔符）
+21. bug-033：`src/rag_pipeline.py`（中优先级，路径误判）
 
 ---
 
@@ -629,8 +702,13 @@ _data_loader.py`（中优先级，数据丢失）
 | bug-023 | 见下方验证步骤 | ✅ 已修复 |
 | bug-024 | 见下方验证步骤 | ✅ 已修复 |
 | bug-025 | 见下方验证步骤 | ✅ 已修复 |
+| bug-026 | 见下方验证步骤 | ✅ 已修复 |
 | bug-027 | 见下方验证步骤 | ✅ 已修复 |
 | bug-028 | 见下方验证步骤 | ✅ 已修复 |
+| bug-029 | 见下方验证步骤 | ✅ 已修复 |
+| bug-030 | 见下方验证步骤 | ✅ 已修复 |
+| bug-031 | 见下方验证步骤 | ✅ 已修复 |
+| bug-033 | 见下方验证步骤 | ✅ 已修复 |
 
 ---
 
@@ -688,8 +766,584 @@ _data_loader.py`（中优先级，数据丢失）
 ### bug-025 验证
 1. `import src.cache` → 正常导入
 
+### bug-026 验证
+1. 运行 `pytest tests/ -v` 确认 `_trim_context` 测试通过
+2. 验证 `_build_context` 传入列表而非字符串，避免分割问题
+
 ### bug-027 验证
 1. 回答中含跨行 `**名称**` 时能正确提取
 
 ### bug-028 验证
 1. `_convert_history([("问题", "\n\n---\n\n来源")])` → 返回空列表
+
+### bug-029 验证
+1. 运行 `pytest tests/test_edge_cases.py::TestBuildScriptOutputPaths -v` 确认通过
+2. 检查 `build_knowledge_base.py` 使用 `pipeline.project_cfg` 和 `pipeline.vector_store.local_path`
+
+### bug-030 验证
+1. `_convert_history([("user1", None), ("user2", "")])` → 返回空列表，无连续 user 消息
+
+### bug-031 验证
+1. `CHUNK_SEPARATOR` 为独特字符串 `\n\n=====CHUNK_SEPARATOR=====\n\n`
+2. `_build_context` 传入列表而非字符串，避免分割
+
+### bug-033 验证
+1. `memory_mode=True` 时知识库构建后重启，不再重复构建
+2. 运行 `pytest tests/ -v` 确认所有测试通过
+
+---
+
+
+---
+
+## 新增问题（第四轮审查 - 测试工程师）
+
+> 本轮由测试工程师独立审查（tests/test_review_findings.py，45 项），
+> 修复前 12 项失败 → 修复后全部通过（185 passed）。
+
+## 问题总览
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-034 | `_convert_history` 中 `continue` 跳过整个循环体，assistant 回复为空时整轮对话丢失 | `app.py` | 高 | 已修复 |
+| bug-035 | `_validate_message_roles` 丢弃当前问题而非历史遗留 user 消息 | `src/rag_pipeline.py` | 高 | 已修复 |
+| bug-036 | `_ensure_knowledge_base` 只检查 chunks.json，文档构建的知识库（chunks_documents.json）永远无法加载 | `src/rag_pipeline.py` | 高 | 已修复 |
+| bug-037 | `EmbeddingCache._load` 模式缓存格式未校验，损坏时 `get()` 抛 AttributeError | `src/cache.py` | 中 | 已修复 |
+| bug-038 | `init_pipeline` 锁外返回全局 pipeline，并发切换项目时返回错误实例（竞态，实测 3/60 不匹配） | `app.py` | 高 | 已修复 |
+| bug-039 | `LRUCache._make_key` 对 kwargs/dict 参数顺序敏感，相同语义不同顺序 → 缓存未命中 | `src/cache.py` | 中 | 已修复 |
+| bug-040 | `add_artifacts` 缓存加载失败时覆盖写缓存文件，旧切片永久丢失 | `src/rag_pipeline.py` | 中 | 已修复 |
+| bug-041 | `format_answer` 对 `score=None` 的 chunk 抛 TypeError | `app.py` | 中 | 已修复 |
+| bug-042 | `VectorStore.search` 对 `hit.payload=None` 抛 AttributeError | `src/vector_store.py` | 中 | 已修复 |
+| bug-043 | `BM25Retriever.build([])` 空 corpus 抛 ZeroDivisionError | `src/retriever.py` | 中 | 已修复 |
+| bug-044 | `data/raw/artifacts.json` 未转义引号导致 JSON 解析失败，默认数据无法加载 | `data/raw/artifacts.json` | 高 | 已修复 |
+| bug-045 | `query_stream` 中 `timings["total"]` 在 LLM 生成前计算，指标误导 | `src/rag_pipeline.py` | 低 | 已修复 |
+| bug-046 | `verify_answer_grounding` 防幻觉检查是死代码，从未接入 query 流程 | `src/rag_pipeline.py` | 中 | 已修复 |
+| bug-047 | `HybridRetriever` 缓存 key 忽略 semantic_top_k/bm25_top_k，不同召回量共享缓存 | `src/retriever.py` | 中 | 已修复 |
+| bug-048 | `ProjectManager.add_project` 项目 ID 未校验，路径遍历可写入目录外文件 | `src/project.py` | 中 | 已修复 |
+| bug-049 | `_trim_context` 单段落超限时返回空字符串，唯一检索结果信息完全丢失 | `src/rag_pipeline.py` | 低 | 已修复 |
+| bug-050 | `query` 中 retrieved_chunks 短文本（<=200字符）也被追加 "..." | `src/rag_pipeline.py` | 低 | 已修复 |
+| bug-051 | `VectorStore.upsert` metadata 含不可序列化对象时 json.dumps 崩溃 | `src/vector_store.py` | 低 | 已修复 |
+| bug-052 | `generate_mock_data.py --stats` 恒为 True，参数无效 | `scripts/generate_mock_data.py` | 低 | 已修复 |
+| bug-053 | `VectorStore.client` 懒连接无锁，多线程并发首次访问重复创建客户端 | `src/vector_store.py` | 低 | 已修复 |
+
+## 问题详情
+
+### [bug-034] `_convert_history` 中 `continue` 跳过整个循环体导致整轮对话丢失
+- **根因分析**：`if messages and messages[-1]["role"] == "user": continue` 的 `continue` 跳过的是**整个循环体**（包括本轮的 `assistant_msg` 处理）。当上一轮 assistant 回复为空（`None`/`""`）时，`history = [("问题1", None), ("问题2", "回答2")]` 中"问题2"和"回答2"被**全部丢弃**（实测返回 `[]`），多轮对话上下文被静默重置。bug-015 的 `pass→continue` 修复解决了"assistant 无对应 user"问题，但引入了"整轮丢失"的新问题。
+- **影响范围**：所有使用 Web UI / `_convert_history` 的多轮对话场景。用户问一个未得到有效回复的问题后再追问，LLM 丢失全部上下文。
+- **修复方案**：将 `continue` 改为替换语义——把孤儿 user 消息（`messages[-1]`）替换为当前 user 消息，再正常处理本轮的 assistant 消息：
+  ```python
+  if messages and messages[-1]["role"] == "user":
+      messages[-1]["content"] = user_msg   # 最新问题优先，替换孤儿消息
+  else:
+      messages.append({"role": "user", "content": user_msg})
+  ```
+- **风险分析**：低。替换语义保证"最新问题 + 其回答"保留；`[(q1,None),(q2,a2)]` → `[u2, a2]`，`[(q1,a1),(q2,None),(q3,a3)]` → `[u1,a1,u3,a3]`；原有 bug-028/030 的空回复清理逻辑不受影响。
+- **测试验证**：`TestConvertHistoryMispairing`（2 项）通过；`tests/test_edge_cases.py::TestConvertHistoryEdgeCases`（6 项）通过。
+
+### [bug-035] `_validate_message_roles` 丢弃当前问题
+- **根因分析**：`query()`/`query_stream()` 在 `conversation_history` 之后追加当前问题，若历史以 user 结尾（上一轮未回答），追加后出现两个连续 user，`_validate_message_roles` 用 `continue` **跳过最后一条（当前问题）**，LLM 实际收到的是旧问题。
+- **影响范围**：直接调用 `RAGPipeline.query/query_stream` 的 SDK 场景（app.py 的 `_convert_history` 已保证无连续 user，不触发）。
+- **修复方案**：连续 user 时保留最新一条（`validated[-1] = msg`），与 bug-034 的替换语义一致。
+- **风险分析**：低。仅影响"历史以 user 结尾"的异常输入；正常输入不触发。
+- **测试验证**：`TestValidateMessageRolesDropsCurrentQuestion` 通过。
+
+### [bug-036] `_ensure_knowledge_base` 无法加载文档构建的知识库
+- **根因分析**：`build_knowledge_base_from_documents` 将切片缓存保存为 `chunks_documents.json`，但 `_ensure_knowledge_base` 只检查 `chunks.json` → 文档构建的默认项目知识库在 UI 中永远提示"未构建"（Qdrant 数据实际存在却不可用）。`run_qa.py` 同时检查两个文件，行为不一致。
+- **影响范围**：使用 `--source docs/mixed` 构建知识库的默认项目。
+- **修复方案**：`chunks.json` 不存在时回退检查 `chunks_documents.json`。
+- **风险分析**：低。项目专属路径（`project_cfg.chunk_cache_path`）不受影响。
+- **测试验证**：`TestEnsureKBWithDocumentCache` 通过（`_is_built=True`，BM25 从文档缓存加载）。
+
+### [bug-037] `EmbeddingCache` 模式缓存格式未校验
+- **根因分析**：`_load()` 中 `self._pattern_cache = json.load(f)` 未校验返回类型，`pattern_cache.json` 内容为 list/其他类型时，`get()` 中 `for pattern, emb in self._pattern_cache.items()` 抛 `AttributeError`。
+- **影响范围**：pattern_cache.json 损坏（磁盘中断写入、并发写入）后任何查询崩溃。
+- **修复方案**：加载后校验 `isinstance(raw, dict)`，否则降级为空字典。
+- **风险分析**：低。
+- **测试验证**：`TestEmbeddingCacheCorruptPatternFile` 通过。
+
+### [bug-038] `init_pipeline` 锁外返回全局 pipeline（竞态）
+- **根因分析**：`pipeline = RAGPipeline(...)` 在锁内创建，但 `return pipeline` 在锁外执行且读取**全局变量**。线程 A 释放锁后、return 前，线程 B 可能已替换全局 `pipeline`。实测 60 次并发调用出现 3 次"请求 museum 返回 enterprise"。真实环境下 `_ensure_knowledge_base`/`warmup` 耗时数秒，窗口更大。
+- **影响范围**：多用户并发切换项目时回答错乱；`_ensure_knowledge_base`/`warmup` 可能预热到错误 pipeline。
+- **修复方案**：锁内创建后用局部变量 `new_pipeline` 持有，锁外的预热与返回值都使用局部引用：
+  ```python
+  new_pipeline = RAGPipeline(...)
+  pipeline = new_pipeline
+  _current_project = project_id
+  # 锁外：
+  new_pipeline._ensure_knowledge_base()
+  new_pipeline.warmup()
+  return new_pipeline
+  ```
+- **风险分析**：低。快速路径（项目相同直接返回全局）保持不变，是安全且必要的。
+- **测试验证**：60 次并发实测 0 不匹配；`TestInitPipelineRace` 通过。
+
+### [bug-039] `LRUCache._make_key` 参数顺序敏感
+- **根因分析**：`str(args) + str(kwargs)` 中 `{"a":1,"b":2}` 与 `{"b":2,"a":1}`、`arg2=..,arg1=..` 与 `arg1=..,arg2=..` 生成不同 key → 语义相同的调用缓存未命中（llm_cache/retrieval_cache 均受影响）。
+- **影响范围**：所有使用 `LRUCache.get_with_key/set_with_key` 的缓存。
+- **修复方案**：用 `json.dumps(sort_keys=True, default=str)` 规范化参数表示，dict 键排序保证确定性。
+- **风险分析**：低。
+- **测试验证**：`TestLRUCacheKwargsOrder`（2 项）通过。
+
+### [bug-040] `add_artifacts` 缓存损坏时覆盖写导致旧数据丢失
+- **根因分析**：缓存加载失败 → `old_chunks=[]` → BM25 只重建新数据 → 缓存文件被**覆盖写**为仅新切片。旧切片从缓存中永久丢失（Qdrant 向量仍在，但 BM25 检索不到且缓存无法恢复）。
+- **影响范围**：缓存文件损坏后的增量添加操作。
+- **修复方案**：缓存加载失败时**跳过缓存文件更新**（保留损坏文件以便人工修复恢复），新切片仍加入内存 BM25 与 Qdrant。
+- **风险分析**：低。不丢失任何数据；代价是缓存文件保持损坏态，需人工修复。
+- **测试验证**：`TestAddArtifactsDataLoss` 通过（缓存内容保持不变）。
+
+### [bug-041] `format_answer` 对 `score=None` 崩溃
+- **根因分析**：`score = c.get("score", 0)` 在 key 存在但值为 `None` 时返回 `None`，`score > 0.7` 抛 `TypeError`。
+- **影响范围**：检索结果缺 score 字段/为 None 时 UI 层 500。
+- **修复方案**：`score = c.get("score") or 0`（None 与缺失都回退 0），`name`/`chunk_type` 同理。
+- **风险分析**：低。
+- **测试验证**：`TestFormatAnswerEdge`（2 项）通过。
+
+### [bug-042] `VectorStore.search` 对 `hit.payload=None` 崩溃
+- **根因分析**：`payload.get("metadata_json")` 在 payload 为 None 时抛 `AttributeError`。
+- **修复方案**：`payload = hit.payload or {}` 降级为空数据。
+- **风险分析**：低。
+- **测试验证**：`TestVectorStoreSearchNoPayload` 通过。
+
+### [bug-043] `BM25Retriever.build([])` 空 corpus 崩溃
+- **根因分析**：`rank_bm25` 内部 `num_doc / corpus_size` 对空 corpus 抛 `ZeroDivisionError`。
+- **影响范围**：空数据源（空目录/空 JSON/空缓存）构建知识库直接崩溃。
+- **修复方案**：`build([])` 前置检查，空列表直接返回并置 `_is_built=False`；未构建时 `retrieve` 仍抛 RuntimeError（保持原有契约）。
+- **风险分析**：低。
+- **测试验证**：`TestBM25EmptyCorpus` 通过；`test_bm25_not_built_error` 通过。
+
+### [bug-044] 默认数据文件损坏
+- **根因分析**：`data/raw/artifacts.json` 多处字符串值内使用未转义英文引号（如 `铸有"后母戊"三字`），`json.load` 报 `Expecting ',' delimiter`，默认项目无法加载数据、无法构建知识库。
+- **影响范围**：默认项目（museum）初始化、构建、加载全部失败。
+- **修复方案**：用 JSON 状态机修复 15 条文物数据中的 26 处未转义引号（字符串内部引号 → `\"`），数据内容不变。
+- **风险分析**：低。修复后 `json.load` 与 `DataLoader.load` 均验证通过（15 条）。
+- **测试验证**：`DataLoader.load("data/raw/artifacts.json")` 返回 15 条。
+
+### [bug-045] `query_stream` 的 timing 指标误导
+- **根因分析**：`timings["total"]` 在 LLM 流式生成**开始前**计算并随 meta yield，不含生成时间，UI 显示的是检索时间而非总响应时间。
+- **影响范围**：流式模式下的响应时间展示（app.py 流式分支未消费 timing，仅信息展示）。
+- **修复方案**：流式 meta 中改用 `timings["retrieval"]`（检索+重排阶段耗时），命名诚实；非流式 `query()` 的 `total` 仍在 LLM 后计算（正确）。
+- **风险分析**：低。无消费者依赖流式 `timing["total"]`。
+- **测试验证**：源码检查确认三个流式分支均使用 `retrieval`。
+
+### [bug-046] `verify_answer_grounding` 死代码
+- **根因分析**：防幻觉检查已实现但 `query()`/`query_stream()` 从未调用，功能完全失效。
+- **影响范围**：文档宣称的"回答质量评估"未生效。
+- **修复方案**：LLM 回答生成后调用 `verify_answer_grounding`，**仅记录告警日志、不拒绝回答**（避免行为突变）；流式模式累积全文后检查。
+- **风险分析**：低。只增加日志，不改变返回内容。
+- **测试验证**：`TestAnswerGroundingNotWired`（2 项）通过。
+
+### [bug-047] 混合检索缓存 key 忽略召回量参数
+- **根因分析**：`cache_key = f"retrieve:{query}:{top_k}:{filter_str}"` 未包含 `semantic_top_k`/`bm25_top_k`，不同召回量的检索共享同一缓存条目。
+- **影响范围**：调用方改变召回量参数时得到错误缓存结果。
+- **修复方案**：cache key 增加 `:{semantic_top_k}:{bm25_top_k}`。
+- **风险分析**：低。
+- **测试验证**：`TestHybridRetrieverCacheKey` 通过（不同 semantic_top_k 得到不同缓存）。
+
+### [bug-048] `ProjectManager.add_project` 路径遍历
+- **根因分析**：`save_path = self.projects_dir / f"{pid}.json"` 未校验 pid，`id="../evil"` 实测写入项目目录外任意位置。
+- **影响范围**：若未来通过 Web 接口开放添加项目即构成任意文件写入。
+- **修复方案**：pid 必须匹配 `[A-Za-z0-9_-]+`，否则抛 ValueError。
+- **风险分析**：低。
+- **测试验证**：`add_project({"id": "../evil"})` 抛 ValueError；合法 ID 正常添加。
+
+### [bug-049] `_trim_context` 单段落超限返回空
+- **根因分析**：唯一段落超过 max_chars 时 `trimmed=[]`，返回空字符串，唯一检索结果的信息完全丢失。
+- **修复方案**：无任何段落被保留时截断第一段保留开头；`max_chars <= 0` 直接返回空。
+- **风险分析**：低。
+- **测试验证**：`TestTrimContextBoundary`（3 项）通过；`test_trim_context_long` 等既有测试通过。
+
+### [bug-050] retrieved_chunks 短文本追加省略号
+- **根因分析**：`c.text[:200] + "..."` 对短文本也追加省略号。
+- **修复方案**：仅当 `len(c.text) > 200` 时截断追加。
+- **风险分析**：低。
+- **测试验证**：`TestRetrievedChunkTruncation`（2 项）通过。
+
+### [bug-051] `VectorStore.upsert` metadata 不可序列化崩溃
+- **根因分析**：metadata 含 set 等对象时 `json.dumps` 抛 TypeError，整个 upsert 失败。
+- **修复方案**：捕获 `(TypeError, ValueError)`，`metadata_json` 降级为 `"{}"` 并记录告警；过滤字段（`meta_*`）不受影响。
+- **风险分析**：低。
+- **测试验证**：`test_upsert_metadata_with_unserializable` 通过。
+
+### [bug-052] `generate_mock_data.py --stats` 恒为 True
+- **根因分析**：`action="store_true", default=True` 使参数永远为 True，`--stats` 无法关闭。
+- **修复方案**：改用 `argparse.BooleanOptionalAction`（Python 3.9+），支持 `--stats/--no-stats`。
+- **风险分析**：低。
+- **测试验证**：`python scripts/generate_mock_data.py --help` 显示 `--stats/--no-stats`。
+
+### [bug-053] `VectorStore.client` 懒连接无锁
+- **根因分析**：`client` 属性首次访问时无锁，多线程并发首次访问会重复创建 QdrantClient（仅一个被保存，其余泄漏且可能占用同一路径）。
+- **修复方案**：增加 `_connect_lock`，双重检查锁定。
+- **风险分析**：低。
+- **测试验证**：`TestCacheThreadSafety` 等并发测试通过。
+
+---
+
+## 修复顺序（新增）
+
+1. bug-034：`app.py`（高，对话上下文丢失）
+2. bug-035：`src/rag_pipeline.py`（高，当前问题被丢弃）
+3. bug-036：`src/rag_pipeline.py`（高，文档知识库不可用）
+4. bug-038：`app.py`（高，并发竞态）
+5. bug-044：`data/raw/artifacts.json`（高，默认数据不可加载）
+6. bug-037：`src/cache.py`（中）
+7. bug-039：`src/cache.py`（中）
+8. bug-040：`src/rag_pipeline.py`（中，数据丢失）
+9. bug-041：`app.py`（中）
+10. bug-042：`src/vector_store.py`（中）
+11. bug-043：`src/retriever.py`（中）
+12. bug-046：`src/rag_pipeline.py`（中）
+13. bug-047：`src/retriever.py`（中）
+14. bug-048：`src/project.py`（中，安全）
+15. bug-045：`src/rag_pipeline.py`（低）
+16. bug-049：`src/rag_pipeline.py`（低）
+17. bug-050：`src/rag_pipeline.py`（低）
+18. bug-051：`src/vector_store.py`（低）
+19. bug-052：`scripts/generate_mock_data.py`（低）
+20. bug-053：`src/vector_store.py`（低）
+
+---
+
+## 验证结果（新增）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-034 | `_convert_history([("问题1",None),("问题2","回答2")])` → `[问题2, 回答2]`；`[(q1,a1),(q2,None),(q3,a3)]` → `[q1,a1,q3,a3]`；`TestConvertHistoryMispairing` | ✅ 已修复 |
+| bug-035 | `_validate_message_roles([u,a,u]+[当前问题])` → 最后一条为当前问题；`TestValidateMessageRolesDropsCurrentQuestion` | ✅ 已修复 |
+| bug-036 | chunks_documents.json + qdrant 就绪 → `_ensure_knowledge_base()` 加载成功 `_is_built=True`；`TestEnsureKBWithDocumentCache` | ✅ 已修复 |
+| bug-037 | pattern_cache.json 为 list → `get()` 返回 None 不崩溃；`TestEmbeddingCacheCorruptPatternFile` | ✅ 已修复 |
+| bug-038 | 60 次并发实测 0 不匹配；`TestInitPipelineRace` | ✅ 已修复 |
+| bug-039 | kwargs/dict 乱序命中；`TestLRUCacheKwargsOrder` | ✅ 已修复 |
+| bug-040 | 损坏缓存 + add_artifacts → 缓存文件内容不变；`TestAddArtifactsDataLoss` | ✅ 已修复 |
+| bug-041 | `format_answer("回答",[{"score":None}])` 不崩溃；`TestFormatAnswerEdge` | ✅ 已修复 |
+| bug-042 | payload=None 返回空 Chunk 不崩溃；`TestVectorStoreSearchNoPayload` | ✅ 已修复 |
+| bug-043 | `build([])` 不崩溃；`TestBM25EmptyCorpus` | ✅ 已修复 |
+| bug-044 | `json.load` 通过（15 条，转义 26 处）；`DataLoader.load` 返回 15 条 | ✅ 已修复 |
+| bug-045 | 源码检查：query_stream 三个分支均使用 `timings["retrieval"]`；非流式 query() 的 total 在 LLM 后计算 | ✅ 已修复 |
+| bug-046 | `verify_answer_grounding` 已接入 query/query_stream；`TestAnswerGroundingNotWired` | ✅ 已修复 |
+| bug-047 | cache key 含 `semantic_top_k`/`bm25_top_k`；`TestHybridRetrieverCacheKey` | ✅ 已修复 |
+| bug-048 | `add_project({"id":"../evil"})` 抛 ValueError；合法 ID 正常 | ✅ 已修复 |
+| bug-049 | `_trim_context(["A"*300],100)` → `"A"*100`；`TestTrimContextBoundary` | ✅ 已修复 |
+| bug-050 | 短文本原样返回、长文本截断；`TestRetrievedChunkTruncation` | ✅ 已修复 |
+| bug-051 | metadata 含 set → upsert 不崩溃，metadata_json 降级 `"{}"`；`test_upsert_metadata_with_unserializable` | ✅ 已修复 |
+| bug-052 | `--help` 显示 `--stats/--no-stats` | ✅ 已修复 |
+| bug-053 | client 懒连接双重检查锁定；并发测试通过 | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **185 passed**（原 140 + 新增 45，含修复验证）。
+
+---
+
+## 验证步骤
+
+### bug-034 验证
+1. `python -c "from app import _convert_history; print(_convert_history([('问题1',None),('问题2','回答2')]))"` → `[user:问题2, assistant:回答2]`
+2. `pytest tests/test_review_findings.py::TestConvertHistoryMispairing -v`
+
+### bug-035 验证
+1. `pytest tests/test_review_findings.py::TestValidateMessageRolesDropsCurrentQuestion -v`
+2. 手动：直接调用 `RAGPipeline.query(question="新问题", conversation_history=[{user:旧问题},{assistant:旧回答},{user:未回答}])`，LLM 收到的最后一条应为"新问题"
+
+### bug-036 验证
+1. `python scripts/build_knowledge_base.py --source docs`（默认项目）后重启 Web UI，状态应显示"系统就绪"而非"知识库未构建"
+2. `pytest tests/test_review_findings.py::TestEnsureKBWithDocumentCache -v`
+
+### bug-038 验证
+1. `pytest tests/test_review_findings.py::TestInitPipelineRace -v`
+2. 手动：两个浏览器窗口分别选 museum/enterprise 并发提问，回答应各归其项目
+
+### bug-044 验证
+1. `python -c "import json; print(len(json.load(open('data/raw/artifacts.json', encoding='utf-8'))))"` → 15
+2. `python scripts/build_knowledge_base.py --source mock` 构建成功
+
+### bug-039 验证
+1. `pytest tests/test_review_findings.py::TestLRUCacheKwargsOrder -v`
+
+### bug-040 验证
+1. 手动损坏 `data/processed/chunks.json` 后调用 `add_artifacts`，确认文件内容未被覆盖
+2. `pytest tests/test_review_findings.py::TestAddArtifactsDataLoss -v`
+
+### bug-048 验证
+1. `python -c "from src.project import ProjectManager; import tempfile; from pathlib import Path; pm=ProjectManager(projects_dir=Path(tempfile.mkdtemp())); pm.add_project({'id':'../evil','name':'x'})"` → ValueError
+
+### bug-052 验证
+1. `python scripts/generate_mock_data.py --help` → 显示 `--stats, --no-stats`
+2. `python scripts/generate_mock_data.py --no-stats -n 3` 不打印统计信息
+
+---
+
+## 新增问题详情（第二轮独立审查，bug-054 ~ bug-061）
+
+### [bug-054] `app.py` 未实现 `--project` / `--no-stream` 命令行参数，文档中的多项目部署命令全部不可用
+- **根因分析**：`app.py` 的 `main()` 使用 argparse 仅定义 `--host/--port/--share` 三个参数，未定义 `--project` 与 `--no-stream`。但 README.md（约 15 处）、DEPLOY_GUIDE.md、project-context.md 以及 `generate_mock_project_data.py` 的运行提示均要求执行 `python app.py --project museum --port 7860` 进行多项目独立部署。实测 `python app.py --project museum` 直接报错 `unrecognized arguments: --project museum`，多项目独立部署流程无法按文档执行。
+- **影响范围**：README/DEPLOY_GUIDE 中所有 `app.py --project` 部署命令；用户按文档执行时 Web UI 无法启动。
+- **修复方案**：
+  1. `main()` argparse 增加 `--project`（透传给 `init_pipeline()`）与 `--no-stream`（禁用流式输出，透传给 `create_ui()`）；
+  2. `create_ui()` 增加 `default_stream: bool = True` 参数，`use_stream` 复选框的 `value` 使用该参数。
+- **风险分析**：低。仅新增可选参数，默认行为不变（不传 `--project` 时仍为默认项目，不传 `--no-stream` 时仍默认流式）。
+- **测试验证**：`python app.py --project museum --no-stream --help` 能正常解析参数；不带参数启动行为与之前一致。
+
+### [bug-055] Reranker 调用方式与响应解析不符合 rerank API 契约，线上重排可能从未生效
+- **根因分析**：`BailianReranker._rerank_with_api()` 调用 `TextEmbedding.call(model="qwen3-reranker-*", input=texts, query=query)`，并解析 `resp.output["embeddings"][].text_index/score`。但已核查本机 dashscope SDK：重排模型应使用专用接口 `dashscope.TextReRank.call(model, query, documents)`，其响应结构为 `output.results[].index / relevance_score`（`ReRankResult` 仅含 index、relevance_score、document 三个字段）。按现有实现，API 要么直接报错、要么 `embeddings` 为空触发 `ValueError`，随后静默降级到本地 TF-IDF——qwen3-reranker 线上重排实际上从未生效，且无任何日志提示。
+- **影响范围**：所有启用重排的 RAG 查询（Web UI / CLI / API），重排精度长期停留在本地 TF-IDF 水平。
+- **修复方案**：改用 `TextReRank.call(model=self.model, query=query, documents=texts)`，按 `output.results[].index / relevance_score` 解析，并按 `index` 映射回原始 candidates；保留失败时降级本地 TF-IDF 的逻辑。
+- **风险分析**：中。涉及对外部 API 的调用方式变更，需真实 API Key 验证；`TextReRank` 已由 dashscope 顶层导出（`dashscope/__init__.py` 第 32/74 行已验证）。
+- **测试验证**：mock `TextReRank.call` 返回 `{"results":[{"index":1,"relevance_score":0.9},...]}`，验证重排结果顺序正确；API 异常时仍走本地降级。
+
+### [bug-056] 自定义 Prompt 模板含字面花括号时 `get_prompt` 崩溃
+- **根因分析**：`ProjectConfig.get_prompt()` 使用 `template.format(context=context)` 填充上下文。若模板中出现字面花括号（如 JSON 示例 `{"name": "value"}`），`str.format()` 会将其当作占位符解析并抛 `KeyError`/`ValueError`。实测模板含 `{"name": "value"}` 时抛 `KeyError: '"name"'`，导致该项目的所有查询直接失败。`add_project()` 允许任意自定义 prompts，是触发入口。
+- **影响范围**：通过 `add_project()` 添加含 JSON/大括号文本的自定义项目；该类项目所有查询崩溃。
+- **修复方案**：改用 `template.replace("{context}", context)` 仅替换 `{context}` 占位符，其余大括号原样保留。
+- **风险分析**：低。内置模板均只含 `{context}` 占位符，`replace` 行为与 `format` 一致；模板无 `{context}` 时 `replace` 为空操作（原 `format` 在无占位符时也正常）。
+- **测试验证**：构造含 `{"a": 1}` 的模板调用 `get_prompt` 不再抛异常，`{context}` 被正确替换。
+
+### [bug-057] "今天天气怎么样" 等天气/闲聊问题被误判为知识库问题
+- **根因分析**：`is_kb_related()` 前缀匹配后，剩余部分仅当全部字符落在白名单 `'，。！？,。!? ～~啊呀哦嗯吧呗吗'` 中才判为闲聊。实测："今天天气怎么样" 命中关键词 `今天天气` 后剩余 `怎么样` 不在白名单 → 返回 True 走 RAG；"你好呢" 剩余 `呢` 同样不在白名单。而 `app.py` 示例按钮就包含"今天天气怎么样"，项目文档明确将"天气"列为闲聊路由场景。知识库未构建时该问题会直接抛 `RuntimeError`，已构建时也白白做一次检索。
+- **影响范围**：Web UI 示例按钮"今天天气怎么样"、"你好呢"、天气类开场白等场景；KB 未构建时直接报错。
+- **修复方案**：白名单补充 `呢`，并新增常见语气后缀集合 `（怎么样/怎样/如何）`，前缀匹配后 `extra` 为空、全为白名单字符、或命中后缀集合之一时判为闲聊。
+- **风险分析**：低。仅放宽闲聊判定边界；"天气对文物保存有影响吗" 等真实知识库问题（extra 含实质内容）不受影响。
+- **测试验证**：`is_kb_related("今天天气怎么样") == False`、`is_kb_related("你好呢") == False`、`is_kb_related("天气对文物保存有影响吗") == True`。
+
+### [bug-058] PaddleOCR 3.x 输出格式不兼容，OCR 静默失效
+- **根因分析**：`ImageParser._parse_with_paddleocr()` 按 PaddleOCR 2.x 格式解析 `line[1][0]`（即 `[box, (text, confidence)]`）。PaddleOCR 3.x 每行返回 `[text, confidence]`，此时 `line[1][0]` 取到的是 float 分数、`line[1][1]` 越界抛 IndexError，异常被 `parse()` 捕获后静默降级到 Tesseract——OCR 功能在 3.x 下完全失效且无提示。当前 PyPI 最新版即 3.x，requirements 注释中仍写 `paddleocr>=2.7.0`。
+- **影响范围**：`build_knowledge_base_from_documents` / `build_mixed` 中图片 OCR 功能（安装 PaddleOCR 3.x 的环境）。
+- **修复方案**：解析时兼容两种格式——`line[1]` 为 list/tuple 时按 2.x（box, (text, conf)）解析，否则按 3.x（text, conf）解析。
+- **风险分析**：低。仅在原有解析处增加分支，2.x 路径行为不变。
+- **测试验证**：mock 两种格式的 OCR 返回，验证均能正确提取文本与置信度过滤。
+
+### [bug-059] 切换项目时旧 pipeline 资源未释放
+- **根因分析**：`init_pipeline()` 在项目切换时直接新建 `RAGPipeline`（含新的 VectorStore/QdrantClient），旧实例从不释放。`VectorStore.close()` 定义后全项目无任何调用方。频繁切换项目会累积 Qdrant 本地文件句柄/连接。
+- **影响范围**：Web UI 频繁切换项目（museum/enterprise）的场景；长期运行内存/句柄缓慢增长。
+- **修复方案**：`init_pipeline()` 锁内替换全局 pipeline 前，对旧实例调用 `vector_store.close()`（try/except 保护）。
+- **风险分析**：低-中。切换瞬间若有旧 pipeline 的查询在途，close 可能使其报错；Web UI 单用户场景影响极小。
+- **测试验证**：连续切换多个项目后无异常；`pipeline.vector_store._client` 为 None（已关闭）。
+
+### [bug-060] `Artifact.tags` 为标量类型时切片崩溃，整件文物静默丢失
+- **根因分析**：`DataLoader._normalize()` 仅对字符串 tags 做拆分，JSON 中 `"tags": 123` 这类标量会原样保留到 `Artifact.tags`。`SmartChunking.chunk()` 中 `artifact.tags[:5]` 对 int 抛 `TypeError: 'int' object is not subscriptable`，异常被 `ChunkingPipeline.process()` 捕获后该文物无任何切片产出，仅记一条日志，数据静默丢失。
+- **影响范围**：JSON/CSV 数据源中 tags 字段为数字/布尔等标量的文物记录。
+- **修复方案**：`SmartChunking.chunk()` 中先判断 `artifact.tags` 是否为 list，非 list 时按空列表处理。
+- **风险分析**：低。仅增加类型防御，正常 list 路径行为不变。
+- **测试验证**：构造 `tags=123` 的 Artifact 调用 chunk() 不再抛异常，正常产出切片。
+
+### [bug-061] 全空字段的 Artifact 生成相同 ID，向量互相覆盖
+- **根因分析**：`Artifact.__post_init__()` 在无显式 id 时用 `generate_id(name+dynasty+category+material)` 生成。四个字段全空时生成 `md5("")`（实测 `d41d8cd9...`），多件空文物 id 完全相同，导致其 chunk id、Qdrant point id（由 chunk.id 哈希）全部相同，后插入向量覆盖前者，检索结果错乱/丢失。
+- **影响范围**：JSON 数据源中关键字段全部缺失的记录；构建知识库时多件空记录互相覆盖。
+- **修复方案**：`__post_init__()` 中组合字符串为空时，追加 `uuid4().hex` 保证唯一性。
+- **风险分析**：低。仅影响全空记录（原本就不可用），正常记录 ID 生成逻辑不变。
+- **测试验证**：两个全空 Artifact 的 id 不同；正常字段 Artifact 的 id 仍确定性生成。
+
+---
+
+## 修复顺序（第二轮）
+
+1. bug-054：`app.py`（高，文档部署命令不可用）
+2. bug-055：`src/reranker.py`（高，线上重排从未生效）
+3. bug-057：`src/rag_pipeline.py`（中，闲聊误判/示例按钮报错）
+4. bug-056：`src/project.py`（中，自定义项目查询崩溃）
+5. bug-058：`src/document_loader.py`（中，OCR 静默失效）
+6. bug-060：`src/chunking.py`（中，数据静默丢失）
+7. bug-061：`src/data_loader.py`（低，ID 碰撞）
+8. bug-059：`app.py`（低，资源未释放）
+
+---
+
+## 验证结果（第二轮）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-054 | `python app.py --project museum --no-stream --help` 参数解析正常；不带参数启动行为不变 | ✅ 已修复 |
+| bug-055 | mock `TextReRank.call` 返回 `results[].index/relevance_score`，重排顺序正确；API 异常时降级本地 | ✅ 已修复 |
+| bug-056 | 含 `{"a": 1}` 的模板 `get_prompt` 不抛异常，`{context}` 正确替换 | ✅ 已修复 |
+| bug-057 | `is_kb_related("今天天气怎么样")==False`、`("你好呢")==False`、`("天气对文物保存有影响吗")==True` | ✅ 已修复 |
+| bug-058 | mock 2.x 与 3.x 两种 OCR 输出均正确解析 | ✅ 已修复 |
+| bug-059 | 连续切换项目后旧 pipeline 的 vector_store 已关闭 | ✅ 已修复 |
+| bug-060 | `Artifact(name="X", tags=123)` 切片不再抛异常 | ✅ 已修复 |
+| bug-061 | 两个全空 Artifact 的 id 不同 | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **185 passed**（8 项修复全部完成，0 失败 0 错误）。
+
+> 说明：修复过程中同步更新了 3 个断言旧行为的既有测试（`test_is_kb_related` 中"今天天气怎么样"改为 False、`test_prompt_template_with_unmatched_brace` 改为断言不抛异常、`test_edge_cases.py` 两个 reranker 测试改为 mock `TextReRank.call`），并新增针对性验证脚本。
+
+---
+
+## 验证步骤（第二轮）
+
+### bug-054 验证
+1. `python app.py --project museum --no-stream --help` → 正常输出帮助信息（含 `--project`、`--no-stream`）
+2. `python app.py --project museum --no-stream` 启动后，UI 流式复选框默认不勾选
+
+### bug-055 验证
+1. `python -c` 构造 mock 响应调用 `_rerank_with_api`，验证结果按 relevance_score 降序且 index 映射正确
+2. 有 API Key 时实际调用一次，确认使用 qwen3-reranker 而非降级
+
+### bug-056 验证
+1. `python -c` 构造含 JSON 示例的自定义 Prompt 调用 `get_prompt`，不再抛异常
+
+### bug-057 验证
+1. `python -c "from src.rag_pipeline import RAGPipeline; print(RAGPipeline.is_kb_related('今天天气怎么样'))"` → False
+2. `python -c "...is_kb_related('你好呢')"` → False
+3. `python -c "...is_kb_related('天气对文物保存有影响吗')"` → True
+
+### bug-058 验证
+1. mock PaddleOCR 2.x 输出 `[[[box],('文本',0.95)]]` 与 3.x 输出 `[['文本',0.95]]`，均能提取文本
+
+### bug-059 验证
+1. 连续调用 `init_pipeline('museum')` / `init_pipeline('enterprise')` 多次，无异常，旧实例 vector_store 已关闭
+
+### bug-060 验证
+1. `python -c` 构造 `Artifact(name='X', tags=123)` 调用 `SmartChunking().chunk()` 不抛异常
+
+### bug-061 验证
+1. `python -c` 构造两个全空 Artifact，`id` 互不相同
+
+---
+
+## 新增问题（第五轮复测审查 - 精准修复）
+
+> 审查方式：全量源码复读 + `pytest` 回归（185 项基线全通过）
+> 本轮发现 P0×1、P1×7，共 **8 项**，全部修复完成
+> 全量测试：`pytest tests/ -q` → **185 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-062 | 检索缓存 key 缺少项目标识，跨项目共享缓存导致串数据 | `src/retriever.py`、`src/rag_pipeline.py` | P0 | 已修复 |
+| bug-063 | API 非 200 响应（429/5xx）无退避直接连发重试 | `src/llm.py`、`src/embeddings.py`、`src/reranker.py` | P1 | 已修复 |
+| bug-064 | 项目专属 chitchat Prompt 定义后从未生效 | `src/rag_pipeline.py` | P1 | 已修复 |
+| bug-065 | Settings 多个配置项未接线，修改 .env 无效 | `src/rag_pipeline.py` | P1 | 已修复 |
+| bug-066 | `add_artifacts` 在 Qdrant 集合缺失时 upsert 崩溃 | `src/rag_pipeline.py` | P1 | 已修复 |
+| bug-067 | Embedding 模式缓存加载未校验值类型 | `src/cache.py` | P1 | 已修复 |
+| bug-068 | `init_pipeline` 关闭旧连接后旧实例惰性重连，双客户端同路径冲突 | `src/vector_store.py` | P1 | 已修复 |
+| bug-069 | 构建方法静默忽略传入的 `project_id`，数据写入错误项目 | `src/rag_pipeline.py` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-062] 检索缓存 key 缺少项目标识 → 跨项目串数据（P0）
+
+- **根因分析**：`retrieval_cache` 是模块级全局单例（`src/cache.py`），所有项目（museum / enterprise）的 `HybridRetriever` 实例共享。缓存 key 为 `retrieve:{query}:{top_k}:{semantic_top_k}:{bm25_top_k}:{filter_str}`，**不含 project_id / collection_name**。Web UI 支持同一进程内切换项目，5 分钟 TTL 内相同问题会命中另一个项目的缓存结果；同一项目重建知识库后 TTL 内也会命中旧数据。
+- **影响范围**：多项目 Web UI 下返回错误项目的文物/文档；重建知识库后短时间内查询返回旧答案。
+- **修复方案**：缓存 key 加入 `self.vector_store.collection_name`；`build_knowledge_base` / `build_knowledge_base_from_documents` 重建完成后调用 `retrieval_cache.clear()` 使旧缓存失效。
+- **风险分析**：低风险。key 变化仅导致缓存未命中率上升；clear 只是清空优化缓存，不影响正确性。
+- **测试验证**：`pytest tests/ -q` → 185 passed（同步为测试 fixture 的 mock 补充 `collection_name` 属性）。
+
+### [bug-063] API 非 200 响应无退避直接连发重试（P1）
+
+- **根因分析**：`BailianLLM.chat` / `chat_stream`、`BailianEmbedding.embed_one` / `_embed_batch`、`BailianReranker._rerank_with_api` 中，仅 `except Exception` 分支有 `time.sleep` 退避；`resp.status_code != 200`（如 429 限流、5xx）分支只记日志便进入下一轮重试，**无间隔连续请求**，限流时基本必然失败且加重限流。`chat_stream` 中非 200 甚至不会触发重试（warning 后直接 `return`）。
+- **影响范围**：所有 API 调用路径；限流/服务异常时重试全部无效。
+- **修复方案**：非 200 分支与异常分支一致，退避后重试；`chat_stream` 中非 200 改为抛 `RuntimeError` 进入既有重试逻辑（已 yield 过 token 时由 except 分支中断，避免重复输出）。
+- **风险分析**：低风险。仅增加重试等待，不改变成功路径行为。
+- **测试验证**：语法检查通过；`pytest tests/ -q` → 185 passed。
+
+### [bug-064] 项目专属 chitchat Prompt 未生效（P1）
+
+- **根因分析**：`src/project.py` 定义了 `MUSEUM_PROMPTS["chitchat"]` / `ENTERPRISE_PROMPTS["chitchat"]`（博物馆/企业人设），但 `query()`、`query_stream()` 及两处"检索为空回退"全部硬编码全局 `SYSTEM_PROMPT_CHITCHAT`，项目人设成为死代码。
+- **影响范围**：闲聊分支回答无人设差异，项目自定义 Prompt 不完整生效。
+- **修复方案**：新增 `_select_chitchat_prompt()`，优先使用 `project_cfg.get_prompt("chitchat")`，无项目时回退全局模板；替换 4 处硬编码调用。
+- **风险分析**：低风险。仅闲聊分支的 system prompt 来源变化。
+- **测试验证**：`grep` 确认 4 处调用全部替换；`pytest tests/ -q` → 185 passed。
+
+### [bug-065] Settings 多个配置项未接线（P1）
+
+- **根因分析**：`settings.llm_temperature` / `llm_max_tokens` / `llm_top_p` / `embedding_batch_size` / `retriever_top_k` / `retriever_hybrid_weight` / `reranker_enabled` 均未传入对应模块，全部使用硬编码默认值，用户修改 `.env` 完全无效。
+- **影响范围**：配置项误导（文档声称可配但实际不生效）。
+- **修复方案**：`BailianEmbedding(batch_size=settings.embedding_batch_size)`；`HybridRetriever(semantic_weight=settings.retriever_hybrid_weight, bm25_weight=1.0 - settings.retriever_hybrid_weight)`；`BailianLLM(temperature/max_tokens/top_p=settings.*)`；`query()` / `query_stream()` 默认 `top_k=settings.retriever_top_k`、`rerank=settings.reranker_enabled`。
+- **风险分析**：低风险。默认值与原有硬编码一致，行为不变。
+- **测试验证**：`pytest tests/ -q` → 185 passed。
+
+### [bug-066] `add_artifacts` 在 Qdrant 集合缺失时崩溃（P1）
+
+- **根因分析**：`_ensure_knowledge_base` 在「BM25 已加载但 Qdrant 不存在」时仍置 `_is_built = True`，此时调用 `add_artifacts` → `vector_store.upsert` 对不存在的集合抛异常，无兜底。
+- **影响范围**：仅 BM25 可用（Qdrant 数据缺失/被删）时增量添加直接报错。
+- **修复方案**：追加前先 `create_collection(overwrite=False)`（集合已存在时直接返回，不存在时创建）。
+- **风险分析**：低风险。幂等操作。
+- **测试验证**：`pytest tests/ -q` → 185 passed。
+
+### [bug-067] Embedding 模式缓存加载未校验值类型（P1）
+
+- **根因分析**：`EmbeddingCache._load()` 对 `exact_cache` 校验了值必须是 `list[float]`，但 `pattern_cache` 只校验了顶层是 dict，值未校验。缓存文件损坏/被篡改时，`get()` 会把非列表值当作 embedding 返回（下游 Qdrant 检索失败），或 `_pattern_match` 中 `len(pattern)` 因 pattern 非字符串抛 TypeError。
+- **影响范围**：损坏的 `pattern_cache.json` 导致查询崩溃或结果错误。
+- **修复方案**：与 exact_cache 一致，校验键为 str、值为 `list[float]`，非法条目跳过并告警。
+- **风险分析**：低风险。仅增加防御性校验。
+- **测试验证**：`pytest tests/ -q` → 185 passed。
+
+### [bug-068] `init_pipeline` 关闭旧连接后旧实例惰性重连（P1）
+
+- **根因分析**：`init_pipeline` 锁内关闭旧 pipeline 的 vector_store，但锁外可能有请求已持有旧实例引用；旧实例下次访问 `client` 属性会**惰性重连**到同一 Qdrant 本地路径，与新实例形成同一路径双客户端（Qdrant local mode 单客户端限制），可能文件锁冲突。
+- **影响范围**：多线程并发切换项目时偶发 Qdrant 本地路径锁冲突。
+- **修复方案**：`VectorStore.close()` 后置 `_closed = True`，`client` 属性在 `_closed` 时不再重连。
+- **风险分析**：低风险。已关闭实例不再自愈重连；当前 pipeline 不受影响。
+- **测试验证**：`pytest tests/ -q` → 185 passed。
+
+### [bug-069] 构建方法静默忽略传入的 `project_id`（P1）
+
+- **根因分析**：`build_knowledge_base` / `build_knowledge_base_from_documents` 中 `if pid and self.project_cfg is None:` — 当 pipeline 已绑定项目 A 时，传入 `project_id="B"` 被静默忽略，B 的数据写入 A 的路径/集合。
+- **影响范围**：程序化复用 pipeline 构建多项目时数据写入错误位置。
+- **修复方案**：条件改为 `self.project_cfg is None or self.project_cfg.id != pid`，切换后**同步更新 vector_store 的 collection_name / local_path / _snapshot_path**（连带修复，否则切换无效）。
+- **风险分析**：低风险。仅影响显式传不同 project_id 的调用路径。
+- **测试验证**：`pytest tests/ -q` → 185 passed。
+
+## 验证结果（第五轮）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-062 | 缓存 key 含 collection_name；重建后 `retrieval_cache.clear()`；mock fixture 补 `collection_name` | ✅ 已修复 |
+| bug-063 | 非 200 分支退避重试；`chat_stream` 非 200 进入重试逻辑 | ✅ 已修复 |
+| bug-064 | `_select_chitchat_prompt()` 优先项目模板，4 处调用全部替换 | ✅ 已修复 |
+| bug-065 | 模块构造与 query 默认参数全部接线 settings | ✅ 已修复 |
+| bug-066 | `add_artifacts` upsert 前 `create_collection(overwrite=False)` | ✅ 已修复 |
+| bug-067 | `_load` 校验 pattern 缓存值为 list[float] | ✅ 已修复 |
+| bug-068 | `close()` 后 `_closed=True`，`client` 不再重连 | ✅ 已修复 |
+| bug-069 | project_cfg 已绑定他项目时切换并同步 vector_store 指向 | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **185 passed**（8 项修复全部完成，0 失败 0 错误）。
+
+---
+
+## 新增问题（第六轮复测审查 - 精准修复）
+
+> 审查方式：全量源码复读 + 定向实验验证（客户端重连、并发预热阻塞、缓存清空）
+> 本轮发现 P0×1、P1×2，共 **3 项**，全部修复完成
+> 全量测试：`pytest tests/ -q` → **185 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-070 | `add_artifacts` 增量添加后未清空检索缓存，旧数据在 TTL 内继续被命中 | `src/rag_pipeline.py` | P0 | 已修复 |
+| bug-071 | 项目切换后 Qdrant 客户端未重连，数据写入旧项目目录 | `src/vector_store.py`、`src/rag_pipeline.py` | P1 | 已修复 |
+| bug-072 | `init_pipeline` 并发预热竞态：预热期间并发请求误报"知识库尚未构建" | `app.py` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-070] `add_artifacts` 增量添加后未清空检索缓存（P0）
+
+- **根因分析**：`build_knowledge_base` / `build_knowledge_base_from_documents` 重建后均调用 `retrieval_cache.clear()`（P0-1 修复），但 `add_artifacts`（增量添加，与重建共用同一 collection_name 键空间）遗漏了该调用。`retrieval_cache` 为模块级全局单例，TTL 300 秒。
+- **影响范围**：增量添加新文物后，检索结果最长 5 分钟（TTL）内不含新数据，检索结果与知识库实际内容不一致。
+- **修复方案**：`add_artifacts` 在切片 / 向量入库 / BM25 重建 / 缓存文件更新完成后调用 `retrieval_cache.clear()`，与两条重建路径保持一致。
+- **风险分析**：低风险。仅清空优化缓存，不影响正确性；与既有 P0-1 修复模式完全同型。
+- **测试验证**：源码确认 `retrieval_cache.clear()` 已加入 `add_artifacts`；`pytest tests/ -q` → 185 passed。
+
+### [bug-071] 项目切换后 Qdrant 客户端未重连，数据写入旧项目目录（P1）
+
+- **根因分析**：第五轮 bug-069 修复（P1-7）在切换项目时更新了 `collection_name` / `local_path` / `_snapshot_path`，但 `VectorStore._client` 为懒连接且连接后缓存。当切换发生在客户端已连接（如先执行过 `_ensure_knowledge_base` / `get_stats` / 一次查询）时，`create_collection` / `upsert` 仍写入旧项目的 Qdrant 目录。
+- **影响范围**：复用已连接 pipeline 切换项目时，新项目数据写入旧项目目录（数据不一致），且新项目 `_ensure_knowledge_base` 判定 Qdrant 缺失 → 语义检索静默不可用（仅剩 BM25）。
+- **修复方案**：`VectorStore` 新增 `reset_connection()`（关闭当前连接并重置 `_closed` 标记，下次访问按新路径惰性重连）；`build_knowledge_base` / `build_knowledge_base_from_documents` 的项目切换分支在更新路径后调用之。
+- **风险分析**：低风险。仅影响显式切换不同 project_id 的调用路径；客户端未连接时调用为幂等 no-op。
+- **测试验证**：定向实验确认 `reset_connection()` 后客户端重建，且 `create_collection` 写入新项目目录；`pytest tests/ -q` → 185 passed。
+
+### [bug-072] `init_pipeline` 并发预热竞态：预热期间并发请求误报"知识库尚未构建"（P1）
+
+- **根因分析**：`init_pipeline` 在锁内替换全局 `pipeline` 后，`_ensure_knowledge_base()` / `warmup()` 在锁外执行。预热完成前 `_is_built` 仍为 False，而锁外快速路径（`pipeline is not None and project_id == _current_project`）对同项目请求直接返回该半初始化实例，`answer_question` / `get_system_status` 因此误报"知识库尚未构建"。
+- **影响范围**：多用户并发（Gradio 多会话 + 页面加载状态刷新）热启动期间，知识库实际加载中即被误报未构建；切换项目时对旧 pipeline 执行 `vector_store.close()` 影响旧 pipeline 上仍在进行的查询（由 bug-068 的 `_closed` 标记兜底）。
+- **修复方案**：移除锁外快速路径，将预热移入 `_pipeline_lock` 内完成后才释放锁；同项目并发请求在锁内二次检查后拿到完成预热的实例。
+- **风险分析**：低风险。初始化通过全局锁串行化，锁内同项目检查为微秒级；预热期间其他请求短暂阻塞（初始化本身罕见）。
+- **测试验证**：定向实验确认并发请求在预热期间阻塞至 `_is_built=True` 才返回；`pytest tests/ -q` → 185 passed。
+
+## 验证结果（第六轮）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-070 | `add_artifacts` 源码含 `retrieval_cache.clear()`（与两条重建路径一致） | ✅ 已修复 |
+| bug-071 | 实验：`reset_connection()` 后客户端重建，`create_collection` 写入新项目目录 | ✅ 已修复 |
+| bug-072 | 实验：预热期间并发请求阻塞至 `_is_built=True` 才返回 | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **185 passed**（3 项修复全部完成，0 失败 0 错误）。

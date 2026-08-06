@@ -1,6 +1,6 @@
 # 项目上下文快照
 
-> 生成时间: 2024-01
+> 生成时间: 2024-01 (最后更新: 2024-08)
 > 项目根目录: `E:/project/agent_project/pi/test/`
 
 ---
@@ -195,8 +195,23 @@
 
 ### 当前状态
 - ✅ **v1.3.0 已完成发布**
-- 所有核心功能已实现并通过语法检查
-- 等待用户进行完整功能测试
+- ✅ **61 个已识别 Bug 已全部修复**（bug-001 至 bug-061，详见 bug-fix-plan.md）
+- ✅ **185 项单元测试全部通过**（0 失败、0 错误）
+- ✅ **代码已通过语法检查**（16 个 Python 文件）
+- 等待用户进行完整功能测试（尤其是多项目部署与真实 API 重排效果）
+
+### Bug 修复总览
+
+| 修复轮次 | 覆盖范围 | 涉及文件 | 状态 |
+|---------|---------|---------|------|
+| 第一轮 | bug-001 ~ bug-005 | `llm.py`, `rag_pipeline.py`, `retriever.py`, `app.py` | ✅ 已完成 |
+| 第二轮 | bug-006 ~ bug-011 | `cache.py`, `rag_pipeline.py`, `vector_store.py`, `app.py` | ✅ 已完成 |
+| 第三轮 | bug-012 ~ bug-028 | 多文件（cache, app, rag_pipeline, data_loader, retriever, embeddings, document_loader 等） | ✅ 已完成 |
+| 第四轮 | bug-029 ~ bug-033 | `build_knowledge_base.py`, `app.py`, `rag_pipeline.py` | ✅ 已完成 |
+| 第五轮（测试工程师） | bug-034 ~ bug-053 | `rag_pipeline.py`, `cache.py`, `app.py`, `vector_store.py`, `retriever.py` 等 | ✅ 已完成 |
+| 第六轮（独立审查） | bug-054 ~ bug-061 | `app.py`, `src/reranker.py`, `src/project.py`, `src/rag_pipeline.py`, `src/document_loader.py`, `src/chunking.py`, `src/data_loader.py` | ✅ 已完成 |
+
+> 注：bug-032 编号不存在（历史记录中从 bug-031 直接到 bug-033）。
 
 ### 待完成的任务
 
@@ -209,8 +224,10 @@
    - [ ] 测试多轮对话连贯性
 
 2. **文档完善**
-   - [ ] README 中多项目架构部分已更新
-   - [ ] project-context.md 已生成（本文件）
+   - [x] README 中多项目架构部分已更新
+   - [x] project-context.md 已生成（本文件）
+   - [x] bug-fix-plan.md 已更新（覆盖全部 61 个 Bug）
+   - [x] README/DEPLOY_GUIDE 中 `--project`/`--no-stream` 已与代码一致（bug-054）
 
 3. **潜在的改进方向**
    - [ ] 添加更多内置项目模板（如法律、医疗、教育）
@@ -225,7 +242,13 @@
 
 ### 已知 Bug
 
-1. **已修复**：`rag_pipeline.py` 中 `classify_query()` 引用了已删除的 `self.ARTIFACT_KEYWORDS`，已移除该代码块（v1.3.0 泛化遗留问题）
+所有已识别的 61 个 Bug 已全部修复（详见 bug-fix-plan.md）：
+- bug-001 ~ bug-005：第一轮修复（核心运行时、RAG 路由、类型标注、检索逻辑、UI）
+- bug-006 ~ bug-011：第二轮修复（缓存模式匹配、LRU 淘汰、竞态条件、闲聊误判、哈希冲突、空值比较）
+- bug-012 ~ bug-028：第三轮修复（缓存恢复、线程安全、消息序列、查询分类、数据加载、分词、防幻觉、流式UI等）
+- bug-029 ~ bug-033：第四轮修复（构建路径、消息格式、分隔符、memory_mode 路径检查等）
+- bug-034 ~ bug-053：第五轮修复（测试工程师发现：消息序列、知识库加载、缓存格式校验、竞态、空值崩溃、路径遍历等）
+- bug-054 ~ bug-061：第六轮修复（独立审查发现：CLI 参数缺失、Reranker API 契约、Prompt 花括号、闲聊误判、OCR 版本兼容、资源释放、tags 类型、ID 碰撞）
 
 ### 技术债务
 
@@ -233,6 +256,7 @@
 2. **`tests/test_pipeline.py`** 尚未更新以测试多项目场景
 3. **`scripts/generate_mock_data.py`**（旧版单项目生成器）仍保留但未使用，可考虑删除
 4. **`data/raw/artifacts.json`**（旧版单项目数据）仍保留但未使用
+5. **`remaining-issues.md`** 中列出的 8 项未修复问题（R02/R09/R19/R23/R25/R26/R28/R32）仍待评估
 
 ### 约束
 

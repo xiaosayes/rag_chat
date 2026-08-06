@@ -77,11 +77,11 @@
 - **问题：** 不同 LLM 模型上下文窗口差异大（4k/8k/32k/128k），硬编码值无法适应模型切换。
 - **建议：** 从 `settings` 读取，或根据 `llm_model_name` 自动推算。
 
-### R25. `format_answer()` 分数表情符号硬编码阈值（未修复）
+### R25. `format_answer()` 分数表情符号硬编码阈值（已修复，见 bug-086）
 - **文件：** `app.py:118`
 - **问题：** `score > 0.7 → 🟢, > 0.4 → 🟡, else → ⚪` 对不同相似度度量使用相同阈值，不准确。
 - **影响：** BM25 检索结果的分数显示可能不直观。
-- **建议：** 根据 `chunk_type` 或分数分布动态调整阈值。
+- **修复：** 第七轮（bug-086）改为分数阈值自适应——RRF 融合分（约 0.01 量级）按显示排名上色（第1名 🟢、第2-3名 🟡、其余 ⚪），重排分数（0~1）仍用固定阈值。
 
 ### R26. 示例按钮通过 `btn` 组件传递文本（未修复）
 - **文件：** `app.py:179`
@@ -110,6 +110,50 @@
 
 ---
 
+## 第六轮复测修复（P0×1 + P1×2，全部已修复）
+
+> 审查方式：全量源码复读 + 定向实验验证；全量测试 `pytest tests/ -q` → **185 passed**
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-070 | `add_artifacts` 增量添加后未清空检索缓存，旧数据在 TTL 内继续被命中 | `src/rag_pipeline.py` | P0 | 已修复 |
+| bug-071 | 项目切换后 Qdrant 客户端未重连，数据写入旧项目目录 | `src/vector_store.py`、`src/rag_pipeline.py` | P1 | 已修复 |
+| bug-072 | `init_pipeline` 并发预热竞态：预热期间并发请求误报"知识库尚未构建" | `app.py` | P1 | 已修复 |
+
+- **bug-070**：`build_knowledge_base` / `build_knowledge_base_from_documents` 重建后均调用 `retrieval_cache.clear()`（P0-1 修复），`add_artifacts` 遗漏；已补齐，增量添加后检索结果不再在 TTL 内命中旧数据。
+- **bug-071**：第五轮 bug-069（P1-7）切换项目时更新了路径但未处理已连接的 `_client`，`create_collection`/`upsert` 仍写入旧项目目录；`VectorStore` 新增 `reset_connection()`，两处切换分支在更新路径后调用。
+- **bug-072**：`init_pipeline` 锁外快速路径在预热完成前返回半初始化 pipeline，`answer_question`/`get_system_status` 误报"知识库尚未构建"；已移除快速路径并将预热移入锁内。
+
+---
+
+## 第七轮复测修复（P0×2 + P1×6 + 连带 P0×1，全部已修复）
+
+> 审查方式：全量源码复读 + 定向实验验证；全量测试 `pytest tests/ -q` → **186 passed**
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-080 | `build_knowledge_base(overwrite=False)` 重建时向量库残留陈旧切片，语义检索与 BM25/缓存不一致 | `src/vector_store.py`、`src/rag_pipeline.py` | P0 | 已修复 |
+| bug-081 | `add_artifacts` 重复添加同一文物时 BM25/缓存文件产生重复切片，与向量库幂等语义不一致 | `src/rag_pipeline.py` | P0 | 已修复 |
+| bug-082 | qdrant-client ≥1.12 移除弃用 `search` 方法，`vector_store.search` 永远 AttributeError，语义检索不可用 | `src/vector_store.py` | P0（连带） | 已修复 |
+| bug-083 | `_convert_history` 旧分隔符 `\n---\n` 截断回答正文中的 Markdown 水平线，多轮上下文丢失 | `app.py` | P1 | 已修复 |
+| bug-084 | Embedding 返回维度未校验，配置不一致时以晦涩错误失败 | `src/embeddings.py` | P1 | 已修复 |
+| bug-085 | LLM 响应缓存 key 未含 `max_tokens`/`top_p`/kwargs，不同参数共享缓存 | `src/llm.py` | P1 | 已修复 |
+| bug-086 | `format_answer` 分数阈值与 RRF 分数量级不匹配，所有结果恒为 ⚪（遗留 R25） | `app.py` | P1 | 已修复 |
+| bug-087 | 长文档仅索引前 5000 字符，其余内容静默丢失 | `src/document_loader.py` | P1 | 已修复 |
+| bug-088 | 项目切换时 `close()` 与在途请求建连竞态 | `src/vector_store.py` | P1 | 已修复 |
+
+- **bug-080**：新增 `VectorStore.delete_stale_chunks()`，`build_knowledge_base` / `build_knowledge_base_from_documents` 在 `overwrite=False` 时按新 `chunk_id` 集合清理陈旧点（scroll + delete）。
+- **bug-081**：`add_artifacts` 合并 `old_chunks + new_chunks` 后按 `chunk.id` 去重再构建 BM25 与写缓存。
+- **bug-082**：`vector_store.search` 按客户端能力选择 `query_points`（≥1.12）/ `search`（旧版），返回格式保持一致（`resp.points`）；对应测试改用 `query_points` mock。
+- **bug-083**：`_convert_history` 改为按 `**📚 检索来源**` 标记定位截断（并剥离末尾残留分隔符），无标记的正文不做任何截断。
+- **bug-084**：`embed_one` / `_embed_batch` 返回前校验 `len(embedding) == self.dimension`，不匹配即抛错走重试。
+- **bug-085**：`llm.chat` 缓存 get/set 的 key 参数补齐 `self.max_tokens`、`self.top_p`、`kwargs`。
+- **bug-086**：`format_answer` 当所有分数量级 < 0.1（RRF）时按显示排名上色（第1名 🟢、第2-3名 🟡、其余 ⚪）；0~1 分数仍用固定阈值。
+- **bug-087**：`load_all_as_artifacts` 对 >5000 字符文档按 4500 字符切段生成多个 Artifact，全文可检索。
+- **bug-088**：`VectorStore.close()` 与 client 懒连接共用 `_connect_lock`。
+
+---
+
 ## 汇总统计
 
 | 修复轮次 | 修复数量 | 涉及文件 |
@@ -117,6 +161,8 @@
 | 第一轮（bug-fix-plan） | 5 | `build_knowledge_base.py`, `vector_store.py`, `utils.py`, `run_qa.py`, `rag_pipeline.py` |
 | 第三轮（本轮） | 24 | `cache.py`, `vector_store.py`, `embeddings.py`, `rag_pipeline.py`, `retriever.py`, `chunking.py`, `reranker.py`, `config.py`, `generate_mock_data.py`, `app.py` |
 | 第四轮（R19+R32） | 2 | `cache.py`, `rag_pipeline.py`, `tests/test_pipeline.py` |
+| 第五轮（复测审查） | 8 | `retriever.py`, `rag_pipeline.py`, `cache.py`, `llm.py`, `embeddings.py`, `reranker.py`, `vector_store.py`, `tests/test_pipeline.py` |
+| 第六轮（复测审查） | 3 | `rag_pipeline.py`, `vector_store.py`, `app.py` |
 | **未修复** | **6** | 见下 |
 
 ### 最终状态
@@ -131,5 +177,9 @@
 | 注释/配置 | 2 | 2 | 0 |
 | Mock 数据 | 1 | 1 | 0 |
 | 测试覆盖 | 1 | 1 | 0 |
-| 分数显示 | 1 | 0 | 1 (R25) |
+| 分数显示 | 1 | 1 | 0 |
 | **合计** | **37** | **31** | **6** |
+
+> 注：上表为第四轮结束时的状态快照。第五轮（bug-062~069，8 项）与第六轮（bug-070~072，3 项）又修复 11 项，
+> 第七轮（bug-080~088，9 项）再修复 9 项；其中 R25（分数显示）已随 bug-086 修复。
+> 累计 **57** 项问题中已修复 **51** 项，剩余未修复 **6** 项（R02、R09、R23、R26 及遗留项，均为不影响功能的代码质量问题）。

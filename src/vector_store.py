@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,11 +51,18 @@ class VectorStore:
         self._snapshot_path = self.local_path / "memory_snapshot"
 
         self._client: Optional[QdrantClient] = None
+        # bug-053 修复：懒连接加锁，避免多线程并发首次访问 client 时重复创建实例
+        self._connect_lock = threading.Lock()
+        # P1-6 修复：关闭标记。close() 后不再惰性重连，
+        # 避免被替换的旧 pipeline 访问 client 时与新 pipeline 在同一 Qdrant 本地路径上双客户端冲突
+        self._closed = False
 
     @property
     def client(self) -> QdrantClient:
-        if self._client is None:
-            self._connect()
+        if self._client is None and not self._closed:
+            with self._connect_lock:
+                if self._client is None and not self._closed:
+                    self._connect()
         return self._client
 
     def _connect(self) -> None:
@@ -155,7 +163,13 @@ class VectorStore:
                 if isinstance(v, (str, int, float, bool, list)):
                     payload[f"meta_{k}"] = v
             # 同时保留原始 metadata JSON 字符串
-            payload["metadata_json"] = json.dumps(chunk.metadata, ensure_ascii=False)
+            # bug-051 修复：metadata 含不可序列化对象（如 set）时降级为空，
+            # 避免整个 upsert 因 json.dumps 崩溃
+            try:
+                payload["metadata_json"] = json.dumps(chunk.metadata, ensure_ascii=False)
+            except (TypeError, ValueError) as e:
+                logger.warning(f"metadata 不可序列化，跳过 metadata_json: {chunk.id} - {e}")
+                payload["metadata_json"] = "{}"
 
             point = qdrant_models.PointStruct(
                 id=point_id,
@@ -213,13 +227,26 @@ class VectorStore:
                 query_filter = qdrant_models.Filter(must=must_conditions)
 
         try:
-            hits = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                limit=top_k,
-                score_threshold=score_threshold,
-                query_filter=query_filter,
-            )
+            # P0 连带修复：qdrant-client >=1.12 已移除弃用的 search 方法（改用 query_points），
+            # 直接调用 self.client.search 会 AttributeError，导致语义检索永远失败；
+            # 此处按客户端能力选择 API，兼容旧版（<=1.11 仍用 search）
+            if hasattr(self.client, "query_points"):
+                resp = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    limit=top_k,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                )
+                hits = resp.points
+            else:
+                hits = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=top_k,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                )
         except Exception as e:
             err_str = str(e).lower()
             # 集合不存在（首次使用前未创建）返回空列表，其他异常传播
@@ -231,7 +258,8 @@ class VectorStore:
 
         results = []
         for hit in hits:
-            payload = hit.payload
+            # bug-042 修复：Qdrant 可能返回无 payload 的 hit，降级为空 dict 避免崩溃
+            payload = hit.payload or {}
             metadata = json.loads(payload.get("metadata_json", "{}"))
             chunk = Chunk(
                 id=payload.get("chunk_id", ""),
@@ -245,6 +273,46 @@ class VectorStore:
 
         return results
 
+    def delete_stale_chunks(self, keep_chunk_ids: set) -> int:
+        """删除集合中 chunk_id 不在 keep_chunk_ids 中的陈旧切片点
+
+        P0-1 修复：build_knowledge_base(overwrite=False) 重建时，Qdrant 只 upsert 不删除，
+        被移除/变更的文物旧向量会一直残留，导致语义检索返回知识库中已不存在的切片，
+        与 BM25/缓存文件不一致。此方法在重建后清理这些陈旧点。
+
+        Args:
+            keep_chunk_ids: 本次重建后应保留的 chunk_id 集合
+
+        Returns:
+            删除的陈旧点数量（失败时返回 0，不影响主流程）
+        """
+        try:
+            stale_ids = []
+            offset = None
+            while True:
+                records, offset = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=1000,
+                    offset=offset,
+                    with_payload=["chunk_id"],
+                    with_vectors=False,
+                )
+                for record in records:
+                    if record.payload.get("chunk_id") not in keep_chunk_ids:
+                        stale_ids.append(record.id)
+                if offset is None:
+                    break
+            if stale_ids:
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=stale_ids,
+                )
+                logger.info(f"清理陈旧向量: {len(stale_ids)} 条")
+            return len(stale_ids)
+        except Exception as e:
+            logger.warning(f"清理陈旧向量失败（不影响主流程）: {e}")
+            return 0
+
     def delete_collection(self) -> None:
         """删除集合"""
         try:
@@ -255,6 +323,20 @@ class VectorStore:
 
     def close(self) -> None:
         """关闭连接"""
-        if self._client:
-            self._client.close()
-            self._client = None
+        # P1-6 修复：与 client 懒连接共用锁，避免 close() 与 _connect() 交错执行
+        # （项目切换时旧 pipeline 被关闭，若同时有在途请求正在建立连接，可能拿到半初始化状态）
+        with self._connect_lock:
+            if self._client:
+                self._client.close()
+                self._client = None
+            # P1-6 修复：标记关闭，禁止后续惰性重连
+            self._closed = True
+
+    def reset_connection(self) -> None:
+        """关闭当前连接并重置关闭标记，使下次访问 client 时按当前配置重新连接
+
+        用于 pipeline 切换项目后，确保 Qdrant 客户端指向新项目的存储路径
+        （否则 create_collection/upsert 会继续写入旧项目的 Qdrant 目录）。
+        """
+        self.close()
+        self._closed = False

@@ -66,8 +66,11 @@ class BailianLLM:
 
         # 检查缓存
         if self.use_cache:
+            # P1-3 修复：缓存 key 补齐生成参数（max_tokens/top_p/额外 kwargs），
+            # 避免不同生成参数请求共享同一缓存条目导致返回错误参数的旧答案
             cached = llm_cache.get_with_key(
-                "chat", self.model, full_messages, self.temperature
+                "chat", self.model, full_messages, self.temperature,
+                self.max_tokens, self.top_p, kwargs,
             )
             if cached is not None:
                 logger.debug("LLM 响应命中缓存")
@@ -91,8 +94,10 @@ class BailianLLM:
                     content = resp.output.choices[0].message.content
                     # 写入缓存
                     if self.use_cache:
+                        # P1-3 修复：与查询侧缓存 key 保持一致，补齐生成参数
                         llm_cache.set_with_key(
-                            content, "chat", self.model, full_messages, self.temperature
+                            content, "chat", self.model, full_messages, self.temperature,
+                            self.max_tokens, self.top_p, kwargs,
                         )
                     return content
                 else:
@@ -100,6 +105,9 @@ class BailianLLM:
                         f"LLM API 返回异常 (attempt {attempt + 1}): "
                         f"{resp.status_code} - {resp.message}"
                     )
+                    # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试，避免无间隔连续请求
+                    if attempt < self.max_retries - 1:
+                        time.sleep(2 ** attempt)
 
             except Exception as e:
                 logger.warning(
@@ -154,6 +162,9 @@ class BailianLLM:
                             has_yielded = True
                     else:
                         logger.warning(f"Stream 返回异常: {resp.status_code}")
+                        # P1-1 修复：非 200 响应走重试逻辑（含退避）；
+                        # 若已 yield 过 token 则由 except 分支直接中断，避免重复内容
+                        raise RuntimeError(f"Stream 返回异常: {resp.status_code}")
                 return
 
             except Exception as e:

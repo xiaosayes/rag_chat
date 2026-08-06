@@ -25,6 +25,7 @@ from src.llm import BailianLLM
 from src.utils import save_json, load_json
 from src.document_loader import DocumentLoader
 from src.project import project_manager, ProjectConfig
+from src.cache import retrieval_cache
 
 
 # 上下文 chunk 分隔符（使用不易出现在正文中的唯一字符串，避免与 chunk 正文内容冲突，bug-031）
@@ -117,6 +118,10 @@ class RAGPipeline:
         "不错", "很好", "厉害",
     ]
 
+    # 常见语气后缀（允许紧随闲聊关键词出现，如 "今天天气怎么样"、"你好如何"）
+    # bug-057 修复：避免此类天气/寒暄问题被误判为知识库问题
+    CHITCHAT_SUFFIXES = ("怎么样", "怎样", "如何")
+
     # 查询分类模式（定义为类常量，避免每次调用重建）
     _RECOMMEND_PATTERNS = [
         (["推荐", "给我推荐", "帮我推荐", "推荐几个", "推荐一些"], 10),
@@ -178,6 +183,7 @@ class RAGPipeline:
         self.embedding = BailianEmbedding(
             model=embedding_model or settings.embedding_model_name,
             dimension=vector_size,
+            batch_size=settings.embedding_batch_size,  # P1-3 修复：接线配置
         )
         self.vector_store = VectorStore(
             vector_size=vector_size,
@@ -192,12 +198,19 @@ class RAGPipeline:
             vector_store=self.vector_store,
             embedding=self.embedding,
             bm25_retriever=self.bm25_retriever,
+            # P1-3 修复：接线混合检索权重配置
+            semantic_weight=settings.retriever_hybrid_weight,
+            bm25_weight=1.0 - settings.retriever_hybrid_weight,
         )
         self.reranker = BailianReranker(
             top_k=settings.reranker_top_k,
         )
         self.llm = BailianLLM(
             model=llm_model or settings.llm_model_name,
+            # P1-3 修复：接线生成参数配置
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+            top_p=settings.llm_top_p,
             use_cache=enable_cache,
         )
         self.chunking_pipeline = ChunkingPipeline(
@@ -234,6 +247,10 @@ class RAGPipeline:
 
         支持传入字符串（兼容旧调用）或列表（避免 CHUNK_SEPARATOR 在 chunk 正文中导致分割错误）。
         """
+        # bug-049 修复：max_chars 非正数时直接返回空，避免负值导致异常逻辑
+        if max_chars <= 0:
+            return ""
+
         if isinstance(context, str):
             if len(context) <= max_chars:
                 return context
@@ -252,6 +269,10 @@ class RAGPipeline:
                 trimmed.append(p)
                 char_count += len(p) + overhead
             else:
+                # bug-049 修复：没有任何段落被保留时，截断第一段保留开头，
+                # 避免唯一检索结果的整段信息完全丢失
+                if not trimmed:
+                    trimmed.append(p[:max_chars])
                 # 如果当前段落放不下，舍弃剩余所有段落
                 logger.debug(
                     f"上下文裁剪: {char_count} 字符 "
@@ -284,9 +305,18 @@ class RAGPipeline:
         """
         # 确定项目
         pid = project_id or self.project_id
-        if pid and self.project_cfg is None:
+        # P1-7 修复：project_cfg 已绑定其他项目时同样切换，
+        # 避免传入的 project_id 被静默忽略导致数据写入错误项目的路径
+        if pid and (self.project_cfg is None or self.project_cfg.id != pid):
             self.project_cfg = project_manager.switch_to(pid)
             self.project_id = pid
+            # 同步更新向量库指向新项目（集合名/存储路径）
+            self.vector_store.collection_name = self.project_cfg.collection_name
+            self.vector_store.local_path = self.project_cfg.qdrant_path
+            self.vector_store._snapshot_path = self.vector_store.local_path / "memory_snapshot"
+            # 若客户端已连接旧项目的存储路径，重置连接使其按新路径重连，
+            # 避免 create_collection/upsert 写入旧项目的 Qdrant 目录
+            self.vector_store.reset_connection()
 
         project_name = self.project_cfg.name if self.project_cfg else "默认"
 
@@ -323,6 +353,10 @@ class RAGPipeline:
         # 4. 存入向量数据库
         self.vector_store.create_collection(overwrite=overwrite)
         vector_count = self.vector_store.upsert(chunks, embeddings)
+        # P0-1 修复：overwrite=False 重建时清理向量库中已不存在的陈旧切片，
+        # 避免被移除/变更的文物旧向量残留，导致语义检索结果与知识库内容不一致
+        if not overwrite:
+            self.vector_store.delete_stale_chunks({c.id for c in chunks})
 
         # 5. 构建 BM25 索引
         self.bm25_retriever.build(chunks)
@@ -342,6 +376,8 @@ class RAGPipeline:
         save_json(chunk_data, save_path)
 
         self._is_built = True
+        # P0-1 修复：知识库重建后清空检索缓存，避免旧数据在 TTL 内继续被命中
+        retrieval_cache.clear()
 
         stats = {
             "artifacts": len(artifacts),
@@ -387,12 +423,15 @@ class RAGPipeline:
         texts = [chunk.text for chunk in new_chunks]
         embeddings = self.embedding.embed_batch(texts)
 
-        # 3. 追加到向量数据库
+        # 3. 追加到向量数据库（P1-4 修复：先确保集合存在，
+        # 避免 BM25 已加载但 Qdrant 集合缺失时 upsert 直接崩溃）
+        self.vector_store.create_collection(overwrite=False)
         vector_count = self.vector_store.upsert(new_chunks, embeddings)
 
         # 4. 重建 BM25 索引（合并新旧数据）
         # 从项目专属缓存加载旧切片
         old_chunks = []
+        cache_loaded = False
         if self.project_cfg:
             cache_path = self.project_cfg.chunk_cache_path
         else:
@@ -407,15 +446,37 @@ class RAGPipeline:
                     Chunk(**{k: v for k, v in c.items() if k in valid_fields})
                     for c in old_data
                 ]
+                cache_loaded = True
             except Exception as e:
                 logger.warning(f"加载缓存失败: {e}")
 
         all_chunks = old_chunks + new_chunks
+        # P0-2 修复：按 chunk.id 去重，避免同一文物被重复添加时
+        # BM25 索引与缓存文件出现重复切片（向量库按 ID 幂等覆盖，不会重复），
+        # 导致混合检索中重复内容的权重被抬高
+        seen_chunk_ids = set()
+        deduped_chunks = []
+        for _chunk in all_chunks:
+            if _chunk.id not in seen_chunk_ids:
+                seen_chunk_ids.add(_chunk.id)
+                deduped_chunks.append(_chunk)
+        all_chunks = deduped_chunks
         self.bm25_retriever.build(all_chunks)
 
         # 5. 更新缓存文件
-        all_chunk_data = [c.to_dict() for c in all_chunks]
-        save_json(all_chunk_data, cache_path)
+        # bug-040 修复：缓存加载失败时跳过保存，避免用不完整的数据覆盖缓存文件，
+        # 导致旧切片永久丢失（损坏的缓存文件仍保留，可人工修复恢复）
+        if cache_loaded or not cache_path.exists():
+            all_chunk_data = [c.to_dict() for c in all_chunks]
+            save_json(all_chunk_data, cache_path)
+        else:
+            logger.warning(
+                "缓存加载失败，跳过缓存文件更新（保留原文件以便人工恢复旧数据）"
+            )
+
+        # P0 修复：增量添加后清空检索缓存，避免旧数据在 TTL 内继续被命中
+        # （与 build_knowledge_base / build_knowledge_base_from_documents 的 P0-1 修复一致）
+        retrieval_cache.clear()
 
         stats = {
             "artifacts": len(artifacts),
@@ -453,9 +514,18 @@ class RAGPipeline:
         """
         # 确定项目（与 build_knowledge_base 一致）
         pid = project_id or self.project_id
-        if pid and self.project_cfg is None:
+        # P1-7 修复：project_cfg 已绑定其他项目时同样切换，
+        # 避免传入的 project_id 被静默忽略导致数据写入错误项目的路径
+        if pid and (self.project_cfg is None or self.project_cfg.id != pid):
             self.project_cfg = project_manager.switch_to(pid)
             self.project_id = pid
+            # 同步更新向量库指向新项目（集合名/存储路径）
+            self.vector_store.collection_name = self.project_cfg.collection_name
+            self.vector_store.local_path = self.project_cfg.qdrant_path
+            self.vector_store._snapshot_path = self.vector_store.local_path / "memory_snapshot"
+            # 若客户端已连接旧项目的存储路径，重置连接使其按新路径重连，
+            # 避免 create_collection/upsert 写入旧项目的 Qdrant 目录
+            self.vector_store.reset_connection()
 
         project_name = self.project_cfg.name if self.project_cfg else "默认"
         logger.info("=" * 50)
@@ -489,6 +559,10 @@ class RAGPipeline:
         # 4. 存入向量数据库
         self.vector_store.create_collection(overwrite=overwrite)
         vector_count = self.vector_store.upsert(chunks, embeddings)
+        # P0-1 修复：overwrite=False 重建时清理向量库中已不存在的陈旧切片，
+        # 避免被移除/变更的文档旧向量残留，导致语义检索结果与知识库内容不一致
+        if not overwrite:
+            self.vector_store.delete_stale_chunks({c.id for c in chunks})
 
         # 5. 构建 BM25 索引
         self.bm25_retriever.build(chunks)
@@ -502,6 +576,8 @@ class RAGPipeline:
         save_json(chunk_data, save_path)
 
         self._is_built = True
+        # P0-1 修复：知识库重建后清空检索缓存，避免旧数据在 TTL 内继续被命中
+        retrieval_cache.clear()
 
         stats = {
             "artifacts": len(artifacts),
@@ -621,9 +697,15 @@ class RAGPipeline:
             if q_lower == pattern.lower():
                 return False
             # 前缀匹配：问题以闲聊关键词开头且剩余部分仅为标点/语气词
+            # bug-057 修复：白名单补充"呢"，并允许"怎么样/怎样/如何"等常见语气后缀，
+            # 避免"今天天气怎么样""你好呢"被误判为知识库问题
             if q_lower.startswith(pattern.lower()):
                 extra = q_lower[len(pattern):].strip()
-                if not extra or all(c in '，。！？,。!? ～~啊呀哦嗯吧呗吗' for c in extra):
+                if (
+                    not extra
+                    or extra in RAGPipeline.CHITCHAT_SUFFIXES
+                    or all(c in '，。！？,。!? ～~啊呀哦嗯吧呗吗呢' for c in extra)
+                ):
                     return False
 
         return True
@@ -643,10 +725,13 @@ class RAGPipeline:
         for msg in messages:
             role = msg.get("role", "")
             if role == "user":
-                # 如果前一条也是 user，跳过
+                # bug-035 修复：连续 user 时保留最新一条（当前问题），
+                # 而不是简单地跳过——原实现会丢弃刚追加的当前问题，
+                # 导致 LLM 收到旧问题而非用户本次输入
                 if validated and validated[-1]["role"] == "user":
-                    continue
-                validated.append(msg)
+                    validated[-1] = msg
+                else:
+                    validated.append(msg)
             elif role == "assistant":
                 # assistant 前必须有 user
                 if not validated or validated[-1]["role"] != "user":
@@ -679,6 +764,12 @@ class RAGPipeline:
             else:
                 qdrant_base = settings.processed_data_path / "qdrant_db"
                 cache_path = settings.processed_data_path / "chunks.json"
+                # bug-036 修复：文档构建的知识库缓存文件名为 chunks_documents.json，
+                # 作为回退路径，避免文档构建的知识库永远无法被加载
+                if not cache_path.exists():
+                    doc_cache_path = settings.processed_data_path / "chunks_documents.json"
+                    if doc_cache_path.exists():
+                        cache_path = doc_cache_path
 
             # 修复 bug-033：memory_mode 下 Qdrant 数据存储在 _snapshot_path 子目录中
             # 使用正确的路径检查，避免因 memory_snapshot 目录本身导致误判
@@ -771,11 +862,22 @@ class RAGPipeline:
         }
         return system_prompt_map[query_type].format(context=context)
 
+    def _select_chitchat_prompt(self) -> str:
+        """选择闲聊 Prompt（优先使用项目自定义 Prompt，无则用通用模板）
+
+        P1-2 修复：此前闲聊分支硬编码全局 SYSTEM_PROMPT_CHITCHAT，
+        导致项目自定义的 chitchat 人设（博物馆/企业助手）从未生效。
+        """
+        if self.project_cfg:
+            return self.project_cfg.get_prompt("chitchat")
+        return SYSTEM_PROMPT_CHITCHAT
+
     def query(
         self,
         question: str,
-        top_k: int = 10,
-        rerank: bool = True,
+        # P1-3 修复：默认值接线配置
+        top_k: int = settings.retriever_top_k,
+        rerank: bool = settings.reranker_enabled,
         conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
@@ -819,7 +921,7 @@ class RAGPipeline:
             logger.info(f"闲聊模式 | 问题: {question[:60]}...")
             answer = self.llm.chat(
                 messages=messages,
-                system_prompt=SYSTEM_PROMPT_CHITCHAT,
+                system_prompt=self._select_chitchat_prompt(),
             )
             timings["total"] = round((time.time() - t_start) * 1000)
             return {
@@ -849,7 +951,7 @@ class RAGPipeline:
             t_llm = time.time()
             answer = self.llm.chat(
                 messages=messages,
-                system_prompt=SYSTEM_PROMPT_CHITCHAT,
+                system_prompt=self._select_chitchat_prompt(),
             )
             timings["llm"] = round((time.time() - t_llm) * 1000)
             timings["total"] = round((time.time() - t_start) * 1000)
@@ -887,6 +989,14 @@ class RAGPipeline:
 
         timings["total"] = round((time.time() - t_start) * 1000)
 
+        # bug-046 修复：接入防幻觉检查（仅记录日志，不拒绝回答，避免行为突变）
+        try:
+            grounding = self.verify_answer_grounding(answer, context)
+            if not grounding["passed"]:
+                logger.warning(f"防幻觉检查告警: {grounding['reason']}")
+        except Exception as e:
+            logger.debug(f"防幻觉检查失败: {e}")
+
         result = {
             "answer": answer,
             "query_type": query_type.value,
@@ -894,7 +1004,8 @@ class RAGPipeline:
                 {
                     "artifact_name": c.artifact_name,
                     "chunk_type": c.chunk_type,
-                    "text": c.text[:200] + "...",
+                    # bug-050 修复：只有超过 200 字符才追加省略号，短文本原样返回
+                    "text": (c.text[:200] + "...") if len(c.text) > 200 else c.text,
                     "score": round(s, 4),
                 }
                 for c, s in retrieve_results
@@ -908,8 +1019,9 @@ class RAGPipeline:
     def query_stream(
         self,
         question: str,
-        top_k: int = 10,
-        rerank: bool = True,
+        # P1-3 修复：默认值接线配置
+        top_k: int = settings.retriever_top_k,
+        rerank: bool = settings.reranker_enabled,
         conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> Generator[Union[Dict[str, Any], str], None, None]:
         """
@@ -940,11 +1052,13 @@ class RAGPipeline:
         if not kb_related:
             # 闲聊模式：直接 LLM 流式回答
             logger.info(f"闲聊模式 | 问题: {question[:60]}...")
-            timings["total"] = round((time.time() - t_start) * 1000)
+            # bug-045 修复：流式模式下 total 无法在 LLM 生成前计算，
+            # 该指标实为检索阶段耗时，命名改为 retrieval 避免误导
+            timings["retrieval"] = round((time.time() - t_start) * 1000)
             yield {"type": "meta", "from_kb": False, "query_type": "chitchat", "chunks": [], "timing": timings}
             yield from self.llm.chat_stream(
                 messages=messages,
-                system_prompt=SYSTEM_PROMPT_CHITCHAT,
+                system_prompt=self._select_chitchat_prompt(),
             )
             return
 
@@ -961,11 +1075,12 @@ class RAGPipeline:
         if not retrieve_results:
             # 检索为空时仍调用 LLM，让模型基于对话历史或通用知识尝试回答
             logger.info(f"检索无结果，尝试 LLM 基于对话历史回答: {question[:60]}...")
-            timings["total"] = round((time.time() - t_start) * 1000)
+            # bug-045 修复：同闲聊分支，流式模式下该指标为检索阶段耗时
+            timings["retrieval"] = round((time.time() - t_start) * 1000)
             yield {"type": "meta", "from_kb": True, "query_type": query_type.value, "chunks": [], "timing": timings}
             yield from self.llm.chat_stream(
                 messages=messages,
-                system_prompt=SYSTEM_PROMPT_CHITCHAT,
+                system_prompt=self._select_chitchat_prompt(),
             )
             return
 
@@ -988,14 +1103,27 @@ class RAGPipeline:
             }
             for c, s in retrieve_results
         ]
-        timings["total"] = round((time.time() - t_start) * 1000)
+        # bug-045 修复：流式模式下 total 无法在 LLM 生成前计算，
+        # 该指标实为检索+重排阶段耗时，命名改为 retrieval 避免误导
+        timings["retrieval"] = round((time.time() - t_start) * 1000)
         yield {"type": "meta", "from_kb": True, "query_type": query_type.value, "chunks": chunks_info, "timing": timings}
 
-        # 再 yield 流式回答
-        yield from self.llm.chat_stream(
+        # 再 yield 流式回答（累积全文用于防幻觉检查）
+        full_answer = ""
+        for token in self.llm.chat_stream(
             messages=messages,
             system_prompt=system_prompt,
-        )
+        ):
+            full_answer += token
+            yield token
+
+        # bug-046 修复：流式回答完成后执行防幻觉检查（仅记录日志，不拒绝回答）
+        try:
+            grounding = self.verify_answer_grounding(full_answer, context)
+            if not grounding["passed"]:
+                logger.warning(f"防幻觉检查告警: {grounding['reason']}")
+        except Exception as e:
+            logger.debug(f"防幻觉检查失败: {e}")
 
     def verify_answer_grounding(self, answer: str, context: str) -> Dict[str, Any]:
         """

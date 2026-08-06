@@ -12,7 +12,7 @@ import time
 from typing import List, Optional, Tuple
 
 from loguru import logger
-from dashscope import TextEmbedding
+from dashscope import TextReRank
 
 from src.config import settings
 from src.chunking import Chunk
@@ -71,7 +71,10 @@ class BailianReranker:
         """
         使用百炼 Qwen3-Reranker API
 
-        Qwen3-Reranker 通过 TextEmbedding.call 调用，传入 model 参数指定模型名。
+        bug-055 修复：改用重排专用接口 dashscope.TextReRank（
+        原实现调用 TextEmbedding 并按 embeddings 格式解析，与重排响应契约不符，
+        导致线上重排静默降级为本地 TF-IDF）。
+        响应格式为 output.results[].index / relevance_score。
         支持模型：
           - qwen3-reranker-4b  (推荐)
           - qwen3-reranker-8b  (更准)
@@ -80,34 +83,31 @@ class BailianReranker:
 
         for attempt in range(self.max_retries):
             try:
-                resp = TextEmbedding.call(
+                resp = TextReRank.call(
                     model=self.model,
-                    input=texts,
-                    api_key=self.api_key,
                     query=query,
+                    documents=texts,
+                    api_key=self.api_key,
                 )
                 if resp.status_code == 200:
-                    embeddings = resp.output.get("embeddings", [])
-                    if not embeddings:
+                    results = resp.output.get("results", [])
+                    if not results:
                         raise ValueError("Qwen3-Reranker API 返回空结果")
 
-                    scores = []
-                    for item in embeddings:
-                        # Qwen3-Reranker 返回格式: {"text_index": int, "score": float}
-                        # 使用 is not None 而非 or，避免 0.0 被错误跳过（or 中 0.0 为 falsy）
-                        score = item.get("score")
-                        if score is None:
-                            score = item.get("relevance_score", 0.0)
-                        scores.append(float(score))
-
-                    # 按得分排序（降序）
-                    indexed = list(enumerate(scores))
-                    indexed.sort(key=lambda x: x[1], reverse=True)
-
+                    # Qwen3-Reranker 返回格式: {"index": int, "relevance_score": float}
+                    # 按 index 映射回原始 candidates（index 对应传入 documents 的下标）
                     reranked = []
-                    for idx, score in indexed:
-                        chunk, _ = candidates[idx]
-                        reranked.append((chunk, float(score)))
+                    for item in results:
+                        idx = item.get("index")
+                        score = item.get("relevance_score")
+                        if idx is None or score is None:
+                            continue
+                        if 0 <= idx < len(candidates):
+                            chunk, _ = candidates[idx]
+                            reranked.append((chunk, float(score)))
+
+                    if not reranked:
+                        raise ValueError("Qwen3-Reranker API 返回结果无法映射到候选")
 
                     result = reranked[:self.top_k]
                     logger.info(
@@ -119,6 +119,9 @@ class BailianReranker:
                         f"Qwen3-Reranker API 异常 (attempt {attempt + 1}): "
                         f"{resp.status_code} - {resp.message}"
                     )
+                    # P1-1 修复：非 200 响应（如 429 限流）同样退避后重试
+                    if attempt < self.max_retries - 1:
+                        time.sleep(1 * (attempt + 1))
             except Exception as e:
                 logger.warning(
                     f"Qwen3-Reranker 请求失败 (attempt {attempt + 1}): {e}"

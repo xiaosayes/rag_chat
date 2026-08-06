@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
@@ -38,30 +39,38 @@ def init_pipeline(project_id: str = ""):
     global pipeline, _current_project
     # 统一规范化：None 和 "" 都视为空（bug-013）
     project_id = project_id or ""
-    # 快速检查（无锁）
-    if pipeline is not None and project_id == _current_project:
-        return pipeline
-    # 慢速检查（加锁，双重检查锁定模式）
+    # 加锁初始化（双重检查锁定模式）
     with _pipeline_lock:
         if pipeline is not None and project_id == _current_project:
             return pipeline
         logger.info(f"初始化 RAG 流水线 - 项目: {project_id or '默认'}")
-        pipeline = RAGPipeline(
+        # bug-038 修复：锁内创建后用局部变量持有，预热与返回值都使用局部引用，
+        # 避免其他线程在锁外替换全局 pipeline 后返回错误项目的实例（竞态）
+        new_pipeline = RAGPipeline(
             local_mode=True,
             enable_cache=True,
             memory_mode=settings.qdrant_memory_mode,
             project_id=project_id or None,
         )
+        # bug-059 修复：替换前关闭旧 pipeline 的向量库连接，
+        # 避免频繁切换项目累积 Qdrant 文件句柄/连接
+        if pipeline is not None:
+            with suppress(Exception):
+                pipeline.vector_store.close()
+        pipeline = new_pipeline
         _current_project = project_id
-    try:
-        pipeline._ensure_knowledge_base()
-        pipeline.warmup()
-        logger.info("RAG 流水线就绪")
-    except RuntimeError as e:
-        logger.warning(f"知识库未构建: {e}")
-    except Exception as e:
-        logger.warning(f"预热失败: {e}")
-    return pipeline
+        # 并发预热竞态修复：预热在锁内完成后才释放锁，
+        # 避免并发请求在预热完成前拿到 _is_built=False 的 pipeline，
+        # 导致 answer_question/get_system_status 误报"知识库尚未构建"
+        try:
+            new_pipeline._ensure_knowledge_base()
+            new_pipeline.warmup()
+            logger.info("RAG 流水线就绪")
+        except RuntimeError as e:
+            logger.warning(f"知识库未构建: {e}")
+        except Exception as e:
+            logger.warning(f"预热失败: {e}")
+    return new_pipeline
 
 
 def _convert_history(history: list) -> list:
@@ -69,17 +78,26 @@ def _convert_history(history: list) -> list:
     messages = []
     for user_msg, assistant_msg in history:
         if user_msg:
-            # 如果前一条消息也是 user（中间 assistant 回复为空），跳过避免连续 user
+            # 如果前一条消息也是 user（中间 assistant 回复为空），
+            # bug-034 修复：不能 continue（会跳过本轮的 assistant 消息，导致整轮对话丢失），
+            # 上一条 user 是没有对应回复的孤儿消息，用当前 user 消息替换它，
+            # 既避免连续 user，又保留最新问题及本轮回答
             if messages and messages[-1]["role"] == "user":
-                continue  # bug-015 修复：跳过整轮，避免 assistant 消息在缺少对应 user 消息时被添加
+                messages[-1]["content"] = user_msg
             else:
                 messages.append({"role": "user", "content": user_msg})
         if assistant_msg:
-            # 只保留纯文本内容（去掉 --- 之后的检索来源标注）
-            if HISTORY_SEPARATOR in assistant_msg:
-                clean = assistant_msg.split(HISTORY_SEPARATOR)[0].strip()
-            elif HISTORY_SEPARATOR_OLD in assistant_msg:
-                clean = assistant_msg.split(HISTORY_SEPARATOR_OLD)[0].strip()
+            # 只保留纯文本内容（去掉检索来源标注）
+            # P1-1 修复：改为按检索来源标记定位并截断，
+            # 避免旧分隔符 "\n---\n" 误伤回答正文中的 Markdown 水平线，
+            # 导致多轮对话中该回答在分隔线之后的内容丢失
+            marker = "**📚 检索来源**"
+            marker_idx = assistant_msg.find(marker)
+            if marker_idx >= 0:
+                clean = assistant_msg[:marker_idx].rstrip()
+                # 去掉正文末尾残留的分隔符（\n---\n 或 \n\n---\n\n）
+                if clean.endswith("---"):
+                    clean = clean[:-3].rstrip()
             else:
                 clean = assistant_msg.strip()
             if clean:
@@ -190,11 +208,23 @@ def format_answer(answer: str, chunks: list, timing: dict = None) -> str:
     # 追加检索来源（仅当有检索结果时）
     if chunks:
         parts.append(f"\n{HISTORY_SEPARATOR}**📚 检索来源**\n")
+        # P1-4 修复：分数阈值自适应——混合检索的 RRF 融合分（约 0.01 量级）
+        # 与重排后的相关性分数（0~1）量级差异大，固定阈值 0.7/0.4 会导致
+        # RRF 场景下所有结果恒为灰色 ⚪，无法区分相关度
+        scores = [(c.get("score") or 0) for c in chunks[:5]]
+        max_score = max(scores) if scores else 0
+        # RRF 融合分无绝对意义（量级约 0.001~0.01），按显示排名上色：
+        # 第1名 🟢，第2-3名 🟡，其余 ⚪
+        rrf_scale = 0 < max_score < 0.1
         for i, c in enumerate(chunks[:5], 1):
-            name = c.get("artifact_name", "未知")
-            score = c.get("score", 0)
-            ctype = c.get("chunk_type", "full")
-            score_bar = "🟢" if score > 0.7 else "🟡" if score > 0.4 else "⚪"
+            # bug-041 修复：字段缺失/为 None 时使用默认值，避免 score 比较崩溃
+            name = c.get("artifact_name") or "未知"
+            score = c.get("score") or 0
+            ctype = c.get("chunk_type") or "full"
+            if rrf_scale:
+                score_bar = "🟢" if i <= 1 else "🟡" if i <= 3 else "⚪"
+            else:
+                score_bar = "🟢" if score > 0.7 else "🟡" if score > 0.4 else "⚪"
             parts.append(f"{i}. **{name}**  {score_bar} 相关度: {score:.3f}  [{ctype}]")
 
     # 追加响应时间（仅非流式有）
@@ -241,8 +271,12 @@ def get_system_status(project_id: str = ""):
         return f"❌ 状态检查失败: {e}"
 
 
-def create_ui():
-    """创建 Gradio 界面 v2（含检索结果可视化）"""
+def create_ui(default_stream: bool = True):
+    """创建 Gradio 界面 v2（含检索结果可视化）
+
+    Args:
+        default_stream: 流式输出复选框的默认值（--no-stream 时置 False）
+    """
     with gr.Blocks(
         title="文物知识库 RAG 问答系统",
         theme=gr.themes.Soft(
@@ -290,7 +324,7 @@ def create_ui():
                     submit_btn = gr.Button("发送", variant="primary", scale=1, min_width=80)
 
                 with gr.Row():
-                    use_stream = gr.Checkbox(label="流式输出", value=True)
+                    use_stream = gr.Checkbox(label="流式输出", value=default_stream)
                     clear_btn = gr.Button("🗑️ 清空对话", variant="secondary", size="sm", scale=1)
 
             # 右侧：检索结果面板
@@ -359,16 +393,19 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="监听地址")
     parser.add_argument("--port", type=int, default=7860, help="监听端口")
     parser.add_argument("--share", action="store_true", help="创建公开链接")
+    # bug-054 修复：补全 README/DEPLOY_GUIDE 中已声明但缺失的 --project / --no-stream 参数
+    parser.add_argument("--project", type=str, default="", help="项目 ID（如 museum、enterprise）")
+    parser.add_argument("--no-stream", action="store_true", help="禁用流式输出")
     args = parser.parse_args()
 
     setup_logger(settings.log_level)
     logger.info("正在初始化 RAG 系统...")
     try:
-        init_pipeline()
+        init_pipeline(args.project)
     except Exception as e:
         logger.warning(f"初始化警告: {e}")
 
-    demo = create_ui()
+    demo = create_ui(default_stream=not args.no_stream)
     logger.info(f"启动 Web UI: http://{args.host}:{args.port}")
     demo.launch(server_name=args.host, server_port=args.port, share=args.share, show_error=True)
 
