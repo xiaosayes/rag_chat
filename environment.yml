@@ -36,7 +36,6 @@ dependencies:
   - markdown>=3.5.0
   - pytesseract>=0.3.10
   - Pillow>=10.1.0
-  - opencv-python>=4.8.0
 
   # === OCR (PaddleOCR 对中文支持更好) ===
   - rapidfuzz>=3.0.0
@@ -81,6 +80,9 @@ dependencies:
     # PaddleOCR (GPU 版，对中文 OCR 效果最好)
     - paddlepaddle-gpu>=2.6.0
     - paddleocr>=2.7.0
+
+    # OpenCV（图片处理，pip 包名，conda 频道不可用）
+    - opencv-python>=4.8.0
 
     # 图片 EXIF 读取
     - piexif>=1.1.3

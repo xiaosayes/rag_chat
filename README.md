@@ -234,12 +234,9 @@
 # 进入项目目录
 cd /path/to/project
 
-# 创建虚拟环境（推荐）
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# Linux/Mac
-source venv/bin/activate
+# 创建 Conda 环境（推荐，服务器与开发机通用）
+conda env create -f environment.yml
+conda activate cultural-relics-rag
 
 # 安装依赖
 pip install -r requirements.txt
@@ -793,16 +790,12 @@ python scripts/run_qa.py --project museum
 本项目设计为**纯 API 调用**，GPU 服务器主要用于 PaddleOCR 加速。
 
 ```bash
-# 1. 安装系统依赖
-sudo apt-get update
-sudo apt-get install -y python3 python3-pip python3-venv
-
-# 2. 创建虚拟环境并安装依赖
-python3 -m venv venv
-source venv/bin/activate
+# 1. 创建 Conda 环境并安装依赖
+conda env create -f environment.yml
+conda activate cultural-relics-rag
 pip install -r requirements.txt
 
-# 3. 配置环境变量
+# 2. 配置环境变量
 export DASHSCOPE_API_KEY="your-api-key"
 
 # 4. 生成数据并构建知识库

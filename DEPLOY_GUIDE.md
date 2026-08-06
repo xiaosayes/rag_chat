@@ -105,18 +105,17 @@ cd /home/user/project
 tar -xzf project.tar.gz
 ```
 
-### 3.3 创建 Python 虚拟环境（推荐）
+### 3.3 创建 Conda 环境（推荐）
 
 ```bash
-# 安装 Python venv（如果未安装）
-sudo apt-get update
-sudo apt-get install -y python3 python3-pip python3-venv
+# 从 environment.yml 创建环境
+conda env create -f environment.yml
 
-# 创建虚拟环境
-python3 -m venv venv
+# 激活环境
+conda activate cultural-relics-rag
 
-# 激活虚拟环境
-source venv/bin/activate
+# 如果 Conda 环境已存在，直接激活
+# conda activate cultural-relics-rag
 ```
 
 ### 3.4 安装依赖
@@ -172,8 +171,8 @@ nano .env  # 编辑 .env 文件，填入 API Key
 ### 5.1 生成 Mock 测试数据
 
 ```bash
-# 确保在虚拟环境中
-source venv/bin/activate
+# 确保在 Conda 环境中
+conda activate cultural-relics-rag
 
 # 生成两个项目的测试数据
 python scripts/generate_mock_project_data.py
@@ -331,7 +330,8 @@ Type=simple
 User=user
 WorkingDirectory=/home/user/project
 Environment="DASHSCOPE_API_KEY=your-api-key-here"
-ExecStart=/home/user/project/venv/bin/python app.py --project museum --host 0.0.0.0 --port 7860
+# 使用 conda run 在 Conda 环境中执行
+ExecStart=/home/user/miniconda3/bin/conda run -n cultural-relics-rag python app.py --project museum --host 0.0.0.0 --port 7860
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/user/project/app_museum.log
@@ -340,6 +340,8 @@ StandardError=append:/home/user/project/app_museum.log
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **注意**：请将 `/home/user/miniconda3` 替换为你的实际 Conda 安装路径。可通过 `which conda` 查看。
 
 ### 启动服务
 
@@ -425,7 +427,7 @@ sudo systemctl restart nginx
 
 ```bash
 # 运行构建脚本
-source venv/bin/activate
+conda activate cultural-relics-rag
 python scripts/build_knowledge_base.py --project museum --source json
 ```
 
