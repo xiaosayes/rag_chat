@@ -38,8 +38,9 @@
 # 在项目根目录执行
 cd E:/project/agent_project/pi/test
 
-# 打包（用 --exclude 排除不需要的目录，不删除本地文件）
-tar -czf project.tar.gz ^
+# 打包到上级目录，避免 "Can't add archive to itself" 错误
+# 注意：--exclude=.env 排除本地 .env（含 API Key），服务器上需重新创建
+tar -czf ../project.tar.gz ^
   --exclude=__pycache__ ^
   --exclude=.pytest_cache ^
   --exclude=.git ^
@@ -50,7 +51,7 @@ tar -czf project.tar.gz ^
   --exclude=.env ^
   .
 
-:: 注意：.env 文件被排除在打包之外，部署到服务器后需重新创建
+:: 打包产物在上一级目录：E:/project/agent_project/project.tar.gz
 :: 如果本地没有 tar 命令，可以用 git bash 或 WSL 执行
 ```
 
