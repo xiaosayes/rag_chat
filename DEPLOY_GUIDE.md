@@ -38,11 +38,7 @@
 # 在项目根目录执行
 cd E:/project/agent_project/pi/test
 
-# 删除不必要的文件（避免打包过大）
-# 注意：这会删除 .env 中的 API Key 配置，部署后需重新配置
-del /f .env 2>nul
-
-# 打包（排除不需要的目录）
+# 打包（用 --exclude 排除不需要的目录，不删除本地文件）
 tar -czf project.tar.gz ^
   --exclude=__pycache__ ^
   --exclude=.pytest_cache ^
@@ -51,7 +47,11 @@ tar -czf project.tar.gz ^
   --exclude=data/processed ^
   --exclude=logs ^
   --exclude=*.pyc ^
+  --exclude=.env ^
   .
+
+:: 注意：.env 文件被排除在打包之外，部署到服务器后需重新创建
+:: 如果本地没有 tar 命令，可以用 git bash 或 WSL 执行
 ```
 
 或者使用 PowerShell（没有 `-Exclude` 参数时，手动删除不需要的文件后打包）：
