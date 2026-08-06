@@ -72,6 +72,13 @@ class Settings(BaseSettings):
         default=0.8,
         description="Top-p 采样",
     )
+    # bug-106 修复：联网搜索总开关（默认关闭避免误扣费）。
+    # 开启后由 rag_pipeline 按需自动启用：开放类/未知类问题或含时效关键词的问题
+    # 自动联网，纯知识库事实问题不联网。
+    llm_enable_search: bool = Field(
+        default=False,
+        description="是否启用联网搜索总开关（enable_search，按需自动启用；需百炼账号开通搜索能力）",
+    )
 
     # ========== 向量数据库 ==========
     vector_db_type: Literal["qdrant", "chroma"] = Field(

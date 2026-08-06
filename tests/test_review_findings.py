@@ -654,18 +654,25 @@ class TestVectorStoreSearchNoPayload:
 # 24. app.answer_question：空问题处理
 # =============================================================================
 class TestAnswerQuestionEmpty:
+    @staticmethod
+    def _last_assistant_content(history):
+        """兼容 Gradio 4/5（tuple）与 6.x（dict）的 Chatbot 消息格式"""
+        from app import _iter_history_pairs
+        pairs = list(_iter_history_pairs(history))
+        return pairs[-1][1] if pairs else ""
+
     def test_empty_question_yields(self):
         """空问题应返回提示而非崩溃。"""
         from app import answer_question
         gen = answer_question("   ", [], use_stream=True)
         history, chunks = next(gen)
-        assert "请输入问题" in history[-1][1]
+        assert "请输入问题" in self._last_assistant_content(history)
 
     def test_whitespace_question(self):
         from app import answer_question
         gen = answer_question("\t\n", [], use_stream=False)
         history, chunks = next(gen)
-        assert "请输入问题" in history[-1][1]
+        assert "请输入问题" in self._last_assistant_content(history)
 
 
 # =============================================================================
@@ -887,3 +894,358 @@ class TestGradio6Compatibility:
         else:
             # 4/5.x：使用 show_copy_button/bubble_full_width
             assert "show_copy_button" in valid and "bubble_full_width" in valid
+
+
+# =============================================================================
+# 48. bug-101：Gradio 6.0 Chatbot 消息格式变更（dict 列表）导致页面报错
+#     （生产实测：提问后页面返回"错误"，日志：
+#       Data incompatible with messages format. Each message should be a
+#       dictionary with 'role' and 'content' keys or a ChatMessage object.）
+# =============================================================================
+class TestGradio6ChatMessageFormat:
+    def test_iter_history_pairs_accepts_dict_format(self):
+        """Gradio 6.x dict 消息格式应归一化为 (user, assistant) 对"""
+        from app import _iter_history_pairs
+        hist = [
+            {"role": "user", "content": "问题1"},
+            {"role": "assistant", "content": "回答1"},
+            {"role": "user", "content": "问题2"},
+        ]
+        assert list(_iter_history_pairs(hist)) == [
+            ("问题1", "回答1"), ("问题2", None),
+        ]
+
+    def test_iter_history_pairs_keeps_tuple_format(self):
+        """Gradio 4/5 tuple 格式仍应正常归一化"""
+        from app import _iter_history_pairs
+        assert list(_iter_history_pairs([("问题1", "回答1"), ("问题2", None)])) == [
+            ("问题1", "回答1"), ("问题2", None),
+        ]
+
+    def test_convert_history_accepts_dict_format(self):
+        """_convert_history 应正确处理 Gradio 6.x dict 历史"""
+        from app import _convert_history
+        hist = [
+            {"role": "user", "content": "有什么文物"},
+            {"role": "assistant", "content": "推荐司母戊鼎。"},
+        ]
+        assert _convert_history(hist) == [
+            {"role": "user", "content": "有什么文物"},
+            {"role": "assistant", "content": "推荐司母戊鼎。"},
+        ]
+
+    def test_append_conversation_produces_valid_dict_messages(self):
+        """Gradio 6 下追加的对话必须是合法 dict 消息（含 role/content 键）"""
+        from app import _append_conversation, _update_last_assistant, _GRADIO_MAJOR
+        if _GRADIO_MAJOR < 6:
+            pytest.skip("仅 Gradio 6.x 场景")
+        history = []
+        _append_conversation(history, "有什么文物", "")
+        assert history == [
+            {"role": "user", "content": "有什么文物"},
+            {"role": "assistant", "content": ""},
+        ]
+        _update_last_assistant(history, "有什么文物", "这是回答")
+        assert history[-1] == {"role": "assistant", "content": "这是回答"}
+
+    def test_answer_question_produces_dict_history_on_gradio6(self):
+        """Gradio 6 下完整问答流程产出的 history 必须是合法 dict 消息列表"""
+        import pytest
+        from unittest.mock import patch, MagicMock
+        from app import _GRADIO_MAJOR
+        if _GRADIO_MAJOR < 6:
+            pytest.skip("仅 Gradio 6.x 场景")
+        from app import answer_question
+        fake_pipe = MagicMock()
+        fake_pipe._is_built = True
+        fake_pipe.query.return_value = {
+            "answer": "推荐司母戊鼎。",
+            "retrieved_chunks": [],
+            "timing": {"total": 100},
+        }
+        with patch("app.init_pipeline", return_value=fake_pipe):
+            results = list(answer_question("有什么文物", [], use_stream=False, project_id="museum"))
+        history = results[-1][0]
+        assert history, "history 不应为空"
+        for msg in history:
+            assert isinstance(msg, dict) and "role" in msg and "content" in msg
+        assert history[-1]["role"] == "assistant"
+
+
+# =============================================================================
+# 49. bug-103：dashscope 流式默认"合并模式"（累积全文 chunk）导致内容膨胀重复
+#     （生产实测：推荐 195 件文物均为重复；根因是未传 incremental_output=True，
+#       每个流式 chunk 的 content 为到当前为止的累积全文，被按增量追加后翻倍拼接）
+# =============================================================================
+class TestStreamingIncrementalOutput:
+    def test_chat_stream_passes_incremental_output_true(self):
+        """chat_stream 调用 Generation.call 时必须显式传 incremental_output=True"""
+        import inspect
+        from src.llm import BailianLLM
+        src = inspect.getsource(BailianLLM.chat_stream)
+        assert "incremental_output=True" in src, "必须显式要求增量输出，否则 dashscope 返回累积全文"
+
+    def test_incremental_tokens_concatenate_without_duplication(self):
+        """增量 token 模式：拼接结果与 LLM 输出一致，无重复膨胀"""
+        from unittest.mock import patch, MagicMock, ANY
+        from src.llm import BailianLLM
+
+        class R:
+            status_code = 200
+            def __init__(self, text):
+                self.output = MagicMock()
+                self.output.choices = [MagicMock()]
+                self.output.choices[0].message.content = text
+
+        def incremental_stream(model, messages, api_key, temperature, max_tokens,
+                               top_p, stream, result_format, incremental_output,
+                               enable_search=False):
+            assert incremental_output is True
+            for t in ["以下是5件推荐", "：", "1.司母戊鼎", "。", "2.清明上河图", "。"]:
+                yield R(t)
+
+        llm = BailianLLM(max_retries=3)
+        with patch("src.llm.Generation.call", side_effect=incremental_stream) as mock_call:
+            tokens = list(llm.chat_stream([{"role": "user", "content": "有什么文物"}]))
+        full = "".join(tokens)
+        assert full == "以下是5件推荐：1.司母戊鼎。2.清明上河图。"
+        assert full.count("司母戊鼎") == 1, "流式输出出现重复"
+        assert mock_call.call_args.kwargs.get("incremental_output") is True
+
+    def test_merged_chunks_would_duplicate_without_fix(self):
+        """防御性验证：累积全文 chunk 若被按增量追加必然膨胀（证明根因）"""
+        text = "1.司母戊鼎。2.清明上河图。"
+        chunks = [text[:i] for i in range(3, len(text) + 1, 3)]
+        duplicated = "".join(chunks)
+        assert duplicated.count("司母戊鼎") > 1, "累积模式必然导致重复"
+
+
+# =============================================================================
+# 50. bug-104：Gradio 6 Chatbot.preprocess 将 content 转为 list[dict] 多模态格式，
+#     _convert_history 对 list 调用 .find() 崩溃（多轮对话第二轮起必现）
+# =============================================================================
+class TestGradio6ListContentHistory:
+    def test_convert_history_accepts_list_content(self):
+        """Gradio 6 preprocess 后的 list[dict] content 应被提取为文本并正常转换"""
+        from app import _convert_history
+        hist = [
+            {"role": "user", "content": [{"type": "text", "text": "有什么文物"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "推荐司母戊鼎。\n\n---\n\n**📚 检索来源**\n1. X"}]},
+        ]
+        result = _convert_history(hist)
+        assert result == [
+            {"role": "user", "content": "有什么文物"},
+            {"role": "assistant", "content": "推荐司母戊鼎。"},
+        ]
+
+    def test_mixed_content_types(self):
+        """content 混合 str / list / None 均不崩溃。
+        （最后一条 assistant 为空 → 按 bug-028 语义删除对应 user 消息）"""
+        from app import _convert_history
+        hist = [
+            {"role": "user", "content": "纯文本问题"},
+            {"role": "assistant", "content": [{"type": "text", "text": "回答1"}]},
+            {"role": "user", "content": [{"type": "text", "text": "列表问题"}]},
+            {"role": "assistant", "content": None},
+        ]
+        result = _convert_history(hist)
+        assert result == [
+            {"role": "user", "content": "纯文本问题"},
+            {"role": "assistant", "content": "回答1"},
+        ]
+
+    def test_multi_turn_answer_question_with_list_history(self):
+        """两轮对话（第二轮 history 为 Gradio 6 list content 格式）answer_question 不崩溃"""
+        from unittest.mock import patch, MagicMock
+        from app import answer_question
+
+        fake_pipe = MagicMock()
+        fake_pipe._is_built = True
+        fake_pipe.query.return_value = {
+            "answer": "从历史看，工艺成就辉煌。", "retrieved_chunks": [], "timing": {"total": 50},
+        }
+        def fake_stream(question, top_k, rerank, conversation_history):
+            yield {"type": "meta", "from_kb": False, "query_type": "chitchat", "chunks": [], "timing": {}}
+            yield "好的，我来回答。"
+        fake_pipe.query_stream.side_effect = fake_stream
+
+        # 第一轮：推荐问题
+        history = []
+        with patch("app.init_pipeline", return_value=fake_pipe):
+            list(answer_question("有什么文物", history, use_stream=False, project_id="museum"))
+        # Gradio 6 preprocess 后 content 转 list
+        gradio6_hist = [
+            {"role": "user", "content": [{"type": "text", "text": "有什么文物"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": history[-1]["content"]}]},
+        ]
+        # 第二轮：开放类问题（流式）
+        with patch("app.init_pipeline", return_value=fake_pipe):
+            results = list(answer_question("谈谈你的看法", gradio6_hist, use_stream=True, project_id="museum"))
+        assert "好的" in results[-1][0][-1]["content"]
+
+
+# =============================================================================
+# 51. bug-105：模型回答声明"截止到2024年7月"等训练数据截止日期，
+#     与用户当前时间（2026）不符。system prompt 统一注入当前日期并禁止截止声明。
+# =============================================================================
+class TestCurrentDateInjection:
+    def test_system_prompt_contains_current_date(self):
+        """system prompt 必须注入当前日期与禁止截止声明指令"""
+        from datetime import datetime
+        from src.llm import BailianLLM
+        llm = BailianLLM()
+        msgs = llm._build_messages(
+            [{"role": "user", "content": "hi"}], system_prompt="你是助手。"
+        )
+        sys_content = msgs[0]["content"]
+        now = datetime.now()
+        assert f"{now.year}年{now.month}月{now.day}日" in sys_content
+        assert "不要声明" in sys_content and "截止到XX年XX月" in sys_content
+        assert "以官方最新发布为准" in sys_content
+
+    def test_no_system_prompt_no_injection(self):
+        """无 system_prompt 时不注入（不影响纯消息调用）"""
+        from src.llm import BailianLLM
+        msgs = BailianLLM()._build_messages([{"role": "user", "content": "hi"}])
+        assert len(msgs) == 1 and msgs[0]["role"] == "user"
+
+    def test_chat_and_stream_both_inject_date(self):
+        """chat 与 chat_stream 均经 _build_messages 注入日期"""
+        from unittest.mock import patch, MagicMock
+        from src.llm import BailianLLM
+
+        llm = BailianLLM(max_retries=3)
+        # chat 非流式
+        with patch("src.llm.Generation.call") as mock_call:
+            mock_call.return_value = MagicMock(
+                status_code=200, output=MagicMock(
+                    choices=[MagicMock(message=MagicMock(content="你好"))]
+                )
+            )
+            llm.chat([{"role": "user", "content": "hi"}], system_prompt="你是助手。")
+            kwargs = mock_call.call_args.kwargs
+            assert "【当前日期】" in kwargs["messages"][0]["content"]
+        # chat_stream 流式
+        with patch("src.llm.Generation.call") as mock_call:
+            mock_call.return_value = iter([])
+            list(llm.chat_stream([{"role": "user", "content": "hi"}], system_prompt="你是助手。"))
+            kwargs = mock_call.call_args.kwargs
+            assert "【当前日期】" in kwargs["messages"][0]["content"]
+
+
+# =============================================================================
+# 52. bug-106：按需联网搜索（方案B）——开放/未知类自动联网，时效关键词命中联网，
+#     纯知识库事实问题不联网；总开关 settings.llm_enable_search 控制
+# =============================================================================
+class TestOnDemandWebSearch:
+    def test_should_enable_search_rules(self):
+        """开放/未知类联网；问候语不联网；时效词命中联网；纯事实问题不联网"""
+        from src.rag_pipeline import RAGPipeline, QueryType
+        p = RAGPipeline.__new__(RAGPipeline)
+        # 开放类 → 联网
+        assert p._should_enable_search(QueryType.OPEN_ENDED, "谈谈你对文物保护的看法")
+        # 未知类（非知识库开放讨论）→ 联网
+        assert p._should_enable_search(QueryType.UNKNOWN, "帮我推荐几本历史书")
+        # 未知类纯问候语 → 不联网
+        assert not p._should_enable_search(QueryType.UNKNOWN, "你好")
+        assert not p._should_enable_search(QueryType.UNKNOWN, "谢谢")
+        # 事实类带时效词 → 联网
+        assert p._should_enable_search(QueryType.FACTUAL, "博物馆最近有什么新展览")
+        assert p._should_enable_search(QueryType.FACTUAL, "门票价格现在是多少")
+        # 事实类纯知识库问题 → 不联网
+        assert not p._should_enable_search(QueryType.FACTUAL, "司母戊鼎是什么时期的青铜器")
+        assert not p._should_enable_search(QueryType.RECOMMENDATION, "推荐几件国宝级文物")
+
+    def test_chat_stream_passes_enable_search(self):
+        """chat_stream 将 enable_search 透传 Generation.call 且 system prompt 追加引导"""
+        from unittest.mock import patch, MagicMock
+        from src.llm import BailianLLM
+
+        class R:
+            status_code = 200
+            def __init__(self, text):
+                self.output = MagicMock()
+                self.output.choices = [MagicMock()]
+                self.output.choices[0].message.content = text
+
+        def stream(model, messages, api_key, temperature, max_tokens, top_p,
+                   stream, result_format, incremental_output, enable_search):
+            assert enable_search is True
+            assert "【联网搜索】" in messages[0]["content"]
+            yield R("搜索结果")
+
+        llm = BailianLLM(max_retries=3)
+        with patch("src.llm.Generation.call", side_effect=stream) as mock_call:
+            tokens = list(llm.chat_stream([{"role": "user", "content": "最近有什么展览"}],
+                                          system_prompt="你是助手。", enable_search=True))
+        assert "".join(tokens) == "搜索结果"
+        assert mock_call.call_args.kwargs.get("enable_search") is True
+
+    def test_query_stream_meta_reports_search_enabled(self):
+        """知识库事实问题 search_enabled=False；总开关关闭时即使开放类也不联网"""
+        from unittest.mock import patch
+        from src.rag_pipeline import RAGPipeline
+        from src.config import settings
+
+        # 总开关关闭：开放类问题也不联网
+        with patch.object(settings, "llm_enable_search", False):
+            p = RAGPipeline(local_mode=True)
+            p._should_enable_search = lambda qt, q: True  # 强制按需判断为 True
+            with patch.object(p, "is_kb_related", return_value=False):
+                events = list(p.query_stream("谈谈你的看法", conversation_history=None))
+            assert events[0]["search_enabled"] is False
+
+        # 总开关开启 + 按需判断命中 → 联网
+        with patch.object(settings, "llm_enable_search", True):
+            p = RAGPipeline(local_mode=True)
+            p._should_enable_search = lambda qt, q: True
+            with patch.object(p, "is_kb_related", return_value=False):
+                with patch.object(p.llm, "chat_stream", return_value=iter(["好"])) as mock_stream:
+                    events = list(p.query_stream("你好", conversation_history=None))
+            assert events[0]["search_enabled"] is True
+            assert mock_stream.call_args.kwargs.get("enable_search") is True
+
+
+# =============================================================================
+# 53. bug-107：qdrant-client 1.10+ 的 CollectionParams 不再有顶层 distance，
+#     页面"刷新状态"报错。get_stats 兼容新旧结构（单向量/命名向量/旧结构）。
+# =============================================================================
+class TestCollectionStatsCompat:
+    def _make_pipeline(self, params, points_count=38):
+        from unittest.mock import MagicMock
+        from src.rag_pipeline import RAGPipeline
+        p = RAGPipeline.__new__(RAGPipeline)
+        p.vector_store = MagicMock()
+        info = MagicMock()
+        info.points_count = points_count
+        info.config.params = params
+        p.vector_store.client.get_collection.return_value = info
+        return p
+
+    def test_new_structure_single_vector(self):
+        """qdrant-client 1.19.0：distance/size 在 params.vectors（VectorParams）"""
+        import qdrant_client.models as models
+        p = self._make_pipeline(models.CollectionParams(
+            vectors=models.VectorParams(size=1024, distance=models.Distance.COSINE)))
+        stats = p.get_stats()
+        assert stats["distance"] == "Cosine"
+        assert stats["vector_size"] == 1024
+        assert stats["vector_count"] == 38
+
+    def test_old_structure_top_level_distance(self):
+        """旧版 qdrant-client：distance 在 CollectionParams 顶层"""
+        from types import SimpleNamespace
+        p = self._make_pipeline(SimpleNamespace(
+            distance="Cosine", vectors=SimpleNamespace(size=768)))
+        stats = p.get_stats()
+        assert stats["distance"] == "Cosine"
+        assert stats["vector_size"] == 768
+
+    def test_named_vectors_map(self):
+        """命名向量 VectorParamsMap：取第一个向量配置的 distance/size"""
+        import qdrant_client.models as models
+        p = self._make_pipeline(models.CollectionParams(
+            vectors={"doc": models.VectorParams(size=512, distance=models.Distance.DOT)}))
+        stats = p.get_stats()
+        assert stats["distance"] == "Dot"
+        assert stats["vector_size"] == 512

@@ -38,6 +38,85 @@ footer { display: none !important; }
 .chunks-panel { border-left: 3px solid #e5a23b; padding-left: 12px; }
 """
 
+
+def _extract_text(content):
+    """统一提取消息文本内容，兼容 Gradio 6.x 的 content 格式。
+
+    bug-104 修复：Gradio 6 的 Chatbot.preprocess 会把消息 content 从 str
+    转为多模态 list 格式（如 [{"type": "text", "text": "..."}]），
+    多轮对话时 _iter_history_pairs 取到的 content 为 list，
+    导致 _convert_history 中 .find() 崩溃。此处兼容 str / list / 数字 / None。
+    """
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    if isinstance(content, (int, float)):
+        return str(content)
+    return content  # str 或 None
+
+
+def _iter_history_pairs(history: list):
+    """归一化 Gradio 4/5（tuple 列表）与 6.x（dict 列表）的 Chatbot 历史格式。
+
+    bug-101 修复：Gradio 6.0 起 Chatbot 消息格式从 [(user, assistant), ...]
+    改为 [{"role": ..., "content": ...}, ...]。此处按元素类型自动检测（不依赖
+    Gradio 版本号），统一转换为 (user_msg, assistant_msg) 对，供 _convert_history
+    复用原有处理逻辑。
+    bug-104 修复：content 统一经 _extract_text 提取为文本（Gradio 6 preprocess
+    会把 content 转为 list[dict] 多模态格式）。
+    """
+    user_msg = None
+    for msg in history:
+        if isinstance(msg, dict):
+            # Gradio 6.x：user/assistant 交替的 dict 消息
+            role = msg.get("role")
+            content = _extract_text(msg.get("content", ""))
+            if role == "user":
+                user_msg = content
+            elif role == "assistant":
+                yield user_msg, content
+                user_msg = None
+        else:
+            # Gradio 4/5：成对的 (user, assistant) 元组/列表
+            yield (
+                _extract_text(msg[0]) if len(msg) > 0 else None,
+                _extract_text(msg[1]) if len(msg) > 1 else None,
+            )
+            user_msg = None
+    if user_msg is not None:
+        # 末尾未配对的 user 消息（对应回复为空）
+        yield user_msg, None
+
+
+def _append_conversation(history: list, user_msg: str, assistant_msg: str) -> None:
+    """按 Gradio 版本追加一轮对话（用户消息 + 助手消息）。
+
+    bug-101：6.x 的 Chatbot 要求 dict 消息；4/5.x 用 (user, assistant) 元组。
+    """
+    if _GRADIO_MAJOR >= 6:
+        history.append({"role": "user", "content": user_msg})
+        history.append({"role": "assistant", "content": assistant_msg})
+    else:
+        history.append((user_msg, assistant_msg))
+
+
+def _update_last_assistant(history: list, user_msg: str, assistant_msg: str) -> None:
+    """按 Gradio 版本更新最后一条 assistant 消息的内容。
+
+    bug-101：6.x 中最后一条是 assistant dict，直接改 content；4/5.x 替换整个元组。
+    """
+    if _GRADIO_MAJOR >= 6:
+        history[-1]["content"] = assistant_msg
+    else:
+        history[-1] = (user_msg, assistant_msg)
+
 # 对话历史与检索来源的分隔符
 # 注意：此分隔符与 src/rag_pipeline.py 中的 CHUNK_SEPARATOR 用途不同：
 #   - HISTORY_SEPARATOR（本文件）：用于对话历史与检索来源标注之间的分隔
@@ -92,9 +171,9 @@ def init_pipeline(project_id: str = ""):
 
 
 def _convert_history(history: list) -> list:
-    """将 Gradio 对话历史转换为 LLM 消息格式"""
+    """将 Gradio 对话历史转换为 LLM 消息格式（兼容 Gradio 4/5 tuple 与 6.x dict 格式）"""
     messages = []
-    for user_msg, assistant_msg in history:
+    for user_msg, assistant_msg in _iter_history_pairs(history):
         if user_msg:
             # 如果前一条消息也是 user（中间 assistant 回复为空），
             # bug-034 修复：不能 continue（会跳过本轮的 assistant 消息，导致整轮对话丢失），
@@ -136,27 +215,26 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
     回答用户问题（支持多项目、多轮对话、闲聊路由、检索可视化）
     """
     if not question or not question.strip():
-        history.append(("", "请输入问题"))
+        _append_conversation(history, "", "请输入问题")
         yield history, ""
         return
 
     try:
         pipe = init_pipeline(project_id)
     except Exception as e:
-        history.append((question, f"❌ 初始化失败: {e}"))
+        _append_conversation(history, question, f"❌ 初始化失败: {e}")
         yield history, ""
         return
 
     if not pipe._is_built:
-        history.append((
-            question,
+        _append_conversation(history, question,
             "⚠️ 知识库尚未构建！\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
-        ))
+        )
         yield history, ""
         return
 
     conversation_history = _convert_history(history)
-    history.append((question, ""))
+    _append_conversation(history, question, "")
     chunks_info = []
 
     if use_stream:
@@ -182,25 +260,25 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
                     now = time.time()
                     if now - _last_update > 0.1 or len(full_answer) < 5:
                         display = format_answer(full_answer, chunks_info)
-                        history[-1] = (question, display)
+                        _update_last_assistant(history, question, display)
                         yield history, json.dumps(chunks_info, ensure_ascii=False)
                         _last_update = now
             # 最后一次更新确保完整显示
             display = format_answer(full_answer, chunks_info)
-            history[-1] = (question, display)
+            _update_last_assistant(history, question, display)
             yield history, json.dumps(chunks_info, ensure_ascii=False)
         except Exception as e:
             error_msg = f"❌ 查询出错: {e}"
             # 如果已经有部分回答，保留它而不是覆盖
             if full_answer:
-                history[-1] = (question, full_answer + f"\n{HISTORY_SEPARATOR}> ❌ 剩余内容生成失败")
+                _update_last_assistant(history, question, full_answer + f"\n{HISTORY_SEPARATOR}> ❌ 剩余内容生成失败")
             else:
-                history[-1] = (question, error_msg)
+                _update_last_assistant(history, question, error_msg)
             yield history, json.dumps(chunks_info, ensure_ascii=False) if chunks_info else ""
     else:
         try:
             # 非流式模式：先显示"正在查询..."提示
-            history[-1] = (question, "⏳ 正在查询知识库...")
+            _update_last_assistant(history, question, "⏳ 正在查询知识库...")
             yield history, ""
 
             result = pipe.query(
@@ -211,11 +289,11 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             chunks_info = result.get("retrieved_chunks", [])
             timing = result.get("timing", {})
             display = format_answer(answer, chunks_info, timing)
-            history[-1] = (question, display)
+            _update_last_assistant(history, question, display)
             yield history, json.dumps(chunks_info, ensure_ascii=False)
         except Exception as e:
             error_msg = f"❌ 查询出错: {e}"
-            history[-1] = (question, error_msg)
+            _update_last_assistant(history, question, error_msg)
             yield history, ""
 
 
@@ -318,7 +396,10 @@ def create_ui(default_stream: bool = True):
                     label="对话",
                     height=500,
                     render_markdown=True,
-                    avatar_images=(None, "🏛️"),
+                    # bug-108 修复：不再传 emoji 头像。Gradio 6 将 avatar_images 的 str
+                    # 当作文件路径解析为 FileData（如 "🏛️" → 路径不存在），前端渲染
+                    # Chatbot 时请求无效文件导致组件区域崩溃消失（页面一闪变空白）。
+                    avatar_images=None,
                     # bug-098：Gradio 6.0 移除 show_copy_button / bubble_full_width，
                     # 改用 buttons=["copy"] / layout="bubble"
                     **({"buttons": ["copy"], "layout": "bubble"} if _GRADIO_MAJOR >= 6

@@ -39,6 +39,13 @@
 - **P0 Embedding 批大小超 API 上限**：`text-embedding-v3` 单请求最多 10 条文本，默认 `embedding_batch_size=16` 导致构建知识库时全部批次 400 失败；默认值改为 10，并在 `BailianEmbedding` 构造时对超限配置钳制（>10 → 10，非整数回退）并告警，存量 `.env` 无需修改
 - **P0 确定性 API 错误被无效重试且无详情**：Embedding / LLM / Reranker 非 200 分支补全服务端 `resp.message`（此前只记状态码，根因不可见）；4xx（除 429 限流）为确定性客户端错误，新增 `FatalAPIError` 快速失败不再重试，429/5xx 仍按原退避重试
 - **P0 Web UI 白屏（Gradio 6 兼容）**：Gradio 6.0 移除 `Chatbot(show_copy_button/bubble_full_width)` 与 `Blocks(theme/css)` 参数，按主版本分支兼容（6.x 用 `buttons=["copy"]`/`layout="bubble"`，theme/css 移到 `launch()`），4/5/6.x 均可运行
+- **P0 问答页面报错（Gradio 6 消息格式）**：Gradio 6.0 的 `Chatbot` 消息格式从 tuple 列表 `[(user, assistant)]` 改为 dict 列表 `[{"role", "content"}]`，`answer_question` 产出 tuple 历史导致 postprocess 校验失败、页面返回"错误"；新增 `_iter_history_pairs`（按元素类型自动检测格式）/ `_append_conversation` / `_update_last_assistant` 三个 helper，全部 history 操作按版本产出合法消息
+- **P0 多轮对话崩溃（Gradio 6 多模态 content）**：Gradio 6 的 `Chatbot.preprocess` 将消息 content 从 str 强制转为 list[dict]（`[{"type": "text", "text": ...}]`），`_convert_history` 对 list 调 `.find()` 崩溃（多轮第二轮起必现）；新增 `_extract_text` 统一提取文本，`_iter_history_pairs` 对两种格式的 content 均归一化
+- **P1 模型声明知识截止日期**：qwen 回答时效性问题习惯写"截止到2024年7月"（训练数据知识截止，非代码硬编码）；`_build_messages` 在 system prompt 统一注入当前日期并禁止"截止到XX年XX月/我的知识截止于XX"类表述，时效无法确认时提示以官方最新发布为准
+- **P1 按需自动联网搜索**：新增 `LLM_ENABLE_SEARCH` 总开关（默认关），开启后开放类/未知类问题自动联网，30+ 时效关键词（最新/展览/门票/2026…）命中即联网，纯知识库事实问题不联网省费用；`enable_search` 并入缓存 key、system prompt 追加搜索引导（联网仅补时效，文物知识以 RAG 参考信息为准）
+- **P0 刷新状态报错（qdrant-client 1.10+ 结构变更）**：`CollectionParams` 不再有顶层 `distance`（移入 `params.vectors`，单向量为 VectorParams/命名向量为 VectorParamsMap）；`get_stats` 防御性兼容新旧结构与命名向量
+- **P0 对话区域消失（Gradio 6 emoji 头像）**：`avatar_images=(None, "🏛️")` 在 Gradio 6 被当作文件路径解析为无效 FileData，前端渲染 Chatbot 崩溃导致对话+检索区域一闪消失；移除 emoji 头像（`avatar_images=None`）；另发现服务器 gradio 前端资源旧版残留（index-BZvZc4Wo.js），重装 6.22.0 对齐（index-BgYNBSAi.js）
+- **P1 推荐回答递归重复 → 根因纠正为 dashscope 流式合并模式**：未传 `incremental_output=True` 时 dashscope 对 qwen 系列默认返回"累积全文 chunk"（incremental_to_full），`full_answer += chunk` 按增量追加导致内容膨胀重复（实测 195 件文物）；`chat_stream` 显式传 `incremental_output=True` 后返回增量 token，拼接无重复（bug-102 的 prompt 防重复指令保留，不冲突）
 - **P1 防幻觉检查误报**：`verify_answer_grounding` 将 LLM 回答中的结构化字段标签（`**推荐理由**` 等）当作名称、且名称变体（`清明上河图（北宋张择端本）` vs `清明上河图`）精确比较不匹配导致大面积误报；新增字段标签黑名单 + 名称变体（包含关系）匹配，真实幻觉仍能检出
 - **P2 Web UI 白屏（依赖版本约束）**：Gradio 6.x 依赖 `starlette>=1.0.1`，但 starlette 1.4.0 的 `GZipResponder` 新增必填 keyword-only `thread_minimum_size` 与 gradio 6.22 不兼容（ASGI 请求崩溃）；requirements.txt 显式约束 `starlette>=1.0.1,<1.4` + `fastapi>=0.115.2,<1.0` 并注释说明
 - **环境加固**：requirements.txt 补充配套版本约束与注释，防止新环境装到不兼容组合
@@ -46,7 +53,7 @@
 #### 修改文件
 - `src/embeddings.py`、`src/llm.py`、`src/reranker.py`、`src/utils.py`、`src/config.py`、`src/rag_pipeline.py`、`src/chunking.py`、`app.py`、`requirements.txt`、`tests/test_review_findings.py`、`tests/test_edge_cases.py`
 
-**全量测试**：`pytest tests/ -q` → **203 passed**（第七轮 186 + 本轮新增 17）
+**全量测试**：`pytest tests/ -q` → **223 passed**（第七轮 186 + 本轮新增 37）
 
 ---
 

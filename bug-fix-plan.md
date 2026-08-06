@@ -1778,3 +1778,482 @@ python app.py --project museum --host 0.0.0.0 --port 7860
 
 # ④ 访问 http://10.0.2.200:7860 应正常显示页面
 ```
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #7）
+
+> 触发场景：Web UI 提问"有什么文物"，页面直接返回"错误"无答案。服务器日志：
+> `gradio.exceptions.Error: Data incompatible with messages format. Each message should be a dictionary with 'role' and 'content' keys or a ChatMessage object.`
+> 根因：**Gradio 6.0 的 Chatbot 消息格式变更**——从 `[(user, assistant), ...]` 元组列表
+> 改为 `[{"role": ..., "content": ...}, ...]` dict 列表。bug-098 只修了 Chatbot 构造参数
+> （show_copy_button 等），未适配数据格式，`answer_question` 仍产出 tuple 历史 → postprocess 校验失败。
+> 全量测试：`pytest tests/ -q` → **208 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-101 | Gradio 6.0 Chatbot 消息格式变更（dict 列表）未适配：`answer_question` 产出 tuple 历史，postprocess 校验失败，页面返回"错误" | `app.py` | P0 | 已修复 |
+
+## 问题详情
+
+### [bug-101] Gradio 6.0 Chatbot 消息格式变更导致问答页面报错（P0）
+
+- **根因分析**：Gradio 6.0 起 `gr.Chatbot` 的 value 格式从 4/5.x 的 `List[Tuple[str, str]]`（`[(user, assistant), ...]`）改为 `List[Dict]`（`[{"role": "user", "content": ...}, {"role": "assistant", "content": ...}]`）。`app.py` 的 `answer_question` 仍按 tuple 格式追加/更新历史（`history.append((q, ""))`、`history[-1] = (q, display)`），6.x 的 `Chatbot.postprocess` 校验消息必须含 `role`/`content` 键 → 抛 `Error`，页面显示"错误"。bug-098 仅修复了 Chatbot 构造参数（`show_copy_button` → `buttons`），未适配数据格式。
+- **影响范围**：所有 Gradio 6.x 环境的 Web UI 问答（发送任何问题均报错）。
+- **修复方案**：
+  1. 新增 `_iter_history_pairs(history)`：按元素类型**自动检测**消息格式（dict → 6.x 交替解析；tuple → 4/5.x 成对解析），统一归一化为 `(user_msg, assistant_msg)` 对，`_convert_history` 复用原有逻辑；
+  2. 新增 `_append_conversation(history, user, assistant)` / `_update_last_assistant(history, user, assistant)`：按 Gradio 主版本产出 dict（6.x）或 tuple（4/5.x）消息；
+  3. `answer_question` 全部 9 处 history 追加/更新操作改用上述 helper。
+- **风险分析**：低。自动检测格式不依赖版本号，4/5/6.x 均可运行；现有 tuple 格式测试不受影响。
+- **测试验证**：新增 `TestGradio6ChatMessageFormat`（5 项）：dict/tuple 两种格式归一化、`_convert_history` dict 输入、`_append_conversation`/`_update_last_assistant` 产出合法 dict、完整 `answer_question` 流程产出合法 dict 历史。全部通过；`pytest tests/ -q` → **208 passed**。同步更新 2 个断言 tuple 格式的旧测试（`TestAnswerQuestionEmpty` 改用 `_iter_history_pairs` 解析）。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-101 | `TestGradio6ChatMessageFormat`（5 项）通过；完整问答流程产出合法 dict 消息；208 passed | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **208 passed**（原 203 + bug-101 的 5 - 0 失败）。
+
+## 验证步骤（第八轮补）
+
+### bug-101 验证
+1. `python -c` 调 `_iter_history_pairs`：dict 与 tuple 两种 history 均归一化为 `(user, assistant)` 对
+2. `python -c` mock pipeline 后跑 `answer_question("有什么文物", [], use_stream=False)`：最终 history 为合法 dict 消息列表（含 role/content）
+3. `pytest tests/test_review_findings.py::TestGradio6ChatMessageFormat -v` → 5 passed
+
+### 生产环境操作指引
+1. 同步 `app.py` 到服务器；
+2. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+3. 页面提问"有什么文物"应正常返回答案（含检索来源展示）。
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #8）
+
+> 触发场景：Web UI 提问"有什么文物"，回答可正常生成，但内容**循环重复至少 10 次**
+> （每次循环为完整"5件推荐 + 结尾注"，注内容逐次演化："可随时告知，"→"我将为您进一步查询整理"）。
+> 本地 mock 验证：app.py 流式聚合逻辑正常（单次 token 流不会产生循环），排除代码拼接 bug。
+> 根因：**LLM 单次生成中的递归重复（degeneration loop）**——推荐类回答在结尾注
+> （"可随时告知"）引导下，自行追加了与开头相同的引导句"以下是5件极具代表性的…推荐"并再次推荐，
+> 形成自我递归。长生成 + 高 max_tokens / temperature 时更易触发。
+> 全量测试：`pytest tests/ -q` → **208 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-102 | LLM 推荐类回答递归重复（generation loop）：结尾注引导模型再次推荐相同内容，循环 10+ 次 | `src/rag_pipeline.py`、`src/project.py`（prompt 防重复指令） | P1 | 已修复（prompt 缓解 + 诊断指引） |
+
+## 问题详情
+
+### [bug-102] LLM 推荐类回答递归重复（P1）
+
+- **根因分析**：用户提问"有什么文物"（recommendation 类），LLM 生成完整推荐后，结尾注"可随时告知，…"促使模型追加与开头相同的引导句"以下是5件极具代表性的中国国宝级文物推荐"并再次推荐 → 自我递归循环（实测 10 次+）。特征：每次循环为完整推荐段、结尾注逐次演化（"可随时告知，"→"我将为您进一步查询整理"），为 LLM 生成而非字符串拼接。本地 mock 验证 app.py 流式聚合无重复，排除代码 bug。长生成长度（max_tokens 大）与较高 temperature 会放大该现象。
+- **影响范围**：推荐类问题（"有什么/有哪些/推荐…"）在 Web UI / CLI / API 的回答质量；回答内容冗余 10 倍，浪费 tokens 与显示空间。
+- **修复方案**：
+  1. **prompt 防重复（代码）**：默认、museum、enterprise 三个 recommend 模板的"输出格式要求"增加："回答必须一次完成：列出全部推荐项后直接结束，不要重复推荐、不要追加与前面相同的推荐列表，不要在结尾再次生成新的推荐内容"；
+  2. **诊断指引（环境）**：检查 `LLM_MAX_TOKENS`（建议 2048~4096，过大给循环留空间）与 `LLM_TEMPERATURE`（建议 0.7，勿调高）；用非流式直接调用验证原始输出是否循环，区分"LLM 生成问题"与"流式处理问题"。
+- **风险分析**：低。prompt 指令不影响正常回答结构；`{context}` 占位符保留。
+- **测试验证**：208 passed；3 个 recommend prompt 均含防重复指令且 `{context}` 占位符保留。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-102 | 本地 mock 流式聚合无重复（排除代码 bug）；3 个 recommend prompt 已加防重复指令；208 passed | ✅ 已修复（prompt 缓解） |
+
+**全量测试**：`pytest tests/ -q` → **208 passed**。
+
+## 验证步骤（第八轮补）
+
+### 服务器诊断命令
+```bash
+# ① 检查生成参数（max_tokens 过大给循环留空间，temperature 过高放大重复）
+python -c "from src.config import settings; print('max_tokens:', settings.llm_max_tokens, '| temperature:', settings.llm_temperature)"
+
+# ② 非流式直接调用 LLM，验证原始输出是否循环（区分 LLM 生成问题 vs 流式处理问题）
+python -c "
+from src.llm import BailianLLM
+ans = BailianLLM().chat([{'role':'user','content':'有什么文物'}], system_prompt='请推荐3个文物，列出后直接结束')
+print('回答长度:', len(ans), '| 司母戊鼎出现次数:', ans.count('司母戊鼎'))
+"
+# 若出现次数 > 1 → LLM 生成循环（prompt 已缓解）；若 == 1 而流式页面循环 → 另查流式链路
+
+### 建议 .env 调整（若仍偶发）
+LLM_MAX_TOKENS=2048      # 限制生成长度，压缩循环空间
+LLM_TEMPERATURE=0.7      # 保持默认，勿调高
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #9）— bug-102 根因纠正
+
+> 触发场景：应用 bug-102 的 prompt 防重复指令并确认 `LLM_MAX_TOKENS=4096 / LLM_TEMPERATURE=0.7` 后，
+> 重启仍复现：提问"有什么文物"推荐 **195 件文物且全部重复**。
+> 195 件 = 39 轮完整重复，远超 max_tokens=4096 的单次生成能力 → **判定 bug-102 根因有误**。
+> 深度排查（读 dashscope 1.25.1 源码）确认真正根因：
+> **dashscope 流式默认"合并模式"（incremental_to_full）——每个 chunk 的 content 是到当前为止的累积全文，
+> 而非增量 token。代码按增量追加（`full_answer += chunk`）导致内容翻倍膨胀重复。**
+> 全量测试：`pytest tests/ -q` → **211 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-103 | dashscope 流式默认合并模式：未传 `incremental_output=True` 时，每个流式 chunk 的 content 为累积全文，`full_answer += chunk` 按增量追加 → 内容膨胀重复（实测 195 件文物循环） | `src/llm.py` | P0 | 已修复 |
+
+## 问题详情
+
+### [bug-103] dashscope 流式合并模式导致内容膨胀重复（P0，bug-102 真实根因）
+
+- **根因分析**：读 dashscope 1.25.1 `Generation.call` 源码：
+  ```python
+  is_incremental_output = kwargs.get('incremental_output', None)          # 未传 → None
+  if (ParamUtil.should_modify_incremental_output(model) and
+          is_stream and is_incremental_output is False):
+      to_merge_incremental_output = True                                  # 自动进入合并模式
+      parameters['incremental_output'] = True
+  ...
+  if is_stream:
+      if to_merge_incremental_output:
+          return cls._merge_generation_response(response, n)              # ← 每个 chunk 为累积全文
+      else:
+          return (GenerationResponse.from_api_response(rsp) for rsp in response)  # ← 增量 token
+  ```
+  对 qwen 系列模型，只要 `stream=True` 且未显式传 `incremental_output`，SDK 自动进入**合并模式**：
+  生成器每个元素是"到当前为止的完整文本"。`chat_stream` 中 `full_answer += content` 按增量追加，
+  累积全文被反复拼接 → O(n²) 膨胀。本地复现：70 字回答在合并模式下膨胀为 160 字、"司母戊鼎"出现 3 次。
+  生产实测 195 件重复（39 轮 × 5 件）。**本地测试全部 mock 流式，从未真实调用 dashscope 流式，故未暴露。**
+- **影响范围**：所有 `chat_stream` 场景（Web UI 流式模式、SDK 流式调用）。回答内容膨胀重复，浪费 token 与显示。
+- **修复方案**：`chat_stream` 的 `Generation.call(..., stream=True, incremental_output=True)`，
+  显式要求增量输出（每个 chunk 的 content 为独立 token 增量）。传 `incremental_output=True` 后
+  `to_merge_incremental_output=False`，SDK 返回增量生成器，`full_answer += token` 正确拼接。
+- **风险分析**：低。`incremental_output` 为百炼 API 标准参数（服务端参数，SDK 透传），
+  requirements 约束 `dashscope>=1.20.0` 均支持；非流式 `chat` 不受影响。
+- **测试验证**：新增 `TestStreamingIncrementalOutput`（3 项）：源码断言 `incremental_output=True`、
+  增量 token 拼接无重复且参数正确传给 SDK、防御性验证累积模式必然膨胀。全部通过；`pytest tests/ -q` → **211 passed**。
+
+> **说明**：bug-102（prompt 防重复指令）判定为"LLM 生成循环"有误，真实根因为本 bug（dashscope 流式合并模式）。
+> prompt 防重复指令仍保留（对模型生成有轻微正向约束，不冲突），但不再作为循环问题的修复依据。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-103 | 源码确认 dashscope 合并模式逻辑；本地复现累积膨胀；修复后增量 token 拼接无重复；`TestStreamingIncrementalOutput`（3 项）；211 passed | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **211 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮补）
+
+### 本地复现与修复验证
+1. `python -c` 模拟合并模式（累积 chunk）按增量追加 → 内容膨胀（复现 bug）
+2. `python -c` mock 增量 chunk 流 + 断言 `incremental_output=True` 传入 → 拼接结果无重复
+3. `pytest tests/test_review_findings.py::TestStreamingIncrementalOutput -v` → 3 passed
+
+### 生产环境操作指引
+1. 同步 `src/llm.py` 到服务器；
+2. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+3. 页面提问"有什么文物"→ 应只返回 3~5 件推荐，无重复。
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #10）
+
+> 触发场景：Web UI 多轮对话（第二轮起）提问开放类问题，页面报错。后台：
+> `File "app.py", line 167, in _convert_history → marker_idx = assistant_msg.find(marker)`
+> `AttributeError: 'list' object has no attribute 'find'`
+> 根因：**Gradio 6.0 的 Chatbot.preprocess 会把消息 content 从 str 转为 list[dict] 多模态格式**
+> （`[{"type": "text", "text": "..."}]`）。多轮对话时 `_convert_history` 收到的 history 中
+> 每条 content 均为 list，调用 `.find()` 崩溃。第一轮 history 为空故正常，第二轮起必现。
+> 全量测试：`pytest tests/ -q` → **214 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-104 | Gradio 6 Chatbot.preprocess 将消息 content 转为 list[dict]，`_convert_history` 对 list 调用 `.find()` 崩溃（多轮对话第二轮起必现） | `app.py` | P0 | 已修复 |
+
+## 问题详情
+
+### [bug-104] Gradio 6 多模态 content 格式导致多轮对话崩溃（P0）
+
+- **根因分析**：读 Gradio 6.22 `chatbot.py` 源码确认：
+  ```python
+  # gradio 6.x Chatbot.preprocess（前端数据 → 事件函数入参）
+  message_dict["content"] = [
+      self._preprocess_content(content) for content in message.content
+  ]   # ← content 从 str 强制转为 list[NormalizedMessageDict]
+  ```
+  多轮对话时，事件函数收到的每条消息 content 均为 `[{"type": "text", "text": "..."}]` 形式。
+  `_iter_history_pairs` 原样取出该 list，`_convert_history` 中 `assistant_msg.find(marker)`
+  对 list 调用 `.find()` → `AttributeError`。第一轮 history 为空不触发；第二轮起必现
+  （用户先问推荐问题成功，之后再问任何问题均报错）。
+- **影响范围**：Gradio 6 环境下的**所有多轮对话**（第二轮起任何问题）。
+- **修复方案**：新增 `_extract_text(content)` helper，兼容 str / list[dict]（多模态）/ 数字 / None，
+  统一提取为文本；`_iter_history_pairs` 对 dict 与 tuple 两种格式的 content 均应用之。
+- **风险分析**：低。仅增加 content 类型归一化；纯 str 路径行为不变。
+- **测试验证**：新增 `TestGradio6ListContentHistory`（3 项）：list content 归一化、
+  混合类型不崩溃（含 bug-028 空回复删除语义）、两轮对话完整流程不崩溃。全部通过；
+  `pytest tests/ -q` → **214 passed**。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-104 | `TestGradio6ListContentHistory`（3 项）通过；两轮对话（Gradio 6 list content）完整流程无崩溃；214 passed | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **214 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮补）
+
+### 本地自测
+1. `python -c` 构造 Gradio 6 preprocess 格式 history（content 为 `[{"type":"text","text":...}]`），
+   调 `_convert_history` → 正确提取文本、不崩溃
+2. `python -c` mock pipeline 跑两轮对话（第二轮 history 为 list content）→ 无崩溃
+3. `pytest tests/test_review_findings.py::TestGradio6ListContentHistory -v` → 3 passed
+
+### 生产环境操作指引
+1. 同步 `app.py` 到服务器；
+2. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+3. 任意多轮对话（第二轮起）应正常回答。
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #11）
+
+> 触发场景：大量问题回答末尾声明"截止到 2024 年 7 月"，与用户当前时间（2026 年）不符，
+> 用户要求不要出现该类表述。全仓 grep 无 "2024/截止" 字样 → 属 **LLM 训练数据知识截止日期的内生声明**，
+> 非代码硬编码。修复：system prompt 统一注入**当前日期**（今天 2026年8月6日）并禁止截止类表述。
+> 全量测试：`pytest tests/ -q` → **217 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-105 | 模型回答声明"截止到2024年7月"等训练数据知识截止日期，与当前时间不符 | `src/llm.py` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-105] 模型声明训练数据知识截止日期（P1）
+
+- **根因分析**：qwen 系列模型回答时效性问题时，习惯基于训练数据知识截止日期（如 2024-07）
+  声明"截止到XX年XX月"，且无当前时间概念。代码中无任何 "2024/截止" 硬编码（已 grep 确认）。
+- **影响范围**：所有 LLM 回答（Web UI / SDK / 闲聊），时效性类问题尤其明显。
+- **修复方案**：`BailianLLM._build_messages` 在 system prompt 统一追加当前日期说明：
+  - 注入 `【当前日期】今天是{YYYY年M月D日}`（跨平台 `datetime.now()` 拼接，非 `strftime %-m`）；
+  - 指令：以当前日期为准、不要声明"截止到XX年XX月 / 我的知识截止于XX / 截至XX年"等表述、
+    时效无法确认时说明"建议以官方最新发布为准"。
+  - 无 system_prompt 的纯消息调用不注入（不影响）。
+- **风险分析**：低。仅追加 system prompt 文本；`_select_prompt` 层测试断言不受影响
+  （它们断言 rag_pipeline 层 prompt 选择，不经过 `_build_messages`）。
+- **测试验证**：新增 `TestCurrentDateInjection`（3 项）：注入当前日期与禁止指令、
+  无 system_prompt 不注入、chat/chat_stream 均注入。全部通过；`pytest tests/ -q` → **217 passed**。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-105 | `TestCurrentDateInjection`（3 项）通过；当前日期（2026年8月6日）正确注入 system prompt；217 passed | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **217 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮补）
+
+### 本地自测
+1. `python -c` 调 `_build_current_date_note()` → 含"今天是2026年8月6日"与禁止截止指令
+2. `python -c` 调 `_build_messages(system_prompt=...)` → system content 尾部含日期说明，user 消息不受影响
+3. `pytest tests/test_review_findings.py::TestCurrentDateInjection -v` → 3 passed
+
+### 生产环境操作指引
+1. 同步 `src/llm.py` 到服务器；
+2. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+3. 提问时效性问题 → 不应再出现"截止到2024年7月"类表述；时效无法确认时提示以官方最新发布为准。
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #12）
+
+> 触发场景：用户提出开放类/时效性问题（"最近情况""现在怎么样"），模型只能基于训练数据
+> （截止 2024-07）回答，无法获取 2026 年新信息。确认百炼 API 支持 `enable_search=True`
+> （dashscope 1.25.1 官方注释：Whether to enable web search (quark)）后，按方案 B 实施
+> **按需自动联网搜索**。全量测试：`pytest tests/ -q` → **220 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-106 | 模型无法获取当前（2026）真实新数据，开放类/时效性问题只能基于训练数据回答 | `src/config.py`, `src/llm.py`, `src/rag_pipeline.py`, `.env.example` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-106] 按需自动联网搜索（方案 B）（P1）
+
+- **根因分析**：模型训练数据截止 2024-07，时效性问题（展览/门票/最新动态/2026 年情况）
+  无法回答最新信息。百炼 API 支持 `enable_search=True`（内置夸克联网搜索），但需按次计费，
+  全量开启成本高、响应慢。
+- **修复方案**（方案 B：按需自动联网）：
+  1. `src/config.py` 新增 `llm_enable_search: bool = False`（总开关，默认关避免误扣费）；
+  2. `src/rag_pipeline.py` 新增 `TEMPORAL_KEYWORDS`（最新/最近/今年/展览/门票/2026 等 30+ 词）
+     与 `_should_enable_search(query_type, question)` 判断规则：
+     - `OPEN_ENDED`（开放讨论）→ 联网；
+     - `UNKNOWN`（未分类/非知识库）→ 除纯问候语（你好/谢谢/再见…）外联网；
+     - `FACTUAL/RECOMMENDATION/COMPARISON/CHITCHAT` → 命中时效关键词才联网；
+  3. `query/query_stream` 各 LLM 调用点计算 `enable_search = settings.llm_enable_search and 按需判断`，
+     传入 `llm.chat/chat_stream`；meta/返回结果带 `search_enabled` 字段便于前端提示；
+  4. `src/llm.py` 的 `chat/chat_stream` 新增 `enable_search` 参数透传 `Generation.call`；
+     `chat` 将其并入 `call_kwargs` 参与缓存 key（搜索/不搜索回答不混用缓存）；
+     启用时 system prompt 追加 `【联网搜索】` 引导：联网结果仅补充时效信息，
+     文物知识以 RAG 参考信息为准，避免与网上信息冲突。
+- **风险分析**：中。① 费用：按次计费，总开关默认关闭，开启后按需触发；② 时效词可能偶发误伤
+  知识库问题（如"司母戊鼎现在在哪里"）→ 多搜一次但 RAG 上下文+搜索引导保证知识仍以参考信息为准；
+  ③ 需百炼账号开通联网搜索能力（该账号重排模型曾受限，需控制台确认）。
+- **测试验证**：新增 `TestOnDemandWebSearch`（3 项）：按需判断规则、chat_stream 透传+引导注入、
+  总开关开/关下 meta 的 search_enabled 与透传。全部通过；`pytest tests/ -q` → **220 passed**。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-106 | `TestOnDemandWebSearch`（3 项）通过；开放/时效问题联网、问候语与纯事实问题不联网；总开关生效；220 passed | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **220 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮补）
+
+### 本地自测
+1. `python -c` 调 `_should_enable_search`：开放类/时效词→True，问候语/纯事实→False
+2. `python -c` mock 流式：`enable_search=True` 透传 SDK 且 system prompt 含【联网搜索】引导
+3. `pytest tests/test_review_findings.py::TestOnDemandWebSearch -v` → 3 passed
+
+### 生产环境操作指引
+1. 百炼控制台确认 qwen-plus 已开通"联网搜索"能力；
+2. 同步 `src/config.py`、`src/llm.py`、`src/rag_pipeline.py` 到服务器；
+3. 服务器 `.env` 设 `LLM_ENABLE_SEARCH=true`（按次计费，确认费用预期）；
+4. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+5. 提问"最近有什么特展/门票多少钱/2026年有什么新动态"→ 自动联网获取最新信息；
+   提问"司母戊鼎是什么时期的"→ 不联网，走知识库。
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #13）
+
+> 触发场景：Web UI 点击"刷新状态"按钮，报错"知识库状态: 'CollectionParams' object has no attribute 'distance'"。
+> 根因：qdrant-client 1.10+（本项目 1.19.0）将 distance 从 CollectionParams 顶层移入
+> params.vectors（单向量为 VectorParams / 命名向量为 VectorParamsMap），
+> `get_stats` 仍读 `config.params.distance` 导致 AttributeError。
+> 全量测试：`pytest tests/ -q` → **223 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-107 | qdrant-client 1.10+ CollectionParams 无顶层 distance，get_stats 崩溃（页面刷新状态报错） | `src/rag_pipeline.py` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-107] qdrant-client 1.10+ CollectionParams 结构变更（P1）
+
+- **根因分析**：本地实测 qdrant-client 1.19.0：`CollectionParams` 无 `distance` 属性
+  （`hasattr(p, 'distance') → False`），距离度量在 `params.vectors.distance`
+  （单向量为 `VectorParams`，命名向量为 `VectorParamsMap`）。`get_stats` 读
+  `collection_info.config.params.distance` → AttributeError，页面状态栏报错。
+- **影响范围**：Web UI"刷新状态"、`pipeline.get_stats()`（run_qa `/stats` 命令）。
+- **修复方案**：`get_stats` 防御性读取：
+  - `distance`：优先顶层（旧版），否则单向量 `vectors.distance`，命名向量取第一个配置；
+  - `vector_size`：同理兼容（命名向量时 `vectors` 为 dict 无 `size`）。
+- **风险分析**：低。仅读取层兼容，不改变写入/检索逻辑；旧版与新版结构均正常。
+- **测试验证**：新增 `TestCollectionStatsCompat`（3 项）：新结构单向量、旧结构顶层 distance、
+  命名向量 VectorParamsMap。全部通过；`pytest tests/ -q` → **223 passed**。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-107 | `TestCollectionStatsCompat`（3 项）通过；本地实测新旧/命名向量三种结构均正确；223 passed | ✅ 已修复 |
+
+**全量测试**：`pytest tests/ -q` → **223 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮补）
+
+### 本地自测
+1. `python -c` 构造 `CollectionParams(vectors=VectorParams(...))`（1.19.0 结构）→ get_stats 正常
+2. `python -c` 构造旧结构（顶层 distance）与命名向量 → 均正常
+3. `pytest tests/test_review_findings.py::TestCollectionStatsCompat -v` → 3 passed
+
+### 生产环境操作指引
+1. 同步 `src/rag_pipeline.py` 到服务器；
+2. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+3. 页面点击"刷新状态"→ 正常显示向量数/维度/距离度量。
+
+---
+
+## 新增问题（第八轮补 - 生产环境修复 #14）
+
+> 触发场景：Web UI 对话窗口与检索区域"一闪"后消失变空白；浏览器 F12 仅见
+> `<label for=FORM_ELEMENT>` 警告（旧 gradio 前端固有缺陷，非根因）。
+> 排查过程：① 服务器 gradio 前端资源为旧版本残留（index-BZvZc4Wo.js ≠ 本地 index-BgYNBSAi.js），
+> 彻底重装 gradio 6.22.0 后资源对齐（index-BgYNBSAi.js）仍崩；
+> ② dump config 发现 **Gradio 6 将 avatar_images 的 emoji 字符串 "🏛️" 当作文件路径解析
+> 为 FileData**（path 形如 `.../🏛️`，不存在）→ 前端渲染 Chatbot 时请求无效文件 → 组件区域崩溃。
+> 修复：移除 emoji 头像（avatar_images=None）。
+> 全量测试：`pytest tests/ -q` → **223 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-108 | Gradio 6 将 avatar_images 的 emoji 字符串解析为无效文件路径 FileData，前端渲染 Chatbot 崩溃（对话+检索区域消失） | `app.py` | P0 | 已修复 |
+
+## 问题详情
+
+### [bug-108] Gradio 6 emoji 头像被解析为无效文件路径（P0）
+
+- **根因分析**：`gr.Chatbot(avatar_images=(None, "🏛️"))` 在 Gradio 6 中，字符串参数被当作
+  文件路径处理：config 生成 `FileData(path=".../🏛️")`（路径不存在）。前端渲染 Chatbot 时
+  请求该无效文件导致组件渲染崩溃，对话窗口与检索区域（同一 Row）整体消失。
+  本地同代码 curl 验证仅看 HTML 结构（不执行 JS），未暴露；服务器浏览器实测复现。
+  附带发现：服务器 gradio 前端资源曾为旧版本残留（index-BZvZc4Wo.js），伴随旧版
+  `<label for=FORM_ELEMENT>` 警告，重装 gradio 6.22.0 后资源对齐（index-BgYNBSAi.js），
+  但 avatar 问题仍存在——两者独立。
+- **影响范围**：Gradio 6 环境下 Web UI 对话区域整体不可用。
+- **修复方案**：移除 emoji 头像，`avatar_images=None`（gradio 归一化为 [None, None]，无 FileData）。
+- **风险分析**：低。仅移除装饰性头像，对话功能不受影响。
+- **测试验证**：APP 构建后 dump config：Chatbot avatar 为 [None, None] 且无无效路径；
+  全量测试 223 passed。
+
+## 验证结果（第八轮补）
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-108 | config dump 确认 avatar 无 FileData；223 passed；待服务器浏览器实测确认 | ✅ 已修复（待服务器确认） |
+
+**全量测试**：`pytest tests/ -q` → **223 passed**（0 失败 0 错误）。
+
+## 验证步骤（第八轮补）
+
+### 本地自测
+1. `python -c` 构建 create_ui → dump config → Chatbot avatar 为 [None, None]（无无效路径）
+2. `pytest tests/ -q` → 223 passed
+
+### 生产环境操作指引
+1. 同步 `app.py` 到服务器；
+2. 重启 `python app.py --project museum --host 0.0.0.0 --port 7860`；
+3. 本机【无痕窗口】访问 http://10.0.2.200:7860/ → 对话窗口与检索区域应正常显示；
+4. 若仍异常，F12 Console 查看新错误并反馈。
+
+---
+
+## 验证补充（bug-107 / bug-108 服务器确认）
+
+> 服务器实测结论：页面恢复正常。此前"对话窗口与检索区域消失"经排查为**用户误读**
+> （对话窗口位于页面下方滚动区，未滚动到导致误以为消失），非代码缺陷。
+> 但排查过程中确认并修复的以下问题均为**真实存在且有价值**，予以保留：
+> 1. bug-107：get_stats 的 qdrant-client 1.10+ 结构兼容（刷新状态报错真实存在，已修复）
+> 2. bug-108：avatar emoji 被 Gradio 6 解析为无效 FileData 路径（config 实测存在，
+>    已移除，避免前端渲染隐患）
+> 3. 服务器 gradio 前端资源旧版本残留（index-BZvZc4Wo.js ≠ 本地 index-BgYNBSAi.js，
+>    FORM_ELEMENT 警告来源）已通过重装 gradio 6.22.0 对齐
+> 最终状态：服务器 Web UI 正常，对话/检索区域可正常使用；223 passed。

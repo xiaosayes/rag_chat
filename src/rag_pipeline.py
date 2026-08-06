@@ -58,6 +58,7 @@ SYSTEM_PROMPT_RECOMMEND = """你是一位专业的知识助手。你的任务是
 
 ## 输出格式要求
 请使用结构化格式输出推荐结果。
+7. 回答必须一次完成：**列出全部推荐项后直接结束**，不要重复推荐、不要追加与前面相同的推荐列表，不要在结尾再次生成新的推荐内容（bug-102 防循环）
 """
 
 SYSTEM_PROMPT_FACTUAL = """你是一位专业的知识助手。请根据用户问题和提供的参考信息，给出准确、详实的回答。
@@ -888,6 +889,33 @@ class RAGPipeline:
             return self.project_cfg.get_prompt("chitchat")
         return SYSTEM_PROMPT_CHITCHAT
 
+    # bug-106 修复：按需联网搜索。时效性关键词命中或问题类型为开放/未知时自动联网，
+    # 纯知识库事实问题（文物名称/年代/形态等）不联网，避免无效搜索费用。
+    TEMPORAL_KEYWORDS = (
+        "最新", "最近", "近期", "近日", "当下", "如今", "目前", "当前", "现在",
+        "今天", "今天天气", "今年", "去年", "本月", "上半年", "下半年",
+        "新闻", "动态", "进展", "公告", "热门", "新发现", "新出土", "新展",
+        "开放时间", "开放情况", "门票", "票价", "特展", "活动", "预约", "临时",
+        "截止", "截至", "2026", "2025", "2024",
+    )
+    # UNKNOWN 类型（非知识库/未分类）命中纯问候语时不联网，其余开放讨论联网
+    GREETING_WORDS = ("你好", "您好", "嗨", "hello", "hi", "谢谢", "感谢",
+                      "再见", "拜拜", "在吗", "哈喽")
+
+    def _should_enable_search(self, query_type: QueryType, question: str) -> bool:
+        """按需联网搜索判断（bug-106）
+
+        规则：
+          1. OPEN_ENDED（开放讨论）→ 联网（补充最新信息）
+          2. UNKNOWN（未分类/非知识库）→ 除纯问候语外联网
+          3. 其余类型（FACTUAL/RECOMMENDATION/COMPARISON/CHITCHAT）→ 命中时效关键词才联网
+        """
+        if query_type == QueryType.OPEN_ENDED:
+            return True
+        if query_type == QueryType.UNKNOWN:
+            return not any(w in question for w in self.GREETING_WORDS)
+        return any(kw in question for kw in self.TEMPORAL_KEYWORDS)
+
     def query(
         self,
         question: str,
@@ -935,9 +963,14 @@ class RAGPipeline:
         if not kb_related:
             # 闲聊/非知识库问题：直接 LLM 回答，不走 RAG
             logger.info(f"闲聊模式 | 问题: {question[:60]}...")
+            # bug-106：按需联网搜索
+            enable_search = settings.llm_enable_search and self._should_enable_search(
+                query_type, question
+            )
             answer = self.llm.chat(
                 messages=messages,
                 system_prompt=self._select_chitchat_prompt(),
+                enable_search=enable_search,
             )
             timings["total"] = round((time.time() - t_start) * 1000)
             return {
@@ -947,6 +980,7 @@ class RAGPipeline:
                 "context": "",
                 "timing": timings,
                 "from_kb": False,
+                "search_enabled": enable_search,
             }
 
         # ===== 知识库相关问题的 RAG 流程 =====
@@ -965,9 +999,14 @@ class RAGPipeline:
             # 检索为空时仍调用 LLM，让模型基于对话历史或通用知识尝试回答
             logger.info(f"检索无结果，尝试 LLM 基于对话历史回答: {question[:60]}...")
             t_llm = time.time()
+            # bug-106：按需联网搜索
+            enable_search = settings.llm_enable_search and self._should_enable_search(
+                query_type, question
+            )
             answer = self.llm.chat(
                 messages=messages,
                 system_prompt=self._select_chitchat_prompt(),
+                enable_search=enable_search,
             )
             timings["llm"] = round((time.time() - t_llm) * 1000)
             timings["total"] = round((time.time() - t_start) * 1000)
@@ -978,6 +1017,7 @@ class RAGPipeline:
                 "context": "",
                 "timing": timings,
                 "from_kb": True,
+                "search_enabled": enable_search,
             }
 
         # 3. 重排序（如果结果数 > 3 才做，否则跳过节省时间）
@@ -997,9 +1037,14 @@ class RAGPipeline:
 
         # 6. 调用 LLM
         t_llm = time.time()
+        # bug-106：按需联网搜索（知识库事实问题不联网，省费用）
+        enable_search = settings.llm_enable_search and self._should_enable_search(
+            query_type, question
+        )
         answer = self.llm.chat(
             messages=messages,
             system_prompt=system_prompt,
+            enable_search=enable_search,
         )
         timings["llm"] = round((time.time() - t_llm) * 1000)
 
@@ -1029,6 +1074,7 @@ class RAGPipeline:
             "context": context,
             "timing": timings,
             "from_kb": True,
+            "search_enabled": enable_search,
         }
         return result
 
@@ -1071,10 +1117,16 @@ class RAGPipeline:
             # bug-045 修复：流式模式下 total 无法在 LLM 生成前计算，
             # 该指标实为检索阶段耗时，命名改为 retrieval 避免误导
             timings["retrieval"] = round((time.time() - t_start) * 1000)
-            yield {"type": "meta", "from_kb": False, "query_type": "chitchat", "chunks": [], "timing": timings}
+            # bug-106：按需联网搜索
+            enable_search = settings.llm_enable_search and self._should_enable_search(
+                query_type, question
+            )
+            yield {"type": "meta", "from_kb": False, "query_type": "chitchat",
+                   "chunks": [], "timing": timings, "search_enabled": enable_search}
             yield from self.llm.chat_stream(
                 messages=messages,
                 system_prompt=self._select_chitchat_prompt(),
+                enable_search=enable_search,
             )
             return
 
@@ -1093,10 +1145,16 @@ class RAGPipeline:
             logger.info(f"检索无结果，尝试 LLM 基于对话历史回答: {question[:60]}...")
             # bug-045 修复：同闲聊分支，流式模式下该指标为检索阶段耗时
             timings["retrieval"] = round((time.time() - t_start) * 1000)
-            yield {"type": "meta", "from_kb": True, "query_type": query_type.value, "chunks": [], "timing": timings}
+            # bug-106：按需联网搜索
+            enable_search = settings.llm_enable_search and self._should_enable_search(
+                query_type, question
+            )
+            yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+                   "chunks": [], "timing": timings, "search_enabled": enable_search}
             yield from self.llm.chat_stream(
                 messages=messages,
                 system_prompt=self._select_chitchat_prompt(),
+                enable_search=enable_search,
             )
             return
 
@@ -1122,13 +1180,19 @@ class RAGPipeline:
         # bug-045 修复：流式模式下 total 无法在 LLM 生成前计算，
         # 该指标实为检索+重排阶段耗时，命名改为 retrieval 避免误导
         timings["retrieval"] = round((time.time() - t_start) * 1000)
-        yield {"type": "meta", "from_kb": True, "query_type": query_type.value, "chunks": chunks_info, "timing": timings}
+        # bug-106：按需联网搜索（知识库事实问题不联网，省费用）
+        enable_search = settings.llm_enable_search and self._should_enable_search(
+            query_type, question
+        )
+        yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+               "chunks": chunks_info, "timing": timings, "search_enabled": enable_search}
 
         # 再 yield 流式回答（累积全文用于防幻觉检查）
         full_answer = ""
         for token in self.llm.chat_stream(
             messages=messages,
             system_prompt=system_prompt,
+            enable_search=enable_search,
         ):
             full_answer += token
             yield token
@@ -1220,11 +1284,34 @@ class RAGPipeline:
             collection_info = self.vector_store.client.get_collection(
                 self.vector_store.collection_name
             )
+            params = collection_info.config.params
+            # bug-107 修复：qdrant-client 1.10+（本项目 1.19.0）将 distance
+            # 移入 params.vectors（单向量为 VectorParams，命名向量为 VectorParamsMap），
+            # CollectionParams 不再有顶层 distance 属性。兼容新旧两种结构。
+            vectors = getattr(params, "vectors", None)
+            distance = getattr(params, "distance", None)
+            if distance is None:
+                if hasattr(vectors, "distance"):
+                    distance = vectors.distance  # 单向量 VectorParams
+                elif isinstance(vectors, dict) and vectors:
+                    # 命名向量 VectorParamsMap：取第一个向量配置
+                    first = next(iter(vectors.values()))
+                    distance = getattr(first, "distance", "unknown")
+                else:
+                    distance = "unknown"
+            # vector_size：单向量直接取 size，命名向量取第一个配置的 size
+            if hasattr(vectors, "size"):
+                vector_size = vectors.size
+            elif isinstance(vectors, dict) and vectors:
+                first = next(iter(vectors.values()))
+                vector_size = getattr(first, "size", "unknown")
+            else:
+                vector_size = "unknown"
             return {
                 "collection": self.vector_store.collection_name,
                 "vector_count": collection_info.points_count,
-                "vector_size": collection_info.config.params.vectors.size,
-                "distance": str(collection_info.config.params.distance),
+                "vector_size": vector_size,
+                "distance": str(distance),
             }
         except Exception as e:
             return {"error": str(e)}

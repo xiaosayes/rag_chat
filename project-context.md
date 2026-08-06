@@ -195,8 +195,8 @@
 
 ### 当前状态
 - ✅ **v1.3.4 已完成发布**（第八轮生产环境修复：bug-095 ~ bug-100）
-- ✅ **99 个已识别 Bug 已全部修复**（bug-001 至 bug-100，bug-032 编号不存在；bug-094 标注需确认，详见 bug-fix-plan.md）
-- ✅ **203 项单元测试全部通过**（0 失败、0 错误）
+- ✅ **99 个已识别 Bug 已全部修复**（bug-001 至 bug-101，bug-032 编号不存在；bug-094 标注需确认，详见 bug-fix-plan.md）
+- ✅ **208 项单元测试全部通过**（0 失败、0 错误）
 - ✅ **代码已通过语法检查**（16 个 Python 源文件）
 - ✅ **Linux 服务器已验证**：知识库构建成功、run_qa 查询正常、Web UI 启动并访问正常
 
@@ -211,7 +211,7 @@
 | 第五轮（测试工程师） | bug-034 ~ bug-053 | `rag_pipeline.py`, `cache.py`, `app.py`, `vector_store.py`, `retriever.py` 等 | ✅ 已完成 |
 | 第六轮（独立审查） | bug-054 ~ bug-061 | `app.py`, `src/reranker.py`, `src/project.py`, `src/rag_pipeline.py`, `src/document_loader.py`, `src/chunking.py`, `src/data_loader.py` | ✅ 已完成 |
 | 第七轮（独立审查） | bug-089 ~ bug-093（+bug-094 需确认） | `src/rag_pipeline.py`, `src/chunking.py`, `app.py` | ✅ 已完成（5 修复 + 1 待确认） |
-| 第八轮（生产环境） | bug-095 ~ bug-100 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py`, `src/rag_pipeline.py`, `src/chunking.py`, `app.py`, `requirements.txt` | ✅ 已完成 |
+| 第八轮（生产环境） | bug-095 ~ bug-108 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py`, `src/rag_pipeline.py`, `src/chunking.py`, `src/project.py`, `app.py`, `requirements.txt` | ✅ 已完成 |
 
 > 注：bug-032 编号不存在（历史记录中从 bug-031 直接到 bug-033）。
 
@@ -256,7 +256,7 @@
 - bug-062 ~ bug-072：第五/六轮复测修复（检索缓存隔离、API 退避重试、chitchat/配置接线、增量添加缓存、Qdrant 重连、并发预热竞态等）
 - bug-080 ~ bug-088：第七轮复测修复（陈旧向量清理、重复切片去重、qdrant query_points 兼容、Embedding 维度校验、LLM 缓存 key 补齐、分数阈值自适应、长文档切段、close 竞态）
 - bug-089 ~ bug-093：第七轮独立审查（reranker_model 接线、tags 数字列表切片崩溃、防幻觉跨行正则、Web UI 配置接线、闲聊复合句误判）
-- bug-095 ~ bug-100：第八轮生产环境（API 4xx 快速失败+错误详情、embedding 批大小钳制、防幻觉字段标签误报、Gradio 6 兼容、Starlette 版本约束）
+- bug-095 ~ bug-108：第八轮生产环境（API 4xx 快速失败+错误详情、embedding 批大小钳制、防幻觉字段标签误报、Gradio 6 构造参数/消息格式/多模态 content 兼容、Starlette 版本约束、dashscope 流式合并模式内容膨胀修复、模型知识截止日期声明、按需自动联网搜索、qdrant-client 1.10+ 结构变更兼容、Gradio 6 emoji 头像无效路径崩溃）
 
 ### 技术债务
 
