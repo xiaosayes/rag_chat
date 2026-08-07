@@ -230,10 +230,9 @@
    - [ ] 测试独立部署（两个端口同时运行）
    - [x] 测试闲聊路由正确性（复合闲聊句误判已修复，bug-093/097）
    - [ ] 测试多轮对话连贯性
-   - [ ] jiabohui：重新构建知识库后验证 v4 向量检索质量（用户已执行 v4 验证 OK，重建待确认）
-   - [ ] jiabohui：recommend prompt 品类匹配指令已改（代码层），服务器 `data/projects/jiabohui.json` 的
-         recommend 模板待手动同步（详见 bug-112 操作指引）
-   - [ ] 推荐混入不相关项问题：验证 prompt 过滤生效（问"我要买沙发，推荐几个展位给我"）
+   - [x] jiabohui：重新构建知识库 + v4 向量验证（服务器已完成，2026-08-07）
+   - [x] jiabohui：recommend prompt 品类匹配指令同步到服务器 `data/projects/jiabohui.json`（服务器已完成）
+   - [x] 推荐混入不相关项问题：重启后验证 prompt 过滤生效（服务器已完成）
 
 2. **文档完善**
    - [x] README 中多项目架构部分已更新
@@ -517,6 +516,7 @@ data/
 ## 服务器运行状态与待办（2026-08-07 快照）
 
 > 本节记录服务器（ub-server）部署现场，供新会话续接，避免重复排查。
+> **更新（2026-08-07 晚）：原「服务器待办」1~6 项用户已全部执行完成，见下方「已完成」清单。**
 
 ### 服务器环境
 - 路径：`/data/codes/rag_chat`（conda 环境：`/data/conda_envs/cultural-relics-rag`）
@@ -525,25 +525,24 @@ data/
 
 ### 已确认的服务器事实（勿重复排查）
 1. **Embedding 已升级 v4 并验证**：`TextEmbedding.call(model='text-embedding-v4', input='测试', api_key=settings.dashscope_api_key)` 返回 200；
-   `settings.embedding_model_name == 'text-embedding-v4'`（需同步新版 `src/config.py`/`src/embeddings.py` 到服务器后生效）。
+   `settings.embedding_model_name == 'text-embedding-v4'`。
 2. **重排 API 生效（非 TF-IDF）**：`.env` 配 `RERANKER_MODEL=qwen3-rerank`（注意控制台模型名，
    非 qwen3-reranker-4b），日志 `Qwen3-Reranker 重排序完成: 10 → 5 条` 17+ 次 = 控制台 17 次成功调用。
 3. **知识库**：jiabohui `data/processed/jiabohui/chunks.json` 171 切片已构建；
-   v4 向量重建状态**待确认**（用户执行过 v4 验证，但重建后是否重新构建知识库未最终确认）。
+   **v4 向量已重建**（用户已执行清缓存 + 重建，见下方完成清单）。
 4. **429 限流**：构建时偶发 `429 - Allocated quota exceeded`（账号 TPM 配额低），重试机制自动恢复，
    非代码缺陷；缓解：控制台提升配额 / 降低并发 / 加长退避（未实施，用户未要求）。
 
-### 服务器待办（下一步）
-1. **同步最新代码**（本地已提交，服务器未同步）：`src/config.py`、`src/embeddings.py`、
-   `src/data_loader.py`、`src/document_loader.py`、`src/rag_pipeline.py`、`src/project.py`、
-   `app.py`、`requirements.txt`（含 openpyxl 依赖）。
-2. **`.env` 检查**：`EMBEDDING_MODEL_NAME`（v4，注意旧拼写 `EMBEDDING_MOD_NAME` 不生效）、
-   `RERANKER_MODEL=qwen3-rerank`（保持）。
-3. **清 v3 缓存**：`rm -rf data/processed/embedding_cache`（v3 查询缓存需清，防新旧向量混用）。
-4. **重新构建知识库**（v4 向量）：`python scripts/build_knowledge_base.py --project jiabohui --source docs --doc-path ./data/raw/jiabohui/docs --category "家博会资料"`。
-5. **`data/projects/jiabohui.json` 手动改 recommend 模板**：加品类匹配指令
-   （"**相关性优先**：只推荐与用户问题**直接相关**的项；若参考信息中标明了**品类/类型/类别**，
-   优先推荐与用户需求品类匹配的项，品类明显不匹配的**不要推荐**（宁缺毋滥，不要为凑满数量硬推）"）。
-6. **重启服务**并验证：下拉框默认选中 jiabohui（bug-111 修复）、问"你是谁"返回小虎人设、
-   问"我要买沙发，推荐几个展位给我"不再推设计品牌（bug-112 prompt 生效）。
-7. **可选**：开通 qwen3-reranker-4b 或保持 qwen3-rerank（不阻塞）。
+### 服务器已完成操作（用户执行，2026-08-07）
+- [x] **同步最新代码**：`src/config.py`、`src/embeddings.py`、`src/data_loader.py`、`src/document_loader.py`、
+  `src/rag_pipeline.py`、`src/project.py`、`app.py`、`requirements.txt`（含 openpyxl）已同步服务器。
+- [x] **`.env` 检查**：`EMBEDDING_MODEL_NAME`（v4）、`RERANKER_MODEL=qwen3-rerank` 已确认。
+- [x] **清 v3 缓存**：`rm -rf data/processed/embedding_cache` 已执行。
+- [x] **重新构建知识库**（v4 向量）：已执行构建命令。
+- [x] **`data/projects/jiabohui.json` recommend 模板**：已手动加入品类匹配指令。
+- [x] **重启服务并验证**：下拉框默认选中 jiabohui（bug-111 生效）、
+  问"你是谁"返回小虎人设、推荐过滤生效（bug-112）。
+
+### 剩余可选事项
+- [ ] **可选**：开通 qwen3-reranker-4b 或保持 qwen3-rerank（当前不阻塞）。
+- [ ] **可选**：若展位数据缺品类字样，后续数据层补充"主营品类"列（prompt 品类匹配的前提，用户暂不操作）。
