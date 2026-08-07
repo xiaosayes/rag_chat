@@ -2440,3 +2440,61 @@ python scripts/build_knowledge_base.py --project jiabohui --source mixed \
 2. 重启 `python app.py --project jiabohui --host 0.0.0.0 --port 7860`；
 3. 页面加载后提问"你是谁"应返回"我是小虎"（家博会人设），不再返回博物馆回答；
 4. 下拉框应显示全部项目（博物馆知识库/企业知识库/家博会数字人小虎），默认选中家博会数字人小虎。
+
+---
+
+## 新增问题（第九轮补 - 推荐类回答混入不相关结果）
+
+> 触发场景：jiabohui 项目提问"我要买沙发，推荐几个展位给我"，回答推荐了 5 个展位，
+> 前 3 个为沙发展位（正常），后 2 个为设计品牌展位（前进觅美/巴博罗，与买沙发需求不直接相关）。
+> 全量测试：`pytest tests/ -q` → **242 passed**（原 239 + 新增 3，0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-112 | 推荐类回答混入与用户需求不相关的展位：服务器 qwen3-reranker-4b 未开通（重排降级本地 TF-IDF，字符级无法语义区分"沙发品牌"与"设计品牌"）+ recommend prompt 无相关性过滤约束（LLM 硬凑推荐数） | `src/rag_pipeline.py`、`src/project.py` | P1 | 已修复（prompt 层） |
+
+## 问题详情
+
+### [bug-112] 推荐类回答混入不相关结果（P1）
+
+- **根因分析**（两个因素叠加）：
+  1. **主因（环境）**：服务器账号未开通 `qwen3-reranker-4b`（此前 bug-097 日志实证 `400 - Model not exist`），
+     重排序一直降级到本地 TF-IDF（字符级 n-gram 1-3）。本地实验复现："我要买沙发，推荐几个展位给我"
+     的 TF-IDF 重排结果中，"前进觅美"（文本含"模块化组合沙发"）被排第 2、"巴博罗"（无沙发字样）排第 5，
+     与用户实测排序一致——字符级重排无法语义区分"沙发品牌"与"设计品牌"。
+  2. **次因（代码）**：recommend prompt（默认 `SYSTEM_PROMPT_RECOMMEND` 与项目模板）只有
+     "从参考信息中挑选 3~5 个最具代表性的结果"，**无相关性过滤约束**——LLM 拿到 5 个候选
+     （含不相关项）时照单全收凑满推荐数。
+- **影响范围**：所有推荐类问题（"推荐/有哪些/买什么"）在重排降级时可能混入不相关项；
+  服务器当前重排恒为 TF-IDF 降级，影响实况存在。
+- **修复方案**：
+  1. **代码（prompt 相关性过滤）**：默认 `SYSTEM_PROMPT_RECOMMEND` 与内置 museum/enterprise
+     recommend 模板增加第 3 条："**相关性优先**：只推荐与用户问题**直接相关**的项；参考信息中与
+     用户需求不相关的项**不要推荐**（宁缺毋滥，不要为凑满数量硬推）"；
+  2. **环境（根治重排质量）**：开通 `qwen3-reranker-4b`，或 `.env` 改 `RERANKER_MODEL` 为账号已开通的重排模型。
+- **风险分析**：低。仅添加 prompt 指令文本，`{context}` 占位符保留；不影响检索/入库逻辑。
+- **测试验证**：新增 `tests/test_edge_cases.py::TestRecommendPromptRelevance`（3 项）：
+  1. 默认 `SYSTEM_PROMPT_RECOMMEND` 含相关性过滤指令；
+  2. `_select_prompt(RECOMMENDATION)` 返回的 prompt 含该指令；
+  3. 内置 museum/enterprise recommend 模板含该指令且保留 `{context}`。
+  全部通过；全量 `pytest tests/ -q` → **242 passed**（0 失败 0 错误）。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-112 | `TestRecommendPromptRelevance`（3 项）通过；TF-IDF 降级实验复现排序问题（根因确认）；全量 242 passed | ✅ 已修复（prompt 层） |
+
+## 服务器操作指引
+
+1. 同步 `src/rag_pipeline.py`、`src/project.py` 到服务器；
+2. **jiabohui 项目使用自定义 prompts**（服务器 `data/projects/jiabohui.json`），需手动给 recommend 模板
+   增加同款相关性过滤指令（编号顺延）：
+   ```json
+   "recommend": "…\n## 推荐原则\n1. …\n2. …\n3. **相关性优先**：只推荐与用户问题**直接相关**的项；参考信息中与用户需求不相关的项**不要推荐**（宁缺毋滥，不要为凑满数量硬推）\n4. …（原编号顺延）"
+   ```
+3. **根治重排质量（强烈建议）**：百炼控制台开通 `qwen3-reranker-4b`，或 `.env` 设
+   `RERANKER_MODEL` 为已开通模型（如 qwen3-reranker-8b / 其他可用 rerank 模型），
+   并确认日志不再出现 `Qwen3-Reranker API 异常: 400`（此后重排由语义模型精排，相关问题不再混入）。

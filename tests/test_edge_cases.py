@@ -1350,6 +1350,37 @@ class TestProjectDropdownUI:
 
 
 # =============================================================================
+# 推荐 Prompt 相关性过滤（bug-112）
+# =============================================================================
+class TestRecommendPromptRelevance:
+    """
+    根因（bug-112）：recommend prompt 无相关性过滤约束，LLM 拿到混合候选
+    （含与用户需求不相关的展位）时会照单全收凑满推荐数。
+    """
+
+    # 相关性过滤指令的关键词（prompt 中必须出现）
+    _RELEVANCE_HINT = "不要推荐"
+
+    def test_default_recommend_prompt_has_relevance_filter(self):
+        """默认 SYSTEM_PROMPT_RECOMMEND 应包含相关性过滤指令"""
+        from src.rag_pipeline import SYSTEM_PROMPT_RECOMMEND
+        assert self._RELEVANCE_HINT in SYSTEM_PROMPT_RECOMMEND
+
+    def test_select_prompt_recommendation_has_relevance_filter(self):
+        """_select_prompt(RECOMMENDATION) 返回的 prompt 应包含相关性过滤指令"""
+        pipeline = RAGPipeline(local_mode=True)
+        prompt = pipeline._select_prompt(QueryType.RECOMMENDATION, "【示例上下文】")
+        assert self._RELEVANCE_HINT in prompt
+
+    def test_builtin_project_recommend_prompts_have_relevance_filter(self):
+        """内置项目（museum/enterprise）的 recommend 模板应包含相关性过滤指令"""
+        from src.project import MUSEUM_PROMPTS, ENTERPRISE_PROMPTS
+        for prompts in (MUSEUM_PROMPTS, ENTERPRISE_PROMPTS):
+            assert self._RELEVANCE_HINT in prompts["recommend"]
+            assert "{context}" in prompts["recommend"], "{context} 占位符应保留"
+
+
+# =============================================================================
 # 运行入口
 # =============================================================================
 if __name__ == "__main__":
