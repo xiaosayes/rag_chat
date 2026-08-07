@@ -1296,6 +1296,60 @@ class TestEmbeddingModelUpgrade:
 
 
 # =============================================================================
+# Web UI 项目下拉框：动态项目 + 默认值跟随启动参数（bug-111）
+# =============================================================================
+class TestProjectDropdownUI:
+    """
+    根因（bug-111）：create_ui 的项目下拉框 choices 硬编码（museum/enterprise）、
+    value 硬编码 "museum"，与 --project 启动参数无关。
+    --project jiabohui 启动后，页面加载（demo.load 触发 get_system_status）会把
+    全局 pipeline 切换成 museum，导致问"你是谁"返回博物馆回答。
+    """
+
+    @staticmethod
+    def _find_dropdown(demo):
+        import gradio as gr
+        for block in demo.blocks.values():
+            if isinstance(block, gr.Dropdown):
+                return block
+        return None
+
+    def test_dropdown_choices_from_projects(self):
+        """下拉框 choices 应来自 project_manager.list_projects()（含动态项目）"""
+        import app
+        from src.project import project_manager
+        demo = app.create_ui()
+        dd = self._find_dropdown(demo)
+        assert dd is not None
+        expected = [(p["name"], p["id"]) for p in project_manager.list_projects()]
+        assert dd.choices == expected
+
+    def test_dropdown_default_value_backward_compat(self):
+        """不传 default_project 时默认值保持 museum（向后兼容）"""
+        import app
+        demo = app.create_ui()
+        dd = self._find_dropdown(demo)
+        assert dd.value == "museum"
+
+    def test_dropdown_default_follows_cli_project(self):
+        """传入 default_project（--project 参数）时默认值跟随，避免页面加载误切换项目"""
+        import app
+        from src.project import ProjectConfig, project_manager
+        fake = ProjectConfig(
+            "jiabohui",
+            {"id": "jiabohui", "name": "家博会数字人小虎", "collection_name": "project_jiabohui"},
+        )
+        with patch.object(
+            project_manager, "_projects",
+            {**project_manager._projects, "jiabohui": fake},
+        ):
+            demo = app.create_ui(default_project="jiabohui")
+            dd = self._find_dropdown(demo)
+            assert dd.value == "jiabohui"
+            assert ("家博会数字人小虎", "jiabohui") in dd.choices
+
+
+# =============================================================================
 # 运行入口
 # =============================================================================
 if __name__ == "__main__":

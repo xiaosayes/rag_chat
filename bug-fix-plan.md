@@ -2379,3 +2379,64 @@ python scripts/build_knowledge_base.py --project jiabohui --source mixed \
 3. 重新构建或查询即使用 text-embedding-v4（API Key 不变）；
    ⚠️ 注意：v3 与 v4 向量维度同为 1024 但**向量空间不同**，已用 v3 构建的 Qdrant 数据需**重新构建知识库**，
    否则新旧向量混用会导致检索质量下降。
+
+---
+
+## 新增问题（第九轮补 - Web UI 项目下拉框误切换）
+
+> 触发场景：服务器 `python app.py --project jiabohui --port 7860` 启动后提问"你是谁"，
+> 返回的是博物馆回答。日志显示启动后 9 秒出现 `初始化 RAG 流水线 - 项目: museum`。
+> 全量测试：`pytest tests/ -q` → **239 passed**（原 236 + 新增 3，0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-111 | Web UI 项目下拉框 choices/value 硬编码（museum/enterprise），`--project jiabohui` 启动后页面加载（demo.load → get_system_status）把全局 pipeline 误切换成 museum | `app.py` | P0 | 已修复 |
+
+## 问题详情
+
+### [bug-111] Web UI 项目下拉框硬编码导致启动项目被误切换（P0）
+
+- **根因分析**：`app.py` 的 `create_ui()` 中项目下拉框：
+  ```python
+  project_dropdown = gr.Dropdown(
+      choices=[("博物馆知识库", "museum"), ("企业知识库", "enterprise")],  # 硬编码，不含动态项目
+      value="museum",   # 硬编码默认值，与 --project 启动参数无关
+  )
+  ```
+  服务启动流程：`main()` 先 `init_pipeline(args.project)`（jiabohui ✅）→ `create_ui()` → 页面加载时
+  `demo.load(get_system_status, [project_dropdown], ...)` 触发 `get_system_status(dropdown.value)`，
+  dropdown 默认值为硬编码的 `"museum"` → `init_pipeline("museum")` **把全局 pipeline 切换成 museum**。
+  之后所有提问（含闲聊"你是谁"）都走 museum pipeline，返回博物馆人设回答。
+  服务器日志佐证：`03:57:19` 启动 jiabohui（171 切片）→ `03:57:28` 页面加载切换 museum（38 切片）→ `03:57:41` 闲聊返回博物馆回答。
+  自定义/外部项目（jiabohui）也不会出现在下拉框（choices 硬编码）。
+- **影响范围**：所有 `--project <自定义项目>` 启动的 Web UI；页面加载后全局 pipeline 被切换，
+  回答全部变成默认项目（museum）的内容与人设。
+- **修复方案**：
+  1. `create_ui(default_stream=True, default_project="")` 新增 `default_project` 参数（= `--project` 参数值）；
+  2. 下拉框 `choices` 改为动态来自 `project_manager.list_projects()`（含自定义/外部项目）；
+  3. 下拉框 `value` = `default_project`（若在项目列表中）否则第一个项目（保持向后兼容，默认 museum）；
+  4. `main()` 传 `create_ui(default_stream=..., default_project=args.project)`。
+  修复后：`--project jiabohui` 启动 → 下拉框默认选中 jiabohui → 页面加载状态检查仍用 jiabohui → 不误切换。
+- **风险分析**：低。默认不传 `--project` 时 value 仍为 museum（行为不变）；下拉框现在显示全部项目（正确行为）。
+- **测试验证**：新增 `tests/test_edge_cases.py::TestProjectDropdownUI`（3 项）：
+  1. choices 来自 `project_manager.list_projects()`（含动态项目）；
+  2. 不传 default_project 时默认值仍为 museum（向后兼容）；
+  3. 注入 jiabohui 项目后 `create_ui(default_project="jiabohui")` → value 为 jiabohui 且出现在 choices。
+  场景验证：mock 注入 jiabohui → `init_pipeline("jiabohui")` → `create_ui(default_project="jiabohui")` →
+  页面加载 `get_system_status(dropdown.value)` 后全局 pipeline 仍为 jiabohui（未被切换）。
+  全部通过；全量 `pytest tests/ -q` → **239 passed**（0 失败 0 错误）。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-111 | `TestProjectDropdownUI`（3 项）通过；场景验证（启动 jiabohui + 页面加载不误切换）通过；全量 239 passed | ✅ 已修复 |
+
+## 服务器操作指引
+
+1. 同步 `app.py` 到服务器；
+2. 重启 `python app.py --project jiabohui --host 0.0.0.0 --port 7860`；
+3. 页面加载后提问"你是谁"应返回"我是小虎"（家博会人设），不再返回博物馆回答；
+4. 下拉框应显示全部项目（博物馆知识库/企业知识库/家博会数字人小虎），默认选中家博会数字人小虎。

@@ -19,6 +19,7 @@ from loguru import logger
 from src.config import settings
 from src.utils import setup_logger
 from src.rag_pipeline import RAGPipeline
+from src.project import project_manager
 
 # Gradio 6.0 破坏性变更兼容（bug-098）：
 #   - Chatbot 的 show_copy_button / bubble_full_width 参数被移除，改用 buttons / layout
@@ -367,12 +368,28 @@ def get_system_status(project_id: str = ""):
         return f"❌ 状态检查失败: {e}"
 
 
-def create_ui(default_stream: bool = True):
+def create_ui(default_stream: bool = True, default_project: str = ""):
     """创建 Gradio 界面 v2（含检索结果可视化）
 
     Args:
         default_stream: 流式输出复选框的默认值（--no-stream 时置 False）
+        default_project: 启动时指定的项目 ID（--project 参数），
+            作为下拉框默认选中值，避免页面加载时误切换全局 pipeline（bug-111）
     """
+    # bug-111 修复：下拉框 choices 动态来自 ProjectManager（含自定义/外部项目），
+    # 默认值跟随启动参数 --project。此前 choices/value 硬编码 museum/enterprise，
+    # 导致 --project jiabohui 启动后页面加载（demo.load → get_system_status）
+    # 把全局 pipeline 切换成 museum，所有回答都变成博物馆的。
+    _projects = project_manager.list_projects()
+    _project_ids = [p["id"] for p in _projects]
+    if not _projects:
+        _project_choices = [("默认", "")]
+        _default_project = ""
+    else:
+        _project_choices = [(p["name"], p["id"]) for p in _projects]
+        _default_project = (
+            default_project if default_project in _project_ids else _projects[0]["id"]
+        )
     with gr.Blocks(
         title="文物知识库 RAG 问答系统",
         # bug-098：Gradio 6.0 将 theme/css 移到 launch()，构造器传参会警告并失效
@@ -381,8 +398,8 @@ def create_ui(default_stream: bool = True):
         # 项目选择器
         with gr.Row():
             project_dropdown = gr.Dropdown(
-                choices=[("博物馆知识库", "museum"), ("企业知识库", "enterprise")],
-                value="museum",
+                choices=_project_choices,
+                value=_default_project,
                 label="选择项目",
                 scale=1,
             )
@@ -497,7 +514,7 @@ def main():
     except Exception as e:
         logger.warning(f"初始化警告: {e}")
 
-    demo = create_ui(default_stream=not args.no_stream)
+    demo = create_ui(default_stream=not args.no_stream, default_project=args.project)
     logger.info(f"启动 Web UI: http://{args.host}:{args.port}")
     launch_kwargs = {
         "server_name": args.host,
