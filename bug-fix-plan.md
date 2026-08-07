@@ -2547,3 +2547,176 @@ python scripts/build_knowledge_base.py --project jiabohui --source mixed \
    需手动把第 3 条改为同款"品类匹配"指令（编号顺延）；
 3. 重启服务验证：`python app.py --project jiabohui --host 0.0.0.0 --port 7860`，
    再问"我要买沙发，推荐几个展位给我"——LLM 应依据品类匹配过滤设计品牌展位。
+
+---
+
+## 新增功能（第十轮 - 意图理解分层分类 L0 规则 + L1 语义 + L2 LLM 兜底）
+
+> 需求：用户意图理解从"纯规则评分"升级为工业界主流的**分层级联**——
+> 规则层挡高频闲聊（零成本）、语义分类层处理多数情形（语义泛化）、LLM 兜底模糊场景（高精度）。
+> 设计确认：L0 规则保留（is_kb_related）+ L1 向量语义分类 + L2 LLM 兜底（低置信时）。
+> 全量测试：`pytest tests/ -q` → **282 passed**（原 243 + 新增 39，0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-113 | 意图理解升级：新增 L1 向量语义分类（对 5 类意图做原型相似度分类）+ L2 LLM 兜底（低置信度时），L0 规则层保留；`classify_query` 评分制降级为末级兜底 | `src/intent_classifier.py`（新增）、`src/rag_pipeline.py`、`src/config.py` | 功能增强 | 已实现 |
+
+## 设计说明
+
+### 分层架构（cost-aware cascade）
+
+```
+用户问题
+  │
+  ▼
+L0 规则 is_kb_related（保留原实现，零成本）
+  ├─ False → 闲聊分支（直接 LLM，不检索）
+  └─ True  → L1 语义分类（SemanticIntentClassifier）
+              ├─ 置信度 ≥ 阈值(0.50，实测校准) → 采用（method=semantic）
+              └─ 置信度 < 阈值 → L2 LLM 兜底（classify_with_llm）
+                                  ├─ 成功 → 采用（method=llm）
+                                  └─ 失败/无 Key/无法解析 → 规则评分 classify_query（method=rules）
+  L1/L2 返回 chitchat → 转闲聊分支（可捕获规则层漏掉的闲聊）
+```
+
+### 各层实现要点
+
+1. **L0（保留）**：`is_kb_related` 规则层不动；顺带补充"好的"关键词（"好的吧/嗯嗯好的" 等
+   口头应答词此前漏判走 RAG，实测验证"好的文物有哪些"等含实质内容查询不受影响）。
+2. **L1（新增 `src/intent_classifier.py::SemanticIntentClassifier`）**：
+   - 5 类意图各 7~8 条**领域无关**原型问题（recommendation/factual/comparison/open_ended/chitchat，
+     符合"代码泛化"约定）；
+   - 原型向量懒加载（线程安全，首次 classify 时计算）+ 复用全局 EmbeddingCache 持久化
+     （首次计算后重启进程命中磁盘缓存，查询零额外 API 成本）；
+   - `classify(question)` → (intent, confidence)，余弦相似度取最高分；
+   - embedding 失败/空问题 → (None, 0.0) 走下游兜底。
+3. **L2（`classify_with_llm`）**：LLM 意图分类提示词（只输出一个英文类型词），
+   无 API Key / 调用失败 / 输出无法解析 → None；子串匹配容忍 LLM 输出噪声。
+4. **QueryType 新增 CHITCHAT** 枚举成员；`_classify_intent()` 返回 (query_type, method)，
+   method ∈ {semantic, llm, rules} 供日志观察；query/query_stream 中 L1/L2 识别出
+   chitchat 时转闲聊分支（与规则层闲聊行为一致）。
+5. **配置（`src/config.py`）**：`INTENT_SEMANTIC_ENABLED`（默认 true）、
+   `INTENT_SEMANTIC_THRESHOLD`（默认 **0.50**，真实 API 实测校准）、
+   `INTENT_LLM_FALLBACK_ENABLED`（默认 true）。
+6. **构建预计算**：`build_knowledge_base` 在 `precompute_patterns` 后同步预计算意图原型向量
+   （try/except 包裹，失败不影响构建）。
+
+## 风险分析
+
+- **低**。L1/L2 均有完整兜底链（embedding 失败 → L2 → 规则），任何一层不可用自动降级，
+  最坏情况回到原 `classify_query` 行为（与修复前一致）；
+- L2 按次计费：仅 L1 低置信度查询触发（实测约 25% 的模糊问题），总开关可关；
+- 阈值 0.50 为真实 API 实测校准（同意图相似度区间 0.47~1.0，误分类置信度 0.28~0.55）；
+- 已知边界："好的吧" 类口头应答由 L0"好的"关键词覆盖；极短退化输入（如"好的"单独出现）
+  若 L0 未覆盖仍可能走一次空检索后 LLM 兜底，无崩溃风险。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-113 | 新增 `tests/test_intent_classifier.py`（39 项）全部通过；真实 API 冒烟测试（L1 语义分类 + L2 LLM 兜底 + 完整级联端到端）全部通过；全量 282 passed | ✅ 已实现 |
+
+### Mock 测试（39 项，`tests/test_intent_classifier.py`）
+- **L1 单元**（13 项）：cosine_similarity 边界（相同/正交/相反/维度不一致/零向量/空）、
+  classify 高置信/各类别逐个/低置信/空问题/embedding 失败/返回空、原型向量缓存、
+  warmup 预计算、部分原型失败跳过；
+- **L2 单元**（8 项）：成功/带噪声输出（"comparison。"）/前缀（"Intent: factual"）/
+  无法解析/空输出/无 API Key 跳过/LLM 失败/prompt 含问题；
+- **级联 `_classify_intent`**（9 项）：L1 高置信→semantic 且规则不调用、低置信→LLM、
+  embedding 失败→LLM、LLM 失败→rules、无 Key→rules、semantic 关闭→rules、
+  LLM 兜底关闭→rules、chitchat 映射、L1 关闭时规则调用；
+- **query/query_stream 路由**（8 项）：知识库问题用语义结果、L1/L2 识别闲聊转闲聊分支、
+  规则层闲聊不触发语义分类（行为不变）、流式 meta 正确；
+- **"好的"关键词路由**（1 项）。
+
+### 真实 API 冒烟测试（用户授权使用环境变量 Key）
+- **L1 语义分类**（28 个样本）：推荐/事实/比较/闲聊 4 类全部正确且多数置信度 > 0.50；
+  开放类 2 例被误分类但置信度低（0.284/0.403）→ 正确触发 L2；
+- **L2 LLM 兜底**（7 个模糊/误分类样本）：6 例正确（含"好的吧"→chitchat，
+  L1 误判 recommendation 被纠正），1 例"为什么司母戊鼎这么重"→factual（原因问题，可辩护）；
+- **完整级联 end-to-end**（8 样本 + 2 流程）：清晰问题全走 semantic、模糊开放走 llm、
+  闲聊走 L0 规则；`query("你好，你是谁")` 真实 LLM 回答 1.6s；KB 未构建时优雅报错。
+
+## 配置说明（.env）
+
+```bash
+# 意图理解（L1 语义 + L2 LLM 兜底）
+INTENT_SEMANTIC_ENABLED=true      # L1 语义意图分类总开关
+INTENT_SEMANTIC_THRESHOLD=0.50    # L1 置信度阈值（余弦相似度，低于则走 L2 LLM 兜底）
+INTENT_LLM_FALLBACK_ENABLED=true  # L2 LLM 兜底开关（仅低置信度时调用，按次计费）
+```
+
+## 服务器操作指引
+
+1. 同步 `src/intent_classifier.py`（新增）、`src/rag_pipeline.py`、`src/config.py` 到服务器；
+2. 重启 `python app.py --project jiabohui --host 0.0.0.0 --port 7860`；
+3. 观察日志：`语义意图分类: xxx (置信度 x.xxx)`（L1）、`LLM 意图分类失败`（L2 异常时）；
+   首次查询会预计算 37 个意图原型向量（约 3 批 Embedding 调用），之后命中缓存零成本；
+4. 若某项目意图分类不准：调整 `INTENT_SEMANTIC_THRESHOLD`（调低更多走 L1、调高更多走 L2 兜底），
+   或扩充 `SemanticIntentClassifier.INTENT_PROTOTYPES` 原型样本（领域相关样本可放入项目配置层，本次未实现）。
+
+---
+
+## 新增问题（第十轮补 - bug-113 首字延迟优化）
+
+> 触发场景：用户反馈升级意图理解分层分类后，答案首字（TTFT）比之前久了很多。
+> 实测定位：**首次查询时的意图原型向量计算阻塞 9.5s**（37 个原型逐个 `embed_query` 串行调用
+> Embedding API，每次 ~250ms）+ 低置信度问题的 L2 LLM 串行调用（+~800ms）。
+> 全量测试：`pytest tests/ -q` → **282 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-113补 | 意图原型向量首算 9.5s 阻塞首次查询首字；原型向量存 exact_cache 有被 LRU 挤出重算风险 | `src/intent_classifier.py`、`src/rag_pipeline.py` | P1 | 已修复 |
+
+## 问题详情
+
+### [bug-113补] 意图原型向量计算阻塞首字（P1）
+
+- **根因分析**：
+  1. `_get_prototype_vectors` 对 37 个原型逐个调用 `embed_query`（单条 API 调用），**串行 37 次 ≈ 9.5s**；
+     且仅懒加载、未预计算时该耗时发生在**首次查询线程内**（init_pipeline 的 warmup 未触发意图预计算，
+     需知识库重建才会在 build 中预计算）→ 升级后未重建知识库的用户首次查询直接阻塞 9.5s；
+  2. 原型向量写入 exact_cache（LRU 淘汰到 500 条），大量查询时可能被挤出 → 触发重算。
+- **影响范围**：所有使用 L1 语义分类的查询；未重建知识库/重启后首次查询尤其明显（首字 9.5s+）。
+- **修复方案**：
+  1. `_get_prototype_vectors` 改用 **`embed_batch` 批量计算**（37 个原型 → 4 批并行，实测 **9.5s → 0.6s**），
+     `embed_batch` 不可用/失败时回退逐个 `embed_query`（保持与测试 mock 兼容）；
+  2. 原型向量改写入 **`pattern_cache`（set_pattern）**——该缓存不淘汰、持久化，重启后零 API 调用
+     （实测重启 warmup 0.0s）；exact_cache 仅作读取回源；
+  3. `RAGPipeline.warmup()` 增加 `intent_classifier.warmup()`（try/except 包裹）——启动时预计算原型，
+     首查不再阻塞（实测 pipeline 构造 + warmup 0.7s）。
+- **风险分析**：低。① embed_batch 是既有批量路径（含批大小钳制/维度校验/失败重试），行为一致；
+  ② pattern_cache 校验逻辑（bug-037/067）与原型向量兼容（list[float]）；
+  ③ warmup 失败仅告警不影响启动；④ 分类结果与阈值完全不变（**不牺牲准确率**）。
+- **测试验证**：新增/更新 5 项测试（embed_batch mock 适配 ×4、warmup 预计算保护 ×2 测试文件）；
+  真实 API 实测：冷启动原型预计算 9.5s→0.6s、重启后 0.0s、新问题 L1 classify 281ms（与检索共享单次
+  embedding 调用，不额外计费）；完整 query_stream 首字：高置信 658~738ms、L0 闲聊 549ms（均与旧版持平）、
+  低置信 L2 1689ms（其中 ~800ms 为 L2 LLM 串行，是"不牺牲准确率"的本质代价，检索在 L1 后缓存命中
+  仅 ~10ms 无法并行隐藏，已确认无优化空间）；全量 282 passed。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-113补 | 冷启动原型预计算 9.5s → 0.6s（embed_batch 批量）；重启 warmup 0.0s（pattern_cache 持久化命中）；重启后首查首字 658ms/1072ms（与旧版持平）；全量 282 passed | ✅ 已修复 |
+
+### 实测数据（真实 API，Windows 本地）
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 首次查询（原型未预计算） | 9.5s（原型计算阻塞） | 0.7s（启动 warmup 完成）+ 首字 ~660ms |
+| 重启后 warmup | 9.5s（若懒加载） | 0.0s（pattern_cache 命中） |
+| 高置信问题首字（缓存命中） | — | 658~738ms |
+| 低置信问题首字（L2 兜底） | — | 1689ms（L2 ~800ms 为准确率代价） |
+| L0 闲聊首字 | — | 549ms |
+
+## 服务器操作指引
+
+1. 同步 `src/intent_classifier.py`、`src/rag_pipeline.py` 到服务器；
+2. 重启 `python app.py --project jiabohui --host 0.0.0.0 --port 7860`；
+3. 启动日志出现 `意图原型向量就绪: 37 个原型 / 5 类`（warmup 预计算，~0.6s）即生效；
+   首次查询不再有秒级延迟；原型向量持久化于 `data/processed/embedding_cache/pattern_cache.json`。

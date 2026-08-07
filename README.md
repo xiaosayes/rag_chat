@@ -30,17 +30,25 @@
 
 ## 更新日志
 
-### v1.3.5-pre (开发中) — 新增功能与修复（第九轮）
+### v1.3.5-pre (开发中) — 新增功能与修复（第九/十轮）
 
 #### 新增功能
 - **Excel (.xlsx) 数据源支持（bug-109）**：表格型 Excel 可直接作为知识库数据源（每行一条记录、多 sheet 支持、任意列可检索）；docs 模式自动识别 + json 模式 `--json-path xxx.xlsx` 双入口；openpyxl 可选依赖
 - **Embedding 模型升级 text-embedding-v3 → v4（bug-110）**：默认模型升级，API 契约/批大小上限/维度不变；`.env.example` 顺带修正键名拼写 `EMBEDDING_MOD_NAME` → `EMBEDDING_MODEL_NAME`
+- **意图理解分层分类（bug-113）**：用户意图理解从纯规则升级为工业界主流的**分层级联**——
+  L0 规则闲聊路由（`is_kb_related`，零成本，保留）→ L1 向量语义分类（`SemanticIntentClassifier`，
+  5 类意图原型相似度，复用 Embedding 缓存，语义泛化）→ L2 LLM 兜底（`classify_with_llm`，
+  仅 L1 低置信度时调用，按次计费）→ 规则评分保住底；L1/L2 识别出规则层漏掉的闲聊自动转闲聊分支；
+  配置：`INTENT_SEMANTIC_ENABLED` / `INTENT_SEMANTIC_THRESHOLD`(0.50) / `INTENT_LLM_FALLBACK_ENABLED`
+  **首字延迟优化**：原型向量 `embed_batch` 批量预计算（首次 9.5s → 0.6s，启动 warmup 完成，首查不阻塞）、
+  持久化于 pattern_cache（重启零成本）；高置信/闲聊首字与旧版持平（实测 ~550-740ms），
+  低置信问题 L2 LLM 为准确率代价（~800ms，无法并行消除）
 
 #### Bug 修复
 - **Web UI 项目下拉框误切换（bug-111，P0）**：下拉框 choices/value 硬编码导致 `--project jiabohui` 启动后页面加载把全局 pipeline 误切换成 museum；改为 choices 动态来自 ProjectManager、value 跟随 `--project` 参数
 - **推荐类回答混入不相关项（bug-112，P1）**：recommend prompt 增加相关性优先 + 品类匹配指令（"不相关的项不要推荐，宁缺毋滥"）；根因更正：服务器重排实际用 qwen3-rerank API（生效），非 TF-IDF 降级
 
-**全量测试**：`pytest tests/ -q` → **243 passed**（0 失败 0 错误）
+**全量测试**：`pytest tests/ -q` → **282 passed**（0 失败 0 错误）
 
 ### v1.3.4 (2024-08) — 当前版本
 
@@ -254,16 +262,17 @@
 ### 数据流
 
 ```
-用户输入 → 路由判断(is_kb_related)
+用户输入 → 路由判断(is_kb_related)  [L0 规则层，零成本]
   ├── 闲聊/非知识库 → 直接 LLM (qwen-plus) ← 无检索，最快
-  └── 知识库相关 → 进入 RAG 流水线
-                    │
+  └── 知识库相关 → 分层意图分类 [bug-113]
+                    L1 语义(SemanticIntentClassifier) 置信度≥0.50 → 直接采用
+                    L2 LLM(classify_with_llm) 低置信度时兜底
+                    L0 规则评分(classify_query) 保住底
+                    L1/L2 判为闲聊 → 转闲聊分支
                     ▼
-        查询分类(classify_query) → 推荐/事实/比较/开放
-                    │
-                    ▼
-        混合检索(并行) ─┬─ 语义: Embedding → Qdrant
-                        └─ BM25: rank-bm25 (内存索引)
+        推荐/事实/比较/开放 → 混合检索(并行)
+                    ─┬─ 语义: Embedding → Qdrant
+                     └─ BM25: rank-bm25 (内存索引)
                     │  RRF融合 + 去重
                     ▼
         重排序 (Qwen3-Reranker / TF-IDF fallback)
@@ -295,7 +304,7 @@
 | **重排序** | 百炼 **`qwen3-reranker-4b`**（默认）/ `qwen3-reranker-8b` / 本地 TF-IDF（降级） | — | 对检索结果精排 | 在线 API / 本地 |
 | **LLM 问答** | 阿里云百炼 **`qwen-plus`**（默认）/ `qwen-max` | 3.7+ | 日常问答用 qwen-plus，复杂推理用 qwen-max | **在线 API** |
 | **LLM 缓存** | 自定义 `LRUCache` | v1 | 相同问题不重复调用 API，TTL 30 分钟 | 内置 |
-| **查询分类** | 自定义 `classify_query` | v2 | 基于评分机制，15+ 种模式，识别推荐/事实/比较/开放/闲聊 | 内置 |
+| **查询分类** | 自定义 `classify_query` + `SemanticIntentClassifier` | v3 | 分层级联：L0 规则闲聊路由 → L1 向量语义分类（原型相似度）→ L2 LLM 兜底（低置信时）→ 规则评分保底（bug-113） | 内置 + 在线 API（L2） |
 | **闲聊路由** | 自定义 `is_kb_related` | v1 | 自动识别问候、天气等非知识库问题，直接 LLM 回答 | 内置 |
 | **上下文裁剪** | 自定义 `_trim_context` | v1 | 按相关性保留完整段落，上限 10000 字符 | 内置 |
 | **多轮对话** | 对话历史传递 | v1 | 保留最近 4 轮对话（8 条消息），支持追问 | 内置 |
@@ -488,11 +497,13 @@ python scripts/run_qa.py -q "今天天气怎么样"
 以用户提问 **"推荐一些代表性的文物"** 为例：
 
 ```
-Step 1: 查询分类
+Step 1: 查询分类（分层级联，bug-113）
 ────────────────────────────────────────────────────────────
 输入: "推荐一些代表性的文物"
-输出: QueryType.RECOMMENDATION
-逻辑: 命中关键词 ["推荐", "代表性"]
+输出: QueryType.RECOMMENDATION (method=semantic)
+逻辑: L1 语义分类——问题 embedding 与 5 类意图原型（推荐/事实/比较/开放/闲聊）
+      计算余弦相似度，最高分 0.615 ≥ 阈值 0.50 → 直接采用（零额外 LLM 成本）
+      若置信度 < 0.50 → L2 LLM 兜底分类 → 仍失败/无 Key → 规则评分保住底
 
 Step 2: 混合检索（并行）
 ────────────────────────────────────────────────────────────

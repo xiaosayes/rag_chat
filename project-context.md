@@ -28,8 +28,8 @@
 | 重排序 | 百炼 **`qwen3-reranker-4b`**（默认）/ `qwen3-reranker-8b` / 本地 TF-IDF（降级） | 在线 API / 本地 |
 | LLM | 阿里云百炼 **`qwen-plus`**（默认）/ `qwen-max` | **在线 API** |
 | 缓存 | 三层 LRU（Embedding 持久化 + LLM 响应 + 检索结果） | 内置 |
-| 查询分类 | 评分机制，15+ 种模式 → 推荐/事实/比较/开放/闲聊 | 内置 |
-| 闲聊路由 | 关键词匹配，非知识库问题跳过 RAG | 内置 |
+| 查询分类 | 分层级联：L0 规则闲聊路由 + L1 向量语义分类（原型相似度）+ L2 LLM 兜底（低置信时），规则评分保住底（bug-113） | 内置 |
+| 闲聊路由 | 关键词剥离匹配（L0，零成本），L1/L2 可捕获规则层漏掉的闲聊 | 内置 |
 | 上下文裁剪 | 按段落裁剪，上限 10000 字符 | 内置 |
 | 多轮对话 | 保留最近 4 轮（8 条消息） | 内置 |
 | 回答质量评估 | `verify_answer_grounding()` 防幻觉检查 | 内置 |
@@ -137,8 +137,10 @@
 
 1. **多项目架构**：每个项目独立 Qdrant 集合 + BM25 索引 + Prompt 模板 + 数据目录
 2. **代码泛化**：不包含任何领域特定关键词（如"文物""鼎""剑"等），适用于任意领域
-3. **闲聊路由**：`is_kb_related()` 基于通用闲聊模式匹配，非知识库问题直接 LLM 回答
-4. **查询分类**：基于评分机制，15+ 种模式，自动识别推荐/事实/比较/开放五类
+3. **闲聊路由**：`is_kb_related()` 基于通用闲聊模式匹配（L0，零成本），非知识库问题直接 LLM 回答；
+   L1/L2 语义分类识别出规则层漏掉的闲聊时也会转闲聊分支（bug-113）
+4. **查询分类（分层级联）**：L0 规则闲聊路由 → L1 向量语义分类（5 类意图原型相似度，复用 Embedding 缓存）
+   → L2 LLM 兜底（低置信度时按次计费）→ 规则评分保住底；清晰问题零新增成本，模糊问题高精度
 5. **混合检索**：语义 + BM25 并行执行，RRF 融合，按文物去重
 6. **三层缓存**：Embedding 持久化缓存（1000+ 条）+ LLM 响应缓存（256 条，30min TTL）+ 检索结果缓存（128 条，5min TTL）
 7. **上下文裁剪**：保留完整段落，上限 10000 字符，按相关性（检索顺序）保留
@@ -197,10 +199,11 @@
 ### 当前状态
 - ✅ **v1.3.4 已完成发布**（第八轮生产环境修复：bug-095 ~ bug-100）
 - ✅ **v1.3.5-pre（开发中）新增功能与修复**：Excel 数据源（bug-109）、Embedding v4 升级（bug-110）、
-  Web UI 下拉框误切换（bug-111）、推荐 prompt 相关性/品类过滤（bug-112）
-- ✅ **112 个已识别问题已全部处理**（bug-001 至 bug-108 修复；bug-109~112 为第九轮新增功能/修复；
+  Web UI 下拉框误切换（bug-111）、推荐 prompt 相关性/品类过滤（bug-112）、
+  意图理解分层分类 L0+L1+L2（bug-113，新增 `src/intent_classifier.py`）
+- ✅ **113 个已识别问题已全部处理**（bug-001 至 bug-108 修复；bug-109~113 为第九/十轮新增功能/修复；
   bug-032 编号不存在；bug-094 标注需确认，详见 bug-fix-plan.md）
-- ✅ **243 项单元测试全部通过**（0 失败、0 错误）
+- ✅ **282 项单元测试全部通过**（0 失败、0 错误）
 - ✅ **代码已通过语法检查**（18 个 Python 源文件）
 - ⏳ **服务器部署中**：jiabohui（家博会）项目已构建并启动 Web UI（端口 7860），
   运行中待办见下方「服务器运行状态与待办」章节
@@ -218,6 +221,7 @@
 | 第七轮（独立审查） | bug-089 ~ bug-093（+bug-094 需确认） | `src/rag_pipeline.py`, `src/chunking.py`, `app.py` | ✅ 已完成（5 修复 + 1 待确认） |
 | 第八轮（生产环境） | bug-095 ~ bug-108 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py`, `src/rag_pipeline.py`, `src/chunking.py`, `src/project.py`, `app.py`, `requirements.txt` | ✅ 已完成 |
 | 第九轮（v1.3.5-pre） | 功能：bug-109（Excel 数据源）、bug-110（Embedding v4 升级）；修复：bug-111（UI 下拉框）、bug-112（推荐 prompt 过滤，含根因更正） | `src/data_loader.py`, `src/document_loader.py`, `src/config.py`, `src/embeddings.py`, `app.py`, `src/rag_pipeline.py`, `src/project.py`, `requirements.txt` | ✅ 已完成 |
+| 第十轮（v1.3.5-pre） | 功能：bug-113（意图理解分层分类 L0 规则 + L1 语义 + L2 LLM 兜底） | `src/intent_classifier.py`（新增）, `src/rag_pipeline.py`, `src/config.py`, `tests/test_intent_classifier.py`（新增） | ✅ 已完成 |
 
 > 注：bug-032 编号不存在（历史记录中从 bug-031 直接到 bug-033）。
 
@@ -466,6 +470,9 @@ python app.py --project custom --port 7862
 | `QDRANT_MEMORY_MODE` | `false` | 全内存模式 |
 | `RERANKER_MODEL` | `qwen3-reranker-4b` | 重排序模型 |
 | `RERANKER_ENABLED` | `true` | 是否启用重排序 |
+| `INTENT_SEMANTIC_ENABLED` | `true` | L1 语义意图分类总开关（bug-113） |
+| `INTENT_SEMANTIC_THRESHOLD` | `0.50` | L1 置信度阈值（低于则走 L2 LLM 兜底） |
+| `INTENT_LLM_FALLBACK_ENABLED` | `true` | L2 LLM 意图分类兜底开关 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 
 ### 数据目录结构
@@ -498,7 +505,8 @@ data/
 | 文件 | 核心类/函数 | 行数 | 职责 |
 |------|------------|------|------|
 | `src/project.py` | `ProjectConfig`, `ProjectManager` | ~200 | 项目配置管理，多项目隔离 |
-| `src/rag_pipeline.py` | `RAGPipeline` | ~500 | 核心 RAG 流水线编排 |
+| `src/rag_pipeline.py` | `RAGPipeline` | ~1300 | 核心 RAG 流水线编排（含 L0 规则闲聊路由 + 分层意图分类入口） |
+| `src/intent_classifier.py` | `SemanticIntentClassifier`, `classify_with_llm` | ~200 | L1 向量语义意图分类 + L2 LLM 兜底（bug-113 新增） |
 | `src/vector_store.py` | `VectorStore` | ~220 | Qdrant 向量数据库封装 |
 | `src/retriever.py` | `BM25Retriever`, `HybridRetriever` | ~250 | 混合检索（语义 + BM25） |
 | `src/cache.py` | `LRUCache`, `EmbeddingCache` | ~300 | 三层 LRU 缓存系统 |

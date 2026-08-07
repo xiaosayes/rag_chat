@@ -26,6 +26,7 @@ from src.utils import save_json, load_json
 from src.document_loader import DocumentLoader
 from src.project import project_manager, ProjectConfig
 from src.cache import retrieval_cache
+from src.intent_classifier import SemanticIntentClassifier, classify_with_llm
 
 
 # 上下文 chunk 分隔符（使用不易出现在正文中的唯一字符串，避免与 chunk 正文内容冲突，bug-031）
@@ -38,7 +39,18 @@ class QueryType(str, Enum):
     FACTUAL = "factual"                # 事实类
     COMPARISON = "comparison"          # 比较类
     OPEN_ENDED = "open_ended"          # 开放讨论
+    CHITCHAT = "chitchat"              # 闲聊（L1/L2 语义分类可识别规则层漏掉的闲聊）
     UNKNOWN = "unknown"                # 未知
+
+
+# L1/L2 意图字符串 → QueryType 映射（intent_classifier 返回字符串以避免循环导入）
+_INTENT_STR_TO_QUERY_TYPE = {
+    "recommendation": QueryType.RECOMMENDATION,
+    "factual": QueryType.FACTUAL,
+    "comparison": QueryType.COMPARISON,
+    "open_ended": QueryType.OPEN_ENDED,
+    "chitchat": QueryType.CHITCHAT,
+}
 
 
 # ========== Prompt 模板 ==========
@@ -117,7 +129,7 @@ class RAGPipeline:
         "天气", "今天天气", "明天天气",
         "早上好", "下午好", "晚上好", "晚安",
         "开心", "难过", "心情",
-        "不错", "很好", "厉害",
+        "不错", "很好", "厉害", "好的",
     ]
 
     # 常见语气后缀（允许紧随闲聊关键词出现，如 "今天天气怎么样"、"你好如何"）
@@ -225,6 +237,12 @@ class RAGPipeline:
             top_p=settings.llm_top_p,
             use_cache=enable_cache,
         )
+        # L1 语义意图分类器（分层意图理解：L0 规则 is_kb_related → L1 语义 → L2 LLM 兜底）
+        self.intent_classifier = SemanticIntentClassifier(
+            embedding=self.embedding,
+            enable_cache=enable_cache,
+            min_confidence=settings.intent_semantic_threshold,
+        )
         self.chunking_pipeline = ChunkingPipeline(
             strategy=SmartChunking()
         )
@@ -240,6 +258,11 @@ class RAGPipeline:
         logger.info("预热知识库...")
         try:
             self._ensure_knowledge_base()
+            # bug-113 优化：启动时预计算意图原型向量，避免首次查询阻塞（首字延迟）
+            try:
+                self.intent_classifier.warmup()
+            except Exception as e:
+                logger.warning(f"意图原型预计算失败（不影响正常使用）: {e}")
             self._warmup_done = True
             logger.info("知识库预热完成（BM25 索引已加载到内存）")
         except Exception as e:
@@ -378,6 +401,11 @@ class RAGPipeline:
             self.embedding.precompute_patterns()
         except Exception as e:
             logger.warning(f"预计算高频问题 Embedding 失败（不影响正常使用）: {e}")
+        # 6.1 预计算意图分类原型向量（L1 语义分类，后续查询零额外 API 开销）
+        try:
+            self.intent_classifier.warmup()
+        except Exception as e:
+            logger.warning(f"预计算意图原型向量失败（不影响正常使用）: {e}")
 
         # 7. 保存切片数据到本地（项目专属路径）
         chunk_data = [c.to_dict() for c in chunks]
@@ -678,6 +706,32 @@ class RAGPipeline:
 
         return best
 
+    def _classify_intent(self, question: str) -> Tuple[QueryType, str]:
+        """分层意图分类：L1 向量语义 → L2 LLM 兜底 → L0 规则评分
+
+        返回 (query_type, method)，method ∈ {"semantic", "llm", "rules"}；
+        L1/L2 可能返回 QueryType.CHITCHAT（识别出规则层漏掉的闲聊），
+        由调用方在 query/query_stream 中转闲聊分支。
+        """
+        if settings.intent_semantic_enabled:
+            intent, confidence = self.intent_classifier.classify(question)
+            if (
+                intent is not None
+                and confidence >= self.intent_classifier.min_confidence
+            ):
+                return _INTENT_STR_TO_QUERY_TYPE.get(
+                    intent, QueryType.UNKNOWN
+                ), "semantic"
+            # L1 低置信度（或 embedding 失败）→ L2 LLM 兜底
+            if settings.intent_llm_fallback_enabled:
+                llm_intent = classify_with_llm(self.llm, question)
+                if llm_intent is not None:
+                    return _INTENT_STR_TO_QUERY_TYPE.get(
+                        llm_intent, QueryType.UNKNOWN
+                    ), "llm"
+        # 兜底：规则评分（原 classify_query）
+        return self.classify_query(question), "rules"
+
     @staticmethod
     def is_kb_related(question: str) -> bool:
         """
@@ -956,9 +1010,19 @@ class RAGPipeline:
         # 验证消息角色序列：确保以 user 结尾且无连续 user
         messages = self._validate_message_roles(messages)
 
-        # 判断是否与知识库相关
+        # 判断是否与知识库相关（L0 规则层闲聊路由）
         kb_related = self.is_kb_related(question)
-        query_type = self.classify_query(question) if kb_related else QueryType.UNKNOWN
+        query_type = QueryType.UNKNOWN
+        if kb_related:
+            # 分层意图分类：L1 语义 → L2 LLM 兜底 → 规则评分
+            query_type, intent_method = self._classify_intent(question)
+            if query_type == QueryType.CHITCHAT:
+                # L1/L2 识别出规则层漏掉的闲聊 → 转闲聊分支（与规则层闲聊一致）
+                logger.info(f"语义/LLM 意图识别为闲聊，转闲聊分支: {question[:40]}")
+                kb_related = False
+                query_type = QueryType.UNKNOWN
+            else:
+                logger.debug(f"意图分类: {query_type.value} (method={intent_method})")
         timings["classify"] = round((time.time() - t_start) * 1000)
 
         if not kb_related:
@@ -1107,9 +1171,19 @@ class RAGPipeline:
         # 验证消息角色序列：确保以 user 结尾且无连续 user
         messages = self._validate_message_roles(messages)
 
-        # 判断是否与知识库相关
+        # 判断是否与知识库相关（L0 规则层闲聊路由）
         kb_related = self.is_kb_related(question)
-        query_type = self.classify_query(question) if kb_related else QueryType.UNKNOWN
+        query_type = QueryType.UNKNOWN
+        if kb_related:
+            # 分层意图分类：L1 语义 → L2 LLM 兜底 → 规则评分
+            query_type, intent_method = self._classify_intent(question)
+            if query_type == QueryType.CHITCHAT:
+                # L1/L2 识别出规则层漏掉的闲聊 → 转闲聊分支（与规则层闲聊一致）
+                logger.info(f"语义/LLM 意图识别为闲聊，转闲聊分支: {question[:40]}")
+                kb_related = False
+                query_type = QueryType.UNKNOWN
+            else:
+                logger.debug(f"意图分类: {query_type.value} (method={intent_method})")
         timings["classify"] = round((time.time() - t_start) * 1000)
 
         if not kb_related:

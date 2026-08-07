@@ -592,10 +592,13 @@ class TestWarmupState:
     def test_warmup_success_sets_flag(self, tmp_path, monkeypatch):
         """warmup 成功后 _warmup_done=True，避免重复预热。"""
         pipeline = RAGPipeline(local_mode=True)
-        with patch.object(pipeline, "_ensure_knowledge_base") as mock:
+        # bug-113 优化：warmup 现在会预计算意图原型（真实 API 调用），测试中 patch 掉
+        with patch.object(pipeline, "_ensure_knowledge_base") as mock, \
+             patch.object(pipeline.intent_classifier, "warmup") as mock_intent:
             pipeline.warmup()
             assert pipeline._warmup_done == True
             assert mock.call_count >= 1
+            mock_intent.assert_called_once()
 
 
 # =============================================================================

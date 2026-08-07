@@ -1125,18 +1125,20 @@ class TestWarmupRedundancy:
         这是冗余调用，但不影响正确性。
         """
         pipeline = RAGPipeline(local_mode=True)
-        # 验证 warmup 调用 _ensure_knowledge_base
-        # 通过检查 _ensure_knowledge_base 的调用
-        original_method = pipeline._ensure_knowledge_base
-        call_count = [0]
+        # bug-113 优化：warmup 现在会预计算意图原型（真实 API 调用），测试中 patch 掉
+        with patch.object(pipeline.intent_classifier, "warmup"):
+            # 验证 warmup 调用 _ensure_knowledge_base
+            # 通过检查 _ensure_knowledge_base 的调用
+            original_method = pipeline._ensure_knowledge_base
+            call_count = [0]
 
-        def counting_wrapper():
-            call_count[0] += 1
-            return original_method()
+            def counting_wrapper():
+                call_count[0] += 1
+                return original_method()
 
-        pipeline._ensure_knowledge_base = counting_wrapper
-        pipeline.warmup()
-        assert call_count[0] >= 1, "warmup 应调用 _ensure_knowledge_base"
+            pipeline._ensure_knowledge_base = counting_wrapper
+            pipeline.warmup()
+            assert call_count[0] >= 1, "warmup 应调用 _ensure_knowledge_base"
 
 
 # =============================================================================

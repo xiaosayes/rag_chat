@@ -80,6 +80,23 @@ class Settings(BaseSettings):
         description="是否启用联网搜索总开关（enable_search，按需自动启用；需百炼账号开通搜索能力）",
     )
 
+    # ========== 意图理解（L1 语义 + L2 LLM 兜底）==========
+    # 分层意图分类：L0 规则（is_kb_related）→ L1 向量语义 → L2 LLM 兜底
+    intent_semantic_enabled: bool = Field(
+        default=True,
+        description="启用 L1 向量语义意图分类（复用 Embedding 缓存，语义泛化优于纯规则）",
+    )
+    intent_semantic_threshold: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        description="L1 语义分类置信度阈值（余弦相似度；低于该值且 L2 开启时走 LLM 兜底）",
+    )
+    intent_llm_fallback_enabled: bool = Field(
+        default=True,
+        description="启用 L2 LLM 意图分类兜底（仅 L1 低置信度时调用，按次计费）",
+    )
+
     # ========== 向量数据库 ==========
     vector_db_type: Literal["qdrant", "chroma"] = Field(
         default="qdrant",
