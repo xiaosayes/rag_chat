@@ -200,10 +200,11 @@
 - ✅ **v1.3.4 已完成发布**（第八轮生产环境修复：bug-095 ~ bug-100）
 - ✅ **v1.3.5-pre（开发中）新增功能与修复**：Excel 数据源（bug-109）、Embedding v4 升级（bug-110）、
   Web UI 下拉框误切换（bug-111）、推荐 prompt 相关性/品类过滤（bug-112）、
-  意图理解分层分类 L0+L1+L2（bug-113，新增 `src/intent_classifier.py`）
-- ✅ **113 个已识别问题已全部处理**（bug-001 至 bug-108 修复；bug-109~113 为第九/十轮新增功能/修复；
+  意图理解分层分类 L0+L1+L2（bug-113，新增 `src/intent_classifier.py`）、
+  输出答案去除 emoji（bug-114，新增 `src/utils.strip_emoji`）
+- ✅ **114 个已识别问题已全部处理**（bug-001 至 bug-108 修复；bug-109~114 为第九/十/十一轮新增功能/修复；
   bug-032 编号不存在；bug-094 标注需确认，详见 bug-fix-plan.md）
-- ✅ **282 项单元测试全部通过**（0 失败、0 错误）
+- ✅ **308 项单元测试全部通过**（0 失败、0 错误）
 - ✅ **代码已通过语法检查**（18 个 Python 源文件）
 - ⏳ **服务器部署中**：jiabohui（家博会）项目已构建并启动 Web UI（端口 7860），
   运行中待办见下方「服务器运行状态与待办」章节
@@ -222,6 +223,7 @@
 | 第八轮（生产环境） | bug-095 ~ bug-108 | `src/embeddings.py`, `src/llm.py`, `src/reranker.py`, `src/utils.py`, `src/config.py`, `src/rag_pipeline.py`, `src/chunking.py`, `src/project.py`, `app.py`, `requirements.txt` | ✅ 已完成 |
 | 第九轮（v1.3.5-pre） | 功能：bug-109（Excel 数据源）、bug-110（Embedding v4 升级）；修复：bug-111（UI 下拉框）、bug-112（推荐 prompt 过滤，含根因更正） | `src/data_loader.py`, `src/document_loader.py`, `src/config.py`, `src/embeddings.py`, `app.py`, `src/rag_pipeline.py`, `src/project.py`, `requirements.txt` | ✅ 已完成 |
 | 第十轮（v1.3.5-pre） | 功能：bug-113（意图理解分层分类 L0 规则 + L1 语义 + L2 LLM 兜底） | `src/intent_classifier.py`（新增）, `src/rag_pipeline.py`, `src/config.py`, `tests/test_intent_classifier.py`（新增） | ✅ 已完成 |
+| 第十一轮（v1.3.5-pre） | 功能：bug-114（输出答案去除 emoji，含 UI 图标文本化） | `src/utils.py`, `src/llm.py`, `app.py`, `scripts/run_qa.py`, `tests/test_emoji_filter.py`（新增） | ✅ 已完成 |
 
 > 注：bug-032 编号不存在（历史记录中从 bug-031 直接到 bug-033）。
 
@@ -507,6 +509,7 @@ data/
 | `src/project.py` | `ProjectConfig`, `ProjectManager` | ~200 | 项目配置管理，多项目隔离 |
 | `src/rag_pipeline.py` | `RAGPipeline` | ~1300 | 核心 RAG 流水线编排（含 L0 规则闲聊路由 + 分层意图分类入口） |
 | `src/intent_classifier.py` | `SemanticIntentClassifier`, `classify_with_llm` | ~200 | L1 向量语义意图分类 + L2 LLM 兜底（bug-113 新增） |
+| `src/utils.py` | `strip_emoji`, `EMOJI_PATTERN` | ~100 | 输出答案 emoji 过滤（bug-114 新增） |
 | `src/vector_store.py` | `VectorStore` | ~220 | Qdrant 向量数据库封装 |
 | `src/retriever.py` | `BM25Retriever`, `HybridRetriever` | ~250 | 混合检索（语义 + BM25） |
 | `src/cache.py` | `LRUCache`, `EmbeddingCache` | ~300 | 三层 LRU 缓存系统 |

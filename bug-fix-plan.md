@@ -2720,3 +2720,61 @@ INTENT_LLM_FALLBACK_ENABLED=true  # L2 LLM 兜底开关（仅低置信度时调�
 2. 重启 `python app.py --project jiabohui --host 0.0.0.0 --port 7860`；
 3. 启动日志出现 `意图原型向量就绪: 37 个原型 / 5 类`（warmup 预计算，~0.6s）即生效；
    首次查询不再有秒级延迟；原型向量持久化于 `data/processed/embedding_cache/pattern_cache.json`。
+
+---
+
+## 新增问题（第十一轮 - 输出答案去除 emoji）
+
+> 需求：输出的答案中不要出现 emoji 表情和各种小图标（qwen 系列回答常带 😊🌟❤️ 等）。
+> 全量测试：`pytest tests/ -q` → **308 passed**（原 282 + 新增 26，0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-114 | LLM 回答含 emoji/装饰图标；UI 检索来源/状态/按钮含图标符号 | `src/utils.py`, `src/llm.py`, `app.py`, `scripts/run_qa.py` | P2 | 已修复 |
+
+## 问题详情
+
+### [bug-114] 输出答案去除 emoji（P2）
+
+- **根因分析**：qwen 系列模型回答习惯使用 emoji（😊🌟❤️✅ 等）装饰；Web UI 的检索来源（🟢🟡⚪ 相关度圆点、⏱ 响应时间、📚 检索来源标记）、状态提示（⚠️✅❌）、按钮/标题（🔄🗑️📊💡）也大量使用 emoji 图标 → 输出内容和界面出现"各种各样的表情和小图标"。
+- **影响范围**：所有 LLM 回答（Web UI / CLI / SDK）、UI 展示的可读性与正式感。
+- **修复方案**：
+  1. **`src/utils.py` 新增 `strip_emoji(text)`**：Unicode 正则移除 emoji 表情/装饰图标（覆盖
+     `\U0001F000-\U0001FFFF` 表情交通扩展、`\U00002600-\U000027BF` 杂项+装饰符号、
+     `\U00002300-\U000023FF` 技术符号、`\U000025A0-\U000025FF` 几何形状、
+     `\U00002196-\U00002199` 四角箭头、`\U00002B00-\U00002BFF` 杂项箭头、
+     `\U0000FE00-\U0000FE0F` 变体符、`\U0000200D` ZWJ、`\U00003030` 波浪线）；
+     **不误伤**中文标点/字母/数字/普通符号（© → 等保留）；
+  2. **`src/llm.py` 三处输出点过滤**：`chat()` 新生成内容、缓存命中内容（兼容升级前旧缓存）、
+     `chat_stream()` 逐 token（含 ZWJ/变体符残留）；
+  3. **`app.py` 全部 14 处 UI emoji 替换为纯文本**：检索来源 `**📚 检索来源**`→`**[检索来源]**`、
+     相关度圆点 🟢🟡⚪→`[高]/[中]/[低]`、⏱→去掉、⚠️✅❌⏳ 状态提示去图标、
+     🔄🗑️📊💡 按钮/标题去图标、颜色图例同步改文本；
+  4. **`scripts/run_qa.py`** CLI 问答界面全部去 emoji：表格标题 `📚 检索到的文物`→`检索到的文物`、
+     标题 `🦁 文物知识库`→`文物知识库`、以及 `🔍问题/📊查询类型/💡回答/❌查询失败/⚠知识库未构建` 等提示全部去图标；
+     范围说明：开发工具脚本（build_knowledge_base/generate_mock_data/generate_test_docs/benchmark_search）
+     的统计输出装饰 emoji 不属于"问答答案"，本次保留（如需一并清理可后续处理）。
+- **风险分析**：低。① `strip_emoji` 为纯文本后处理，不改变分类/检索/生成逻辑；
+  ② 过滤范围经 26 项测试验证不误伤正常文本（中文标点/字母/数字/©→ 保留）；
+  ③ `**[检索来源]**` 标记仅去 📚，`_convert_history` 截断逻辑（bug-034/104）不受影响；
+  ④ 流式逐 token 过滤在 yield 前完成，输出全程无 emoji。
+- **测试验证**：新增 `tests/test_emoji_filter.py`（26 项）：strip_emoji 参数化移除/保留用例、
+  常见 emoji 全范围覆盖、正则无纯文本误匹配、chat 非流式过滤、chat 缓存命中过滤旧内容、
+  chat_stream 逐 token 过滤、format_answer 无 emoji（含 RRF 路径）；同步更新
+  `test_edge_cases.py`/`test_review_findings.py` 中 8 处 marker/圆点/⏱ 断言；
+  真实 API：模型回答正常输出不受影响（qwen 本身倾向不用 emoji）；全量 308 passed。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-114 | `TestStripEmoji`（16 项：emoji 移除 + 正常字符保留 + 全范围覆盖 + 无误匹配）；`TestLLMEmojiFilter`（3 项）；`TestFormatAnswerNoEmoji`（2 项）；旧断言 8 处同步更新；全量 308 passed | ✅ 已修复 |
+
+## 服务器操作指引
+
+1. 同步 `src/utils.py`、`src/llm.py`、`app.py`、`scripts/run_qa.py` 到服务器；
+2. 重启 `python app.py --project jiabohui --host 0.0.0.0 --port 7860`；
+3. 提问任意问题 → 回答不再出现 emoji；检索来源显示为 `**[检索来源]**` + `[高]/[中]/[低]` 文本标记；
+4. 旧缓存中的回答（含 emoji）命中时会自动过滤，无需清缓存。

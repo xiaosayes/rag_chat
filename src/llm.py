@@ -14,7 +14,7 @@ from dashscope import Generation
 
 from src.config import settings
 from src.cache import llm_cache
-from src.utils import FatalAPIError
+from src.utils import FatalAPIError, strip_emoji
 
 
 # bug-105 修复：注入当前日期并禁止知识截止声明。
@@ -119,7 +119,8 @@ class BailianLLM:
             )
             if cached is not None:
                 logger.debug("LLM 响应命中缓存")
-                return cached
+                # bug-114：过滤旧缓存中的 emoji（升级前缓存的回答可能含表情）
+                return strip_emoji(cached)
 
         for attempt in range(self.max_retries):
             try:
@@ -137,6 +138,8 @@ class BailianLLM:
 
                 if resp.status_code == 200:
                     content = resp.output.choices[0].message.content
+                    # bug-114：移除回答中的 emoji，保持输出纯文本
+                    content = strip_emoji(content)
                     # 写入缓存
                     if self.use_cache:
                         # P1-3 修复：与查询侧缓存 key 保持一致，补齐生成参数
@@ -224,7 +227,9 @@ class BailianLLM:
                     if resp.status_code == 200:
                         content = resp.output.choices[0].message.content
                         if content:
-                            yield content
+                            # bug-114：逐 token 移除 emoji（含 ZWJ/变体符残留），
+                            # 保证流式输出全程不出现表情图标
+                            yield strip_emoji(content)
                             has_yielded = True
                     else:
                         logger.warning(f"Stream 返回异常: {resp.status_code} - {resp.message}")

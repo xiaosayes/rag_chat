@@ -4,6 +4,7 @@
 
 import json
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from loguru import logger
@@ -75,6 +76,43 @@ def truncate_text(text: str, max_length: int = 100) -> str:
     if len(text) <= max_length:
         return text
     return text[:max_length - 3] + "..."
+
+
+# emoji/表情/装饰图标正则（用于 LLM 输出过滤，bug-114）
+# 覆盖范围（均为 Unicode 公开区，不误伤中文标点/字母/数字/普通符号）：
+#   \U0001F000-\U0001FFFF  表情/交通/符号/扩展（含麻将、扑克、国旗、ZWJ 组合等）
+#   \U00002600-\U000027BF  杂项符号 + 装饰符号/Dingbats（☀★❤✂✓➜ 等）
+#   \U00002300-\U000023FF  杂项技术符号（⌚⏰⏳ 等）
+#   \U000025A0-\U000025FF  几何形状（▫▪◾◽ 等小图标）
+#   \U00002196-\U00002199  四角箭头（↖↗↘↙ emoji 风格；→↑←↓ 文本箭头保留）
+#   \U00002B00-\U00002BFF  杂项符号和箭头（⭐⬆ 等）
+#   \U0000FE00-\U0000FE0F  变体选择符（emoji 修饰符）
+#   \U0000200D             零宽连接符（ZWJ）
+#   \U00003030             波浪线符号（〰）
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F000-\U0001FFFF"
+    "\U00002600-\U000027BF"
+    "\U00002300-\U000023FF"
+    "\U000025A0-\U000025FF"
+    "\U00002196-\U00002199"
+    "\U00002B00-\U00002BFF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0000200D"
+    "\U00003030"
+    "]+"
+)
+
+
+def strip_emoji(text: str) -> str:
+    """移除文本中的 emoji 表情与装饰图标（bug-114）
+
+    用于 LLM 输出过滤：qwen 系列回答常带 emoji（😊🌟❤️ 等），
+    统一移除使输出保持纯文本。不误伤中文标点、字母、数字与普通符号（如 © →）。
+    """
+    if not text:
+        return text
+    return EMOJI_PATTERN.sub("", text)
 
 
 def format_recommendation(results: List[Dict[str, Any]]) -> str:

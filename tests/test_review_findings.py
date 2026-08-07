@@ -537,7 +537,7 @@ class TestFormatAnswerEdge:
         chunks = [{"score": 0.9}, {"artifact_name": "B"}]
         try:
             result = format_answer("回答", chunks)
-            assert "📚 检索来源" in result
+            assert "[检索来源]" in result
         except (KeyError, ValueError, TypeError) as e:
             pytest.fail(f"BUG: format_answer 对字段缺失的 chunk 崩溃: {e}")
 
@@ -1033,7 +1033,7 @@ class TestGradio6ListContentHistory:
         from app import _convert_history
         hist = [
             {"role": "user", "content": [{"type": "text", "text": "有什么文物"}]},
-            {"role": "assistant", "content": [{"type": "text", "text": "推荐司母戊鼎。\n\n---\n\n**📚 检索来源**\n1. X"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "推荐司母戊鼎。\n\n---\n\n**[检索来源]**\n1. X"}]},
         ]
         result = _convert_history(hist)
         assert result == [

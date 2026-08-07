@@ -527,7 +527,7 @@ class TestConvertHistoryEdgeCases:
         """测试带检索来源分隔符的消息"""
         from app import _convert_history
         history = [
-            ("用户问题", "回答内容\n\n---\n\n**📚 检索来源**\n1. 文物A")
+            ("用户问题", "回答内容\n\n---\n\n**[检索来源]**\n1. 文物A")
         ]
         result = _convert_history(history)
         assert len(result) == 2
@@ -537,7 +537,7 @@ class TestConvertHistoryEdgeCases:
         """测试旧版分隔符 \n---\n（仅当后跟检索来源标记时才算分隔符）"""
         from app import _convert_history
         # 旧版存储格式：分隔符后跟随检索来源标记 → 应截断
-        history = [("用户问题", "回答内容\n---\n**📚 检索来源**\n1. 文物A")]
+        history = [("用户问题", "回答内容\n---\n**[检索来源]**\n1. 文物A")]
         result = _convert_history(history)
         assert len(result) == 2
         assert result[1]["content"] == "回答内容"
@@ -555,7 +555,7 @@ class TestConvertHistoryEdgeCases:
     def test_convert_history_empty_assistant_content(self):
         """测试助手消息只有检索来源的情况（助手内容为空，尾部 user 被清理）"""
         from app import _convert_history
-        history = [("用户问题", "\n\n---\n\n**📚 检索来源**\n1. 文物A")]
+        history = [("用户问题", "\n\n---\n\n**[检索来源]**\n1. 文物A")]
         result = _convert_history(history)
         # bug-030 修复后：尾部无有效助手内容的 user 消息被删除
         assert len(result) == 0, "空助手消息对应的 user 消息应被清理"
@@ -863,14 +863,14 @@ class TestFormatAnswerTiming:
         """测试带 timing 的格式化"""
         from app import format_answer
         result = format_answer("回答内容", [], {"total": 1234})
-        assert "⏱ 响应时间" in result
+        assert "响应时间" in result
         assert "1234ms" in result
 
     def test_format_answer_without_timing(self):
         """测试不带 timing 的格式化"""
         from app import format_answer
         result = format_answer("回答内容", [])
-        assert "⏱" not in result
+        assert "响应时间" not in result
 
     def test_format_answer_with_chunks(self):
         """测试带检索来源的格式化"""
@@ -880,11 +880,11 @@ class TestFormatAnswerTiming:
             {"artifact_name": "文物B", "score": 0.50, "chunk_type": "detail"},
         ]
         result = format_answer("回答内容", chunks)
-        assert "📚 检索来源" in result
+        assert "[检索来源]" in result
         assert "文物A" in result
         assert "文物B" in result
-        assert "🟢" in result  # 0.95 > 0.7
-        assert "🟡" in result  # 0.50 > 0.4
+        assert "[高]" in result  # 0.95 > 0.7
+        assert "[中]" in result  # 0.50 > 0.4
 
 
 # =============================================================================

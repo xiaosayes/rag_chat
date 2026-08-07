@@ -30,7 +30,7 @@
 
 ## 更新日志
 
-### v1.3.5-pre (开发中) — 新增功能与修复（第九/十轮）
+### v1.3.5-pre (开发中) — 新增功能与修复（第九/十/十一轮）
 
 #### 新增功能
 - **Excel (.xlsx) 数据源支持（bug-109）**：表格型 Excel 可直接作为知识库数据源（每行一条记录、多 sheet 支持、任意列可检索）；docs 模式自动识别 + json 模式 `--json-path xxx.xlsx` 双入口；openpyxl 可选依赖
@@ -43,12 +43,16 @@
   **首字延迟优化**：原型向量 `embed_batch` 批量预计算（首次 9.5s → 0.6s，启动 warmup 完成，首查不阻塞）、
   持久化于 pattern_cache（重启零成本）；高置信/闲聊首字与旧版持平（实测 ~550-740ms），
   低置信问题 L2 LLM 为准确率代价（~800ms，无法并行消除）
+- **输出答案去除 emoji（bug-114）**：LLM 回答统一过滤 emoji/装饰图标（`strip_emoji`，
+  覆盖表情/交通/符号/几何/箭头等 Unicode 范围，不误伤中文标点与 ©→ 等普通符号）；
+  UI 检索来源/状态/按钮的 14 处图标全部改为纯文本（`**[检索来源]**`、`[高]/[中]/[低]` 相关度标记）
+
 
 #### Bug 修复
 - **Web UI 项目下拉框误切换（bug-111，P0）**：下拉框 choices/value 硬编码导致 `--project jiabohui` 启动后页面加载把全局 pipeline 误切换成 museum；改为 choices 动态来自 ProjectManager、value 跟随 `--project` 参数
 - **推荐类回答混入不相关项（bug-112，P1）**：recommend prompt 增加相关性优先 + 品类匹配指令（"不相关的项不要推荐，宁缺毋滥"）；根因更正：服务器重排实际用 qwen3-rerank API（生效），非 TF-IDF 降级
 
-**全量测试**：`pytest tests/ -q` → **282 passed**（0 失败 0 错误）
+**全量测试**：`pytest tests/ -q` → **308 passed**（0 失败 0 错误）
 
 ### v1.3.4 (2024-08) — 当前版本
 

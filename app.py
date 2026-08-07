@@ -189,7 +189,7 @@ def _convert_history(history: list) -> list:
             # P1-1 修复：改为按检索来源标记定位并截断，
             # 避免旧分隔符 "\n---\n" 误伤回答正文中的 Markdown 水平线，
             # 导致多轮对话中该回答在分隔线之后的内容丢失
-            marker = "**📚 检索来源**"
+            marker = "**[检索来源]**"
             marker_idx = assistant_msg.find(marker)
             if marker_idx >= 0:
                 clean = assistant_msg[:marker_idx].rstrip()
@@ -223,13 +223,13 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
     try:
         pipe = init_pipeline(project_id)
     except Exception as e:
-        _append_conversation(history, question, f"❌ 初始化失败: {e}")
+        _append_conversation(history, question, f"初始化失败: {e}")
         yield history, ""
         return
 
     if not pipe._is_built:
         _append_conversation(history, question,
-            "⚠️ 知识库尚未构建！\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
+            "知识库尚未构建！\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
         )
         yield history, ""
         return
@@ -269,17 +269,17 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             _update_last_assistant(history, question, display)
             yield history, json.dumps(chunks_info, ensure_ascii=False)
         except Exception as e:
-            error_msg = f"❌ 查询出错: {e}"
+            error_msg = f"查询出错: {e}"
             # 如果已经有部分回答，保留它而不是覆盖
             if full_answer:
-                _update_last_assistant(history, question, full_answer + f"\n{HISTORY_SEPARATOR}> ❌ 剩余内容生成失败")
+                _update_last_assistant(history, question, full_answer + f"\n{HISTORY_SEPARATOR}> 剩余内容生成失败")
             else:
                 _update_last_assistant(history, question, error_msg)
             yield history, json.dumps(chunks_info, ensure_ascii=False) if chunks_info else ""
     else:
         try:
             # 非流式模式：先显示"正在查询..."提示
-            _update_last_assistant(history, question, "⏳ 正在查询知识库...")
+            _update_last_assistant(history, question, "正在查询知识库...")
             yield history, ""
 
             result = pipe.query(
@@ -293,7 +293,7 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             _update_last_assistant(history, question, display)
             yield history, json.dumps(chunks_info, ensure_ascii=False)
         except Exception as e:
-            error_msg = f"❌ 查询出错: {e}"
+            error_msg = f"查询出错: {e}"
             _update_last_assistant(history, question, error_msg)
             yield history, ""
 
@@ -304,14 +304,14 @@ def format_answer(answer: str, chunks: list, timing: dict = None) -> str:
 
     # 追加检索来源（仅当有检索结果时）
     if chunks:
-        parts.append(f"\n{HISTORY_SEPARATOR}**📚 检索来源**\n")
+        parts.append(f"\n{HISTORY_SEPARATOR}**[检索来源]**\n")
         # P1-4 修复：分数阈值自适应——混合检索的 RRF 融合分（约 0.01 量级）
         # 与重排后的相关性分数（0~1）量级差异大，固定阈值 0.7/0.4 会导致
-        # RRF 场景下所有结果恒为灰色 ⚪，无法区分相关度
+        # RRF 场景下所有结果恒为灰色，无法区分相关度
         scores = [(c.get("score") or 0) for c in chunks[:5]]
         max_score = max(scores) if scores else 0
-        # RRF 融合分无绝对意义（量级约 0.001~0.01），按显示排名上色：
-        # 第1名 🟢，第2-3名 🟡，其余 ⚪
+        # RRF 融合分无绝对意义（量级约 0.001~0.01），按显示排名标记：
+        # 第1名 [高]，第2-3名 [中]，其余 [低]
         rrf_scale = 0 < max_score < 0.1
         for i, c in enumerate(chunks[:5], 1):
             # bug-041 修复：字段缺失/为 None 时使用默认值，避免 score 比较崩溃
@@ -319,15 +319,15 @@ def format_answer(answer: str, chunks: list, timing: dict = None) -> str:
             score = c.get("score") or 0
             ctype = c.get("chunk_type") or "full"
             if rrf_scale:
-                score_bar = "🟢" if i <= 1 else "🟡" if i <= 3 else "⚪"
+                score_label = "[高]" if i <= 1 else "[中]" if i <= 3 else "[低]"
             else:
-                score_bar = "🟢" if score > 0.7 else "🟡" if score > 0.4 else "⚪"
-            parts.append(f"{i}. **{name}**  {score_bar} 相关度: {score:.3f}  [{ctype}]")
+                score_label = "[高]" if score > 0.7 else "[中]" if score > 0.4 else "[低]"
+            parts.append(f"{i}. **{name}**  {score_label} 相关度: {score:.3f}  [{ctype}]")
 
     # 追加响应时间（仅非流式有）
     if timing:
         total = timing.get("total", 0)
-        parts.append(f"\n\n> ⏱ 响应时间: {total}ms")
+        parts.append(f"\n\n> 响应时间: {total}ms")
 
     return "\n".join(parts)
 
@@ -344,10 +344,10 @@ def get_system_status(project_id: str = ""):
         if pipe._is_built:
             stats = pipe.get_stats()
             if "error" in stats:
-                return f"⚠️ 知识库状态: {stats['error']}"
+                return f"知识库状态异常: {stats['error']}"
             project_name = pipe.project_cfg.name if pipe.project_cfg else "默认"
             return (
-                f"✅ 系统就绪\n\n"
+                f"系统就绪\n\n"
                 f"**当前项目**: {project_name}\n\n"
                 f"**知识库统计**\n"
                 f"- 向量数量: {stats.get('vector_count', 'N/A')}\n"
@@ -363,9 +363,9 @@ def get_system_status(project_id: str = ""):
                 f"- 支持追问: \"它是什么？\""
             )
         else:
-            return "⚠️ 知识库未构建\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
+            return "知识库未构建\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
     except Exception as e:
-        return f"❌ 状态检查失败: {e}"
+        return f"状态检查失败: {e}"
 
 
 def create_ui(default_stream: bool = True, default_project: str = ""):
@@ -403,7 +403,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                 label="选择项目",
                 scale=1,
             )
-            status_btn = gr.Button("🔄 刷新状态", variant="secondary", scale=1)
+            status_btn = gr.Button("刷新状态", variant="secondary", scale=1)
             status_text = gr.Markdown("正在检测系统状态...", scale=4)
 
         with gr.Row():
@@ -434,28 +434,28 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
 
                 with gr.Row():
                     use_stream = gr.Checkbox(label="流式输出", value=default_stream)
-                    clear_btn = gr.Button("🗑️ 清空对话", variant="secondary", size="sm", scale=1)
+                    clear_btn = gr.Button("清空对话", variant="secondary", size="sm", scale=1)
 
             # 右侧：检索结果面板
             with gr.Column(scale=3):
-                gr.Markdown("### 📊 检索结果")
+                gr.Markdown("### 检索结果")
                 chunks_json = gr.JSON(
                     label="匹配的文物",
                     value=[],
                     visible=True,
                 )
                 gr.Markdown(
-                    "**💡 提示**\n"
+                    "**提示**\n"
                     "- 文物问题 → 自动检索知识库\n"
                     "- 闲聊问候 → 直接 AI 回答\n"
-                    "- 绿色 🟢 = 高相关度\n"
-                    "- 黄色 🟡 = 中等相关度\n"
-                    "- 灰色 ⚪ = 低相关度"
+                    "- [高] = 高相关度\n"
+                    "- [中] = 中等相关度\n"
+                    "- [低] = 低相关度"
                 )
 
         # 示例问题
         with gr.Row():
-            gr.Markdown("**💡 试试这些问题:**")
+            gr.Markdown("**试试这些问题:**")
 
         examples = [
             "推荐一些代表性的文物",

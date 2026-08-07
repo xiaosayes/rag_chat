@@ -32,7 +32,7 @@ def single_query(
     rerank: bool = True,
 ):
     """单次查询"""
-    console.print(f"\n[bold cyan]🔍 问题:[/bold cyan] {question}")
+    console.print(f"\n[bold cyan]问题:[/bold cyan] {question}")
 
     try:
         result = pipeline.query(
@@ -51,20 +51,20 @@ def single_query(
         }
         qtype = result["query_type"]
         color = type_colors.get(qtype, "white")
-        console.print(f"[bold]📊 查询类型:[/bold] [{color}]{qtype}[/{color}]")
+        console.print(f"[bold]查询类型:[/bold] [{color}]{qtype}[/{color}]")
 
         # 显示答案
         console.print()
         console.print(Panel(
             Markdown(result["answer"]),
-            title="[bold green]💡 回答[/bold green]",
+            title="[bold green]回答[/bold green]",
             border_style="green",
             width=100,
         ))
 
         # 显示检索到的文物（可选）
         if show_context and result["retrieved_chunks"]:
-            table = Table(title="📚 检索到的文物", show_header=True)
+            table = Table(title="检索到的文物", show_header=True)
             table.add_column("#", style="dim")
             table.add_column("文物名称", style="cyan")
             table.add_column("切片类型", style="blue")
@@ -83,7 +83,7 @@ def single_query(
         return result
 
     except Exception as e:
-        console.print(f"[bold red]❌ 查询失败:[/bold red] {e}")
+        console.print(f"[bold red]查询失败:[/bold red] {e}")
         logger.error(f"查询失败: {e}")
         return None
 
@@ -92,7 +92,7 @@ def interactive_mode(pipeline: RAGPipeline, rerank: bool = True):
     """交互式问答模式"""
     console.print()
     console.print(Panel.fit(
-        "[bold yellow]🦁 文物知识库 RAG 问答系统[/bold yellow]\n\n"
+        "[bold yellow]文物知识库 RAG 问答系统[/bold yellow]\n\n"
         "[cyan]输入您的问题，我将基于知识库为您解答。\n"
         "输入以下命令可执行特殊操作：[/cyan]\n"
         "  [green]/stats[/green] - 查看知识库统计\n"
@@ -219,7 +219,7 @@ def main():
 
     if not any(p.exists() for p in chunk_paths):
         console.print(
-            "[bold yellow]⚠ 知识库尚未构建！[/bold yellow]\n"
+            "[bold yellow]知识库尚未构建！[/bold yellow]\n"
             "请先运行: [cyan]python scripts/build_knowledge_base.py --project {}" .format(project_id or "museum") + "[/cyan]"
         )
         sys.exit(1)
