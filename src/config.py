@@ -96,6 +96,13 @@ class Settings(BaseSettings):
         default=True,
         description="启用 L2 LLM 意图分类兜底（仅 L1 低置信度时调用，按次计费）",
     )
+    llm_relevance_check_enabled: bool = Field(
+        default=True,
+        description=(
+            "启用 LLM 相关性语义确认（bug-116 补8 结果侧闸门：重排低分区间时"
+            "由 LLM 判断检索结果能否回答问题，避免绝对分数阈值跨知识库/模型不稳定）"
+        ),
+    )
 
     # ========== 向量数据库 ==========
     vector_db_type: Literal["qdrant", "chroma"] = Field(

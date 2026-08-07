@@ -182,6 +182,8 @@ class TestSemanticIntentClassifier:
         clf = SemanticIntentClassifier(embedding=emb)
         clf.warmup()
         n_protos = sum(len(v) for v in SemanticIntentClassifier.INTENT_PROTOTYPES.values())
+        # bug-116 补8：warmup 同时预计算需联网搜索原型
+        n_protos += len(SemanticIntentClassifier.NEEDS_SEARCH_PROTOTYPES)
         assert len(embs) == n_protos
         # warmup 后再 classify，原型不再重复计算（只有问题渲染）
         clf.classify("问题")

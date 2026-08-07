@@ -116,6 +116,36 @@ class SemanticIntentClassifier:
         ],
     }
 
+    # 需联网搜索原型问题（bug-116 补8：联网决策从"措辞穷举"升级为"语义判断"）
+    # 语义上依赖最新/动态/时效信息的问法，与具体措辞无关：
+    #   - 用户问"大唐妖探啥时上"（无"上映"二字）不命中 TEMPORAL_KEYWORDS，
+    #     但与"什么时候上映"语义相近 → 应命中此集合触发联网。
+    # 与 INTENT_PROTOTYPES 独立：不改变 QueryType 语义，仅用于
+    # _should_enable_search 的语义层补充（classify_needs_search）。
+    NEEDS_SEARCH_PROTOTYPES: List[str] = [
+        "什么时候上映",
+        "最近有什么新动态",
+        "今天天气怎么样",
+        "现在几点",
+        "门票现在多少钱",
+        "最近有什么活动",
+        "昨天发生了什么",
+        "今年的新展是什么",
+        "最新的消息是什么",
+        "什么时候开放",
+        "现在几点关门",
+        "最近有什么特展",
+        "现在的价格是多少",
+        "今年的展览安排",
+        "什么时候举办",
+        # bug-116 补8 补充：口语化日期问句（语义近似"几号/哪天"）
+        "电影几号上映",
+        "哪天开播",
+        "多久才上映",
+        "什么时候开始",
+        "几点开始",
+    ]
+
     def __init__(
         self,
         embedding,
@@ -126,11 +156,83 @@ class SemanticIntentClassifier:
         self.enable_cache = enable_cache
         self.min_confidence = min_confidence
         self._prototype_vectors: Optional[Dict[str, List[List[float]]]] = None
+        self._needs_search_vectors: Optional[List[List[float]]] = None
         self._lock = threading.Lock()
 
     def warmup(self) -> None:
         """预计算所有原型问题的 embedding（构建/启动时调用，后续查询无额外 API 开销）"""
         self._get_prototype_vectors()
+        self._get_needs_search_vectors()
+
+    def _get_needs_search_vectors(self) -> List[List[float]]:
+        """懒加载需联网搜索原型向量（线程安全；复用全局 EmbeddingCache 持久化）
+
+        与 _get_prototype_vectors 相同的缓存策略：优先读全局缓存，
+        未缓存的用 embed_batch 批量计算并写入 pattern_cache。
+        """
+        if self._needs_search_vectors is not None:
+            return self._needs_search_vectors
+        with self._lock:
+            if self._needs_search_vectors is not None:
+                return self._needs_search_vectors
+
+            cached_map: Dict[str, List[float]] = {}
+            uncached: List[str] = []
+            for proto in self.NEEDS_SEARCH_PROTOTYPES:
+                vec = embedding_cache.get(proto)
+                if vec:
+                    cached_map[proto] = vec
+                else:
+                    uncached.append(proto)
+            if uncached:
+                vectors = self._batch_embed(uncached)
+                for proto, vec in zip(uncached, vectors):
+                    if vec:
+                        cached_map[proto] = vec
+                        try:
+                            embedding_cache.set_pattern(proto, vec)
+                        except Exception as e:
+                            logger.warning(f"需联网原型写入模式缓存失败: {e}")
+            self._needs_search_vectors = [
+                cached_map[p] for p in self.NEEDS_SEARCH_PROTOTYPES
+                if p in cached_map
+            ]
+            logger.info(
+                f"需联网搜索原型向量就绪: {len(self._needs_search_vectors)} 个"
+            )
+            return self._needs_search_vectors
+
+    def classify_needs_search(self, question: str) -> Tuple[bool, float]:
+        """语义判断问题是否需要联网搜索（bug-116 补8）
+
+        与意图分类并行但独立：问题 embedding 与 NEEDS_SEARCH_PROTOTYPES
+        计算余弦相似度，最高分 >= min_confidence 视为需要联网。
+        措辞无关（"啥时上"与"什么时候上映"语义相近均命中），
+        解决 TEMPORAL_KEYWORDS 关键词穷举的泛化缺陷。
+
+        Returns:
+            (needs_search, confidence)：embedding 失败/空问题返回 (False, 0.0)
+        """
+        q = (question or "").strip()
+        if not q:
+            return False, 0.0
+        try:
+            q_vec = self.embedding.embed_query(q, use_cache=self.enable_cache)
+        except Exception as e:
+            logger.warning(f"需联网语义判断 embedding 失败: {e}")
+            return False, 0.0
+        if not q_vec:
+            return False, 0.0
+
+        best_score = -1.0
+        for pv in self._get_needs_search_vectors():
+            score = cosine_similarity(q_vec, pv)
+            if score > best_score:
+                best_score = score
+        logger.debug(
+            f"需联网语义判断: {best_score >= self.min_confidence} (置信度 {best_score:.3f}) | 问题: {q[:30]}"
+        )
+        return best_score >= self.min_confidence, best_score
 
     def _get_prototype_vectors(self) -> Dict[str, List[List[float]]]:
         """懒加载原型向量（线程安全；embedding 失败的原型跳过并告警）

@@ -946,30 +946,128 @@ class RAGPipeline:
 
     # bug-106 修复：按需联网搜索。时效性关键词命中或问题类型为开放/未知时自动联网，
     # 纯知识库事实问题（文物名称/年代/形态等）不联网，避免无效搜索费用。
+    # bug-116 修复：补充"上映/首映/开播/什么时候/何时/几点"等时效问句词，
+    # 否则"电影什么时候上映"类问题不命中任何关键词 → 不联网且被无关上下文拒答。
     TEMPORAL_KEYWORDS = (
         "最新", "最近", "近期", "近日", "当下", "如今", "目前", "当前", "现在",
         "今天", "今天天气", "今年", "去年", "本月", "上半年", "下半年",
         "新闻", "动态", "进展", "公告", "热门", "新发现", "新出土", "新展",
         "开放时间", "开放情况", "门票", "票价", "特展", "活动", "预约", "临时",
         "截止", "截至", "2026", "2025", "2024",
+        "上映", "上映时间", "首映", "开播", "公映", "档期", "排片",
+        "什么时候", "何时", "几点",
+        # bug-116 补强4：口语化时效问句词（实测"大唐妖探啥时上"缺"上映"二字
+        # 不命中任何旧关键词 → 不联网被家博会上下文拒答；"啥时上映"则正常）
+        "啥时", "啥时候", "几号", "哪天", "哪一天", "多久", "多会儿",
     )
+    # bug-116 修复：重排后相关度分数（0~1）低于此阈值视为知识库无相关内容，
+    # 时效性问题不再携带无关上下文回答，改走 LLM 通用回答（联网搜索）。
+    # bug-116 再修复（实测校准）：阈值从 0.35 提高到 0.45——qwen3-rerank
+    # 对完全无关的文档（如问"大唐妖探"检索到参观地图/参展商手册）也会给
+    # 0.35~0.40 的分数，0.35 阈值过宽导致不降级、仍被家博会无关上下文拒答。
+    # 实测 jiabohui 知识库：无关类问题重排分 ≤0.40（大唐妖探 0.39/
+    # 最近上映电影 0.35/中午吃什么 0.36），相关类 ≥0.45（家博会 0.82/
+    # 筹撤展 0.92/参展商 0.83/主题馆 0.67/展位 0.54/门票 0.45）→ 0.45 为清晰分界。
+    RELEVANCE_THRESHOLD = 0.45
+
+    def _needs_search_semantic(self, question: str) -> bool:
+        """语义判断问题是否需要联网（bug-116 补8，措辞无关）
+
+        复用 L1 意图分类器的 NEEDS_SEARCH_PROTOTYPES 原型比对：
+        "大唐妖探啥时上"（无"上映"二字）与"什么时候上映"语义相近 → 命中。
+        仅当设置 intent_semantic_enabled 且分类器可用时启用；
+        失败/不可用时保守返回 False（由关键词快路径兜底）。
+        """
+        if not settings.intent_semantic_enabled:
+            return False
+        try:
+            return self.intent_classifier.classify_needs_search(question)[0]
+        except Exception as e:
+            logger.warning(f"语义需联网判断失败，回退关键词: {e}")
+            return False
+
+    def _has_relevant_results(self, retrieve_results, reranked: bool, question: str = "") -> bool:
+        """判断检索结果是否与问题相关（知识库是否真有相关内容，bug-116）
+
+        仅对重排后的分数（0~1）有意义；未重排时分数为 RRF 融合分
+        （量级约 0.001~0.01，无绝对相关性意义），保守视为相关不回退。
+
+        bug-116 补8 升级为双保险：
+          1. 重排绝对分 >= RELEVANCE_THRESHOLD → 相关（免费、快）；
+          2. 低分区间（0~0.45）但知识库有结果 → LLM zero-shot 确认
+             "检索结果能否回答该问题"——与分数量纲/知识库无关，跨项目稳定；
+             仅当 LLM 确认无关时才视为无相关内容（避免误伤）。
+        """
+        if not retrieve_results:
+            return False
+        max_score = max(s for _, s in retrieve_results)
+        if not reranked:
+            return True
+        if max_score >= self.RELEVANCE_THRESHOLD:
+            return True
+        # 低分区间：LLM 语义确认（结果侧闸门，双保险）
+        if question and settings.llm_relevance_check_enabled:
+            top = [c.text[:300] for c, _ in retrieve_results[:3]]
+            return self._llm_confirms_relevance(question, top)
+        return False
+
+    def _llm_confirms_relevance(
+        self, question: str, chunk_texts: List[str]
+    ) -> bool:
+        """LLM zero-shot 判断检索结果能否回答问题（bug-116 补8 结果侧闸门）
+
+        与重排分数无关：低分（< RELEVANCE_THRESHOLD）但知识库确有内容时，
+        由 LLM 确认"给定片段是否真正回答了问题"。
+        仅当 LLM 明确答案为否时才视为无关（保守：失败/无法解析视为相关，
+        避免误伤知识库确有相关内容的场景）。
+        """
+        if not chunk_texts:
+            return False
+        prompt = (
+            "判断以下知识库片段是否真正回答了用户问题。\n"
+            "只输出一个词：yes 或 no。\n\n"
+            f"用户问题：{question}\n\n"
+            "知识库片段：\n"
+            + "".join(f"[{i + 1}] {t}\n" for i, t in enumerate(chunk_texts))
+            + "\n输出："
+        )
+        try:
+            answer = (self.llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt=None,
+            ) or "").strip().lower()
+        except Exception as e:
+            logger.warning(f"LLM 相关性确认失败，保守视为相关: {e}")
+            return True
+        first = answer.splitlines()[0] if answer else ""
+        if first.startswith("no"):
+            logger.debug(f"LLM 确认检索结果与问题无关: {question[:30]}...")
+            return False
+        return True
+
     # UNKNOWN 类型（非知识库/未分类）命中纯问候语时不联网，其余开放讨论联网
     GREETING_WORDS = ("你好", "您好", "嗨", "hello", "hi", "谢谢", "感谢",
                       "再见", "拜拜", "在吗", "哈喽")
 
     def _should_enable_search(self, query_type: QueryType, question: str) -> bool:
-        """按需联网搜索判断（bug-106）
+        """按需联网搜索判断（bug-106，bug-116 补8 升级为语义+关键词双通道）
 
         规则：
           1. OPEN_ENDED（开放讨论）→ 联网（补充最新信息）
           2. UNKNOWN（未分类/非知识库）→ 除纯问候语外联网
-          3. 其余类型（FACTUAL/RECOMMENDATION/COMPARISON/CHITCHAT）→ 命中时效关键词才联网
+          3. 其余类型（FACTUAL/RECOMMENDATION/COMPARISON/CHITCHAT）→
+             a) 命中时效关键词（TEMPORAL_KEYWORDS，快路径）→ 联网
+             b) 或语义判断需联网（L1 原型比对，与措辞无关）→ 联网
+             （如"大唐妖探啥时上"无"上映"二字，但语义近似"什么时候上映"）
         """
         if query_type == QueryType.OPEN_ENDED:
             return True
         if query_type == QueryType.UNKNOWN:
             return not any(w in question for w in self.GREETING_WORDS)
-        return any(kw in question for kw in self.TEMPORAL_KEYWORDS)
+        if any(kw in question for kw in self.TEMPORAL_KEYWORDS):
+            return True
+        # 语义层：关键词未命中但语义上依赖时效信息（措辞无关）
+        return self._needs_search_semantic(question)
 
     def query(
         self,
@@ -1085,14 +1183,52 @@ class RAGPipeline:
                 "search_enabled": enable_search,
             }
 
-        # 3. 重排序（如果结果数 > 3 才做，否则跳过节省时间）
+        # 3. 重排序：常规规则是结果数 > 3 才重排（节省时间）；
+        # bug-116 补强2：时效性问题（需联网）即使结果 ≤3 也强制重排——
+        # 未重排时分数为 RRF 融合分（量级 ~0.001-0.01，无绝对相关性意义），
+        # _has_relevant_results 无法判断相关性 → 低相关结果不降级 → 仍被无关上下文带偏。
+        # 强制重排后用重排分（0~1）统一判断，避免误伤知识库确有相关内容的时效问题。
         t_rerank = time.time()
-        if rerank and len(retrieve_results) > 3:
+        reranked = False
+        temporal = self._should_enable_search(query_type, question)
+        if rerank and (temporal or len(retrieve_results) > 3):
             retrieve_results = self.reranker.rerank(
                 query=question,
                 candidates=retrieve_results,
             )
+            reranked = True
         timings["rerank"] = round((time.time() - t_rerank) * 1000)
+
+        # bug-116 修复：时效性问题（需联网）但知识库检索结果相关度低
+        # （如问"电影什么时候上映"检索到家博会无关文档）→ 不携带无关上下文，
+        # 改走 LLM 通用回答，避免"以参考信息为准"导致的拒答。
+        # 注意：降级行为（不携带无关上下文）独立于 LLM_ENABLE_SEARCH 总开关——
+        # 即使总开关关闭，时效性问题 + 知识库无相关内容时也不应被家博会上下文带偏；
+        # enable_search 参数仍跟随总开关（用户可控制是否实际联网）。
+        if (
+            temporal
+            and not self._has_relevant_results(retrieve_results, reranked, question)
+        ):
+            logger.info(
+                f"时效性问题且知识库无相关内容，转 LLM 通用回答: {question[:60]}..."
+            )
+            t_llm = time.time()
+            answer = self.llm.chat(
+                messages=messages,
+                system_prompt=self._select_chitchat_prompt(),
+                enable_search=settings.llm_enable_search,
+            )
+            timings["llm"] = round((time.time() - t_llm) * 1000)
+            timings["total"] = round((time.time() - t_start) * 1000)
+            return {
+                "answer": answer,
+                "query_type": query_type.value,
+                "retrieved_chunks": [],
+                "context": "",
+                "timing": timings,
+                "from_kb": True,
+                "search_enabled": settings.llm_enable_search,
+            }
 
         # 4. 构建上下文（自动裁剪）
         context = self._build_context(retrieve_results)
@@ -1234,11 +1370,37 @@ class RAGPipeline:
             return
 
         t_rerank = time.time()
-        if rerank and len(retrieve_results) > 3:
+        reranked = False
+        temporal = self._should_enable_search(query_type, question)
+        # bug-116 补强2：时效性问题即使结果 ≤3 也强制重排（同非流式，见上方注释）
+        if rerank and (temporal or len(retrieve_results) > 3):
             retrieve_results = self.reranker.rerank(
                 query=question, candidates=retrieve_results,
             )
+            reranked = True
         timings["rerank"] = round((time.time() - t_rerank) * 1000)
+
+        # bug-116 修复：时效性问题（需联网）但知识库检索结果相关度低
+        # （如问"电影什么时候上映"检索到家博会无关文档）→ 不携带无关上下文，
+        # 改走 LLM 通用回答，避免"以参考信息为准"导致的拒答（流式）。
+        # 降级行为独立于 LLM_ENABLE_SEARCH 总开关（见非流式注释）；
+        # enable_search 参数跟随总开关。
+        if (
+            temporal
+            and not self._has_relevant_results(retrieve_results, reranked, question)
+        ):
+            logger.info(
+                f"时效性问题且知识库无相关内容，转 LLM 通用回答: {question[:60]}..."
+            )
+            timings["retrieval"] = round((time.time() - t_start) * 1000)
+            yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+                   "chunks": [], "timing": timings, "search_enabled": settings.llm_enable_search}
+            yield from self.llm.chat_stream(
+                messages=messages,
+                system_prompt=self._select_chitchat_prompt(),
+                enable_search=settings.llm_enable_search,
+            )
+            return
 
         context = self._build_context(retrieve_results)
         system_prompt = self._select_prompt(query_type, context)

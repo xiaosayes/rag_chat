@@ -1105,6 +1105,27 @@ class TestCurrentDateInjection:
         assert f"{now.year}年{now.month}月{now.day}日" in sys_content
         assert "不要声明" in sys_content and "截止到XX年XX月" in sys_content
         assert "以官方最新发布为准" in sys_content
+        # bug-117：相对日期计算必须以今天为基准，避免"8月22日是后天"类幻觉
+        assert "相对日期" in sys_content and "以今天" in sys_content
+        assert "宁可只给出具体日期" in sys_content
+
+    def test_stream_injects_updated_relative_date_note(self):
+        """bug-117：流式/非流式均注入相对日期计算引导（防'后天'幻觉）"""
+        from datetime import datetime
+        from unittest.mock import patch, MagicMock
+        from src.llm import BailianLLM
+        llm = BailianLLM()
+        # 用独特 prompt 避免 LLM 响应缓存污染其他测试（同 messages+prompt 会命中缓存）
+        unique_prompt = "你是助手。仅用于日期注记测试-相对日期-" + str(datetime.now().timestamp())
+        with patch("src.llm.Generation.call") as mock_call:
+            mock_call.return_value = MagicMock(
+                status_code=200, output=MagicMock(
+                    choices=[MagicMock(message=MagicMock(content="好"))]
+                )
+            )
+            llm.chat([{"role": "user", "content": "hi"}], system_prompt=unique_prompt)
+            content = mock_call.call_args.kwargs["messages"][0]["content"]
+            assert "严格以今天" in content and "明天/后天" in content
 
     def test_no_system_prompt_no_injection(self):
         """无 system_prompt 时不注入（不影响纯消息调用）"""
@@ -1252,3 +1273,321 @@ class TestCollectionStatsCompat:
         stats = p.get_stats()
         assert stats["distance"] == "Dot"
         assert stats["vector_size"] == 512
+
+# =============================================================================
+# 54. bug-116：时效性问题（如"电影什么时候上映"）未触发联网搜索且被无关上下文拒答
+#     - TEMPORAL_KEYWORDS 缺"上映/什么时候/何时"等时效问句词 → _should_enable_search=False
+#     - 检索到无关文档（相关度低）仍被塞进 RAG 上下文 → LLM"以参考信息为准"拒答
+# =============================================================================
+class TestTemporalQuerySearch:
+    def test_temporal_keywords_cover_movie_question(self):
+        """'上映/什么时候/何时' 等时效问句词应命中，触发联网搜索"""
+        from src.rag_pipeline import RAGPipeline, QueryType
+        p = RAGPipeline.__new__(RAGPipeline)
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探电影什么时候上映？")
+        assert p._should_enable_search(QueryType.FACTUAL, "这部电影几点首映")
+        assert p._should_enable_search(QueryType.FACTUAL, "新剧何时开播")
+        assert not p._should_enable_search(QueryType.FACTUAL, "司母戊鼎是什么时期的青铜器")
+
+    def test_query_uses_chitchat_when_irrelevant_chunks(self):
+        """时效性问题 + 检索结果相关度低（知识库无此内容）→
+        不塞无关上下文，改走 LLM 通用回答（联网搜索）"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        # 固定意图分类为 FACTUAL，避免测试依赖真实 embedding/LLM 调用
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        # 检索返回 5 条低相关度的无关文档（如家博会文档，>3 触发重排）
+        fake_chunk = Chunk(id="c1", artifact_id="a1", artifact_name="家博会参观地图", text="第55届中国家博会（广州）参观地图",
+                           chunk_type="detail", metadata={})
+        low_results = [(fake_chunk, round(0.312 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low_results)
+        p.reranker.rerank = MagicMock(return_value=low_results)
+        p.llm.chat = MagicMock(side_effect=["no", "电影《大唐妖探》定档 2026 年 8 月上映。"])
+        # bug-116 补8：首次调用是 LLM 相关性确认（结果侧闸门），返回 no → 降级
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("大唐妖探电影什么时候上映？")
+        # 应走 LLM 通用回答（chitchat prompt + 联网搜索），不返回无关检索结果
+        assert result["answer"] == "电影《大唐妖探》定档 2026 年 8 月上映。"
+        assert result["retrieved_chunks"] == []
+        assert result["search_enabled"] is True
+        # 确认用的是联网搜索且 prompt 为 chitchat（通用回答）
+        assert p.llm.chat.call_args.kwargs.get("enable_search") is True
+        assert "你是一位友好的知识助手" in p.llm.chat.call_args.kwargs["system_prompt"]
+
+    def test_query_keeps_rag_when_chunks_relevant(self):
+        """时效性问题 + 检索结果相关度高 → 仍走 RAG（知识库有相关内容）"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c2", artifact_id="a2", artifact_name="特展安排", text="2026 年春季特展安排",
+                           chunk_type="detail", metadata={})
+        high_results = [(fake_chunk, round(0.85 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=high_results)
+        p.reranker.rerank = MagicMock(return_value=high_results)
+        p.llm.chat = MagicMock(return_value="春季特展在 3 月开展。")
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("最近有什么特展")
+        assert result["retrieved_chunks"] != []
+        assert result["search_enabled"] is True
+
+    def test_query_keeps_rag_when_not_temporal(self):
+        """非时效性问题（知识库事实）即使检索分低也走 RAG，不误伤"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline
+        from src.chunking import Chunk
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c3", artifact_id="a3", artifact_name="司母戊鼎", text="商代青铜重器",
+                           chunk_type="detail", metadata={})
+        low_results = [(fake_chunk, round(0.312 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low_results)
+        p.reranker.rerank = MagicMock(return_value=low_results)
+        p.llm.chat = MagicMock(return_value="司母戊鼎是商代青铜器。")
+        p._ensure_knowledge_base = MagicMock()
+
+        result = p.query("司母戊鼎是什么时期的青铜器")
+        assert result["retrieved_chunks"] != []
+
+    def test_query_degraded_even_when_master_switch_off(self):
+        """bug-116 补强：即使 LLM_ENABLE_SEARCH 总开关关闭，
+        时效性问题 + 低相关度检索 → 也必须降级为通用回答（不携带无关上下文），
+        否则服务器 .env 未配 LLM_ENABLE_SEARCH=true 时仍被家博会上下文拒答。"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c4", artifact_id="a4", artifact_name="家博会参观地图",
+                           text="第55届中国家博会（广州）参观地图", chunk_type="detail", metadata={})
+        low_results = [(fake_chunk, round(0.312 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low_results)
+        p.reranker.rerank = MagicMock(return_value=low_results)
+        p.llm.chat = MagicMock(side_effect=["no", "电影《大唐妖探》定档 2026 年 8 月上映。"])
+        # bug-116 补8：首次调用是 LLM 相关性确认（结果侧闸门），返回 no → 降级
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", False):
+            result = p.query("大唐妖探电影什么时候上映？")
+        # 总开关关：仍应降级（检索结果为空），但 enable_search 跟随总开关为 False
+        assert result["retrieved_chunks"] == [], "总开关关时也不应携带无关上下文"
+        assert result["search_enabled"] is False
+        assert "你是一位友好的知识助手" in p.llm.chat.call_args.kwargs["system_prompt"]
+
+    def test_query_degraded_with_few_lowscore_chunks(self):
+        """bug-116 补强2：检索结果 ≤3 条（不触发常规重排）且分数低 →
+        时效性问题也应降级（强制重排后用重排分判断），否则仍被无关上下文带偏"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c5", artifact_id="a5", artifact_name="家博会参观地图",
+                           text="第55届中国家博会（广州）办公环境主题馆 CMF趋势论坛 参展商手册",
+                           chunk_type="detail", metadata={})
+        # 仅 2 条低分结果（≤3 不触发常规重排）
+        low2 = [(fake_chunk, 0.25), (fake_chunk, 0.20)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low2)
+        # 时效性问题应强制重排，重排返回低分
+        p.reranker.rerank = MagicMock(return_value=[(fake_chunk, 0.25), (fake_chunk, 0.20)])
+        p.llm.chat = MagicMock(side_effect=["no", "电影《大唐妖探》定档 2026 年 8 月上映。"])
+        # bug-116 补8：首次调用是 LLM 相关性确认（结果侧闸门），返回 no → 降级
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("大唐妖探电影什么时候上映？")
+        assert result["retrieved_chunks"] == [], "2 条低分也应降级"
+        assert result["search_enabled"] is True
+        assert p.reranker.rerank.called, "时效性问题应强制重排以判断相关性"
+
+    def test_query_keeps_rag_with_few_highscore_chunks(self):
+        """bug-116 补强2：时效性问题 + 检索结果 ≤3 条但重排后分数高 →
+        知识库确有相关内容，仍走 RAG（不误伤）"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c6", artifact_id="a6", artifact_name="特展安排",
+                           text="2026 年春季特展安排", chunk_type="detail", metadata={})
+        high2 = [(fake_chunk, 0.8), (fake_chunk, 0.7)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=high2)
+        p.reranker.rerank = MagicMock(return_value=high2)
+        p.llm.chat = MagicMock(return_value="春季特展在 3 月开展。")
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("最近有什么特展")
+        assert result["retrieved_chunks"] != [], "知识库确有相关内容不应降级"
+
+    def test_search_guide_note_prioritizes_novelty_for_temporal(self):
+        """bug-116 补强3：走 RAG 分支且启用联网时，_SEARCH_GUIDE_NOTE 必须
+        明确时效性问题以联网结果为准、参考信息缺失不拒答——否则 factual prompt
+        的"参考信息不足请如实说明"会压制联网结果，导致家博会无关上下文拒答。"""
+        from unittest.mock import patch, MagicMock
+        from src.llm import BailianLLM, _SEARCH_GUIDE_NOTE
+
+        llm = BailianLLM(max_retries=3)
+        # 模拟真实调用：小虎 factual prompt（含"如实说明"）+ enable_search
+        system_prompt = "你是「小虎」。\n## 回答原则\n2. 如果参考信息不足，请如实说明\n## 参考信息\n{context}".replace("{context}", "第55届中国家博会（广州）参观地图")
+        called = {}
+
+        class R:
+            status_code = 200
+            def __init__(self, text):
+                self.output = MagicMock()
+                self.output.choices = [MagicMock()]
+                self.output.choices[0].message.content = text
+
+        def fake_call(model, messages, api_key, temperature, max_tokens, top_p,
+                      enable_search, result_format, **kw):
+            called["system"] = messages[0]["content"]
+            return R("《大唐妖探》已改档至2026年8月22日全国上映。")
+
+        with patch("src.llm.Generation.call", side_effect=fake_call):
+            ans = llm.chat([{"role": "user", "content": "大唐妖探电影什么时候上映？"}],
+                           system_prompt=system_prompt, enable_search=True)
+        # 引导必须明确：时效性问题以联网结果为准，参考信息缺失不拒答
+        assert "不要因参考信息缺失而拒绝回答" in called["system"]
+        assert "以联网结果为准" in called["system"]
+        assert ans == "《大唐妖探》已改档至2026年8月22日全国上映。"
+
+    def test_temporal_keywords_colloquial_forms(self):
+        """bug-116 补强4：口语化时效问句词（啥时/啥时候/几号/哪天/多久）也应命中，
+        否则"大唐妖探啥时上"（无"上映"二字）不触发联网 → 被家博会上下文拒答。
+        实测：'啥时上映'命中但'啥时上'不命中——泛化缺陷。"""
+        from src.rag_pipeline import RAGPipeline, QueryType
+        p = RAGPipeline.__new__(RAGPipeline)
+        # 口语化时效问句应命中
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探啥时上")
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探啥时候上映")
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探几号上")
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探哪天开播")
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探多久才上映")
+        # 纯知识库问题仍不命中（不误伤）
+        assert not p._should_enable_search(QueryType.FACTUAL, "司母戊鼎是什么时期的青铜器")
+        assert not p._should_enable_search(QueryType.RECOMMENDATION, "推荐几件国宝级文物")
+
+    def test_query_degraded_with_colloquial_temporal(self):
+        """bug-116 补强4：口语化时效问句（啥时上）也应触发降级分支 + 联网搜索，
+        不被家博会无关上下文拒答（端到端，mock 检索）"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c7", artifact_id="a7", artifact_name="家博会参观地图",
+                           text="第55届中国家博会（广州）参观地图", chunk_type="detail", metadata={})
+        low_results = [(fake_chunk, round(0.31 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low_results)
+        p.reranker.rerank = MagicMock(return_value=low_results)
+        p.llm.chat = MagicMock(side_effect=["no", "电影《大唐妖探》定档 2026 年 8 月上映。"])
+        # bug-116 补8：首次调用是 LLM 相关性确认（结果侧闸门），返回 no → 降级
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("大唐妖探啥时上")
+        assert result["retrieved_chunks"] == [], "口语化时效问句也应降级"
+        assert result["search_enabled"] is True
+        assert p.llm.chat.call_args.kwargs.get("enable_search") is True
+
+    def test_should_enable_search_semantic_fallback(self):
+        """bug-116 补8：关键词未命中时，语义层判断需联网（措辞无关）。
+        '大唐妖探啥时上'无'上映'二字，但语义近似'什么时候上映' → 应联网"""
+        from unittest.mock import MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+
+        p = RAGPipeline.__new__(RAGPipeline)
+        # 关键词未命中 → 走语义层；语义层返回 True → 联网
+        p.intent_classifier = MagicMock()
+        p.intent_classifier.classify_needs_search.return_value = (True, 0.8)
+        assert p._should_enable_search(QueryType.FACTUAL, "大唐妖探啥时上") is True
+        # 语义层返回 False（纯知识库问题）→ 不联网
+        p.intent_classifier.classify_needs_search.return_value = (False, 0.3)
+        assert not p._should_enable_search(QueryType.FACTUAL, "司母戊鼎是什么时期的青铜器")
+
+    def test_needs_search_semantic_colloquial(self):
+        """bug-116 补8：classify_needs_search 语义判断口语化时效问句（mock embedding）"""
+        from unittest.mock import MagicMock
+        from src.intent_classifier import SemanticIntentClassifier
+
+        emb = MagicMock()
+        emb.embed_query.return_value = [1.0] * 8
+        c = SemanticIntentClassifier(embedding=emb, min_confidence=0.55)
+        # 预置原型向量（与问题向量相同 → 余弦相似度 1.0），绕过真实缓存
+        c._needs_search_vectors = [[1.0] * 8] * 3
+        needs, conf = c.classify_needs_search("大唐妖探啥时上")
+        assert needs is True
+        assert abs(conf - 1.0) < 1e-6
+        needs2, _ = c.classify_needs_search("大唐妖探啥时候上映")
+        assert needs2 is True
+
+    def test_has_relevant_results_llm_confirms(self):
+        """bug-116 补8：结果侧闸门——低分区间由 LLM 确认相关性。
+        低分 + LLM确认无关 → 无相关内容；低分 + LLM确认相关 → 有相关内容"""
+        from unittest.mock import MagicMock
+        from src.rag_pipeline import RAGPipeline
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline.__new__(RAGPipeline)
+        p.llm = MagicMock()
+        fake_chunk = Chunk(id="c", artifact_id="a", artifact_name="家博会",
+                           text="第55届中国家博会（广州）参观地图", chunk_type="detail", metadata={})
+        low = [(fake_chunk, 0.25)]
+
+        # 低分 + LLM 确认无关 → False（无相关内容 → 应降级）
+        p.llm.chat.return_value = "no"
+        assert p._has_relevant_results(low, True, "大唐妖探啥时上") is False
+        # 低分 + LLM 确认相关 → True（知识库确有内容 → 不降级）
+        p.llm.chat.return_value = "yes"
+        assert p._has_relevant_results(low, True, "家博会什么时候举办") is True
+        # 高分 → 直接相关，不调 LLM
+        high = [(fake_chunk, 0.8)]
+        assert p._has_relevant_results(high, True, "家博会什么时候举办") is True
+        assert p.llm.chat.call_count == 2  # 高分路径未额外调用
+
+    def test_query_degraded_semantic_colloquial_e2e(self):
+        """bug-116 补8：端到端——'啥时上'（无关键词）语义命中 → 降级 + 联网"""
+        from unittest.mock import patch, MagicMock
+        from src.rag_pipeline import RAGPipeline, QueryType
+        from src.chunking import Chunk
+        from src.config import settings
+
+        p = RAGPipeline(local_mode=True)
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c8", artifact_id="a8", artifact_name="家博会参观地图",
+                           text="第55届中国家博会（广州）参观地图", chunk_type="detail", metadata={})
+        low_results = [(fake_chunk, round(0.31 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low_results)
+        p.reranker.rerank = MagicMock(return_value=low_results)
+        p.llm.chat = MagicMock(side_effect=["no", "电影《大唐妖探》定档 2026 年 8 月上映。"])
+        # bug-116 补8：首次调用是 LLM 相关性确认（结果侧闸门），返回 no → 降级
+        # 语义层命中（关键词未命中时）
+        p.intent_classifier.classify_needs_search = MagicMock(return_value=(True, 0.8))
+        p._ensure_knowledge_base = MagicMock()
+
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("大唐妖探啥时上")
+        assert result["retrieved_chunks"] == [], "语义层命中应降级"
+        assert result["search_enabled"] is True
