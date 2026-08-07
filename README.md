@@ -30,6 +30,18 @@
 
 ## 更新日志
 
+### v1.3.5-pre (开发中) — 新增功能与修复（第九轮）
+
+#### 新增功能
+- **Excel (.xlsx) 数据源支持（bug-109）**：表格型 Excel 可直接作为知识库数据源（每行一条记录、多 sheet 支持、任意列可检索）；docs 模式自动识别 + json 模式 `--json-path xxx.xlsx` 双入口；openpyxl 可选依赖
+- **Embedding 模型升级 text-embedding-v3 → v4（bug-110）**：默认模型升级，API 契约/批大小上限/维度不变；`.env.example` 顺带修正键名拼写 `EMBEDDING_MOD_NAME` → `EMBEDDING_MODEL_NAME`
+
+#### Bug 修复
+- **Web UI 项目下拉框误切换（bug-111，P0）**：下拉框 choices/value 硬编码导致 `--project jiabohui` 启动后页面加载把全局 pipeline 误切换成 museum；改为 choices 动态来自 ProjectManager、value 跟随 `--project` 参数
+- **推荐类回答混入不相关项（bug-112，P1）**：recommend prompt 增加相关性优先 + 品类匹配指令（"不相关的项不要推荐，宁缺毋滥"）；根因更正：服务器重排实际用 qwen3-rerank API（生效），非 TF-IDF 降级
+
+**全量测试**：`pytest tests/ -q` → **243 passed**（0 失败 0 错误）
+
 ### v1.3.4 (2024-08) — 当前版本
 
 #### Bug 修复（第八轮生产环境修复，P0×3 + P1×1 + P2×1 + 环境×2）
