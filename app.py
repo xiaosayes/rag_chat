@@ -17,7 +17,7 @@ import gradio as gr
 from loguru import logger
 
 from src.config import settings
-from src.utils import setup_logger
+from src.utils import setup_logger, clean_text_for_tts
 from src.rag_pipeline import RAGPipeline
 from src.project import project_manager
 
@@ -260,12 +260,14 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
                     # bug-021 修复：改为基于时间间隔更新（每 100ms），避免 token 长度不均匀导致的更新频率不稳定
                     now = time.time()
                     if now - _last_update > 0.1 or len(full_answer) < 5:
-                        display = format_answer(full_answer, chunks_info)
+                        # bug-115：展示前清洗答案正文（TTS + 字幕纯文本），
+                        # 检索来源的 **名称** 加粗结构由 format_answer 保留
+                        display = format_answer(clean_text_for_tts(full_answer), chunks_info)
                         _update_last_assistant(history, question, display)
                         yield history, json.dumps(chunks_info, ensure_ascii=False)
                         _last_update = now
             # 最后一次更新确保完整显示
-            display = format_answer(full_answer, chunks_info)
+            display = format_answer(clean_text_for_tts(full_answer), chunks_info)
             _update_last_assistant(history, question, display)
             yield history, json.dumps(chunks_info, ensure_ascii=False)
         except Exception as e:
@@ -289,7 +291,8 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             answer = result["answer"]
             chunks_info = result.get("retrieved_chunks", [])
             timing = result.get("timing", {})
-            display = format_answer(answer, chunks_info, timing)
+            # bug-115：展示前清洗答案正文（TTS + 字幕纯文本）
+            display = format_answer(clean_text_for_tts(answer), chunks_info, timing)
             _update_last_assistant(history, question, display)
             yield history, json.dumps(chunks_info, ensure_ascii=False)
         except Exception as e:

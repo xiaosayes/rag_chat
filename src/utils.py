@@ -115,6 +115,236 @@ def strip_emoji(text: str) -> str:
     return EMOJI_PATTERN.sub("", text)
 
 
+# ========== 答案文本清洗（TTS + 字幕展示，bug-115） ==========
+
+# 行内代码内容判为命令/路径的命令关键字（命中则删除该内容）
+_CODE_COMMAND_KEYWORDS = {
+    "cd", "ls", "dir", "rm", "cp", "mv", "mkdir", "touch", "cat", "grep", "sed",
+    "awk", "echo", "export", "source", "chmod", "chown", "ssh", "scp", "tar",
+    "unzip", "zip", "make", "cmake", "java", "javac", "go", "cargo", "docker",
+    "kubectl", "systemctl", "service", "kill", "ps", "top", "htop", "man", "which",
+    "find", "xargs", "tee", "head", "tail", "wc", "sort", "gzip", "dd", "df", "du",
+    "free", "uname", "pwd", "env", "alias", "history", "clear", "exit", "python",
+    "python3", "pip", "pip3", "npm", "npx", "yarn", "node", "git", "curl", "wget",
+    "apt", "apt-get", "conda", "install", "import", "from", "print", "sudo", "mount",
+    "umount",
+}
+
+# 行内代码内容为已知文件扩展名（如 .py / .json）→ 判为路径/命令
+_CODE_FILE_EXT_RE = re.compile(
+    r"\.(py|pyc|sh|bat|cmd|ps1|json|yaml|yml|toml|ini|cfg|log|txt|md|exe|dll|so|"
+    r"jar|war|zip|tar|gz|conf|db|sqlite|sql|env|html|css|js|ts|tsx|jsx|vue|go|rs|"
+    r"c|cpp|h|java|class|xml|pdf|docx|xlsx|csv|lock|map)$",
+    re.IGNORECASE,
+)
+
+# 句末标点集合（已以此结尾则不再补句号）
+_SENTENCE_END_CHARS = "。！？!?…．.;；"
+
+# 行尾可安全剥离的标点（剥离后再判断是否补句号）
+_SENTENCE_STRIP_CHARS = "，、：:"
+
+# 块级 HTML 标签（转为段落分隔 \n）
+_BLOCK_HTML_TAGS = {
+    "br", "p", "div", "li", "tr", "td", "th", "table", "ul", "ol", "h1", "h2",
+    "h3", "h4", "h5", "h6", "section", "article", "header", "footer", "nav",
+    "blockquote", "hr", "pre",
+}
+
+
+def _is_code_like_content(content: str) -> bool:
+    """判断行内代码内容是否为命令/路径（是则删除，否则保留）"""
+    s = content.strip()
+    if not s:
+        return True
+    tokens = s.split()
+    if tokens[0].lower() in _CODE_COMMAND_KEYWORDS:
+        return True
+    if len(tokens) > 1:
+        return True
+    if any(ch in s for ch in "/\\"):
+        return True
+    if re.match(r"^--?[A-Za-z]", s):
+        return True
+    if ".." in s or "=" in s:
+        return True
+    if _CODE_FILE_EXT_RE.search(s):
+        return True
+    return False
+
+
+def _latex_to_speech(expr: str) -> Optional[str]:
+    """简单 LaTeX 公式转口语描述；复杂/无意义返回 None（由调用方删除）"""
+    e = expr.strip()
+    if not e:
+        return None
+    # \frac{a}{b} → "b 分之 a"
+    m = re.fullmatch(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", e)
+    if m:
+        return f"{m.group(2)} 分之 {m.group(1)}"
+    # base^exp → "base 的平方/立方/次方"
+    m = re.fullmatch(r"([A-Za-z0-9]+)\^\{?([0-9A-Za-z]+)\}?", e)
+    if m:
+        base, exp = m.group(1), m.group(2)
+        if exp == "2":
+            return f"{base} 的平方"
+        if exp == "3":
+            return f"{base} 的立方"
+        return f"{base} 的 {exp} 次方"
+    # base_sub → "base 下标 sub"
+    m = re.fullmatch(r"([A-Za-z0-9]+)_\{?([0-9A-Za-z]+)\}?", e)
+    if m:
+        return f"{m.group(1)} 下标 {m.group(2)}"
+    # a+b / a-b / a×b / a÷b → 口语
+    m = re.fullmatch(r"([A-Za-z0-9]+)\s*([+\-×÷])\s*([A-Za-z0-9]+)", e)
+    if m:
+        ops = {"+": "加", "-": "减", "×": "乘", "÷": "除以"}
+        return f"{m.group(1)} {ops[m.group(2)]} {m.group(3)}"
+    return None
+
+
+def _replace_latex_dollar(m: re.Match) -> str:
+    """替换 $...$：货币（$ 后为数字）保留；简单公式转口语；复杂删除"""
+    content = m.group(1).strip()
+    if not content:
+        return ""
+    if content[0].isdigit():
+        return m.group(0)  # $5 等为货币符号，保留原样
+    speech = _latex_to_speech(content)
+    return speech if speech is not None else ""
+
+
+def _replace_latex_paren(m: re.Match) -> str:
+    r"""替换 \(...\)：简单公式转口语；复杂删除"""
+    speech = _latex_to_speech(m.group(1).strip())
+    return speech if speech is not None else ""
+
+
+def _strip_emphasis(text: str) -> str:
+    """删除 Markdown 行内强调标记（粗体/斜体/删除线），保留中间文字"""
+    text = re.sub(r"~~(.+?)~~", r"\1", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"\*([^*\n]+?)\*", r"\1", text)
+    # 单下划线强调：两侧需为非字母数字，避免误伤 model_name 等标识符
+    text = re.sub(r"(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])", r"\1", text)
+    return text
+
+
+def _convert_tilde_ranges(text: str) -> str:
+    """数字区间波浪号（3~5 / 3～5）转 "到"，其余波浪号删除"""
+    text = re.sub(
+        r"(\d[0-9\-/年月日.]*)\s*[~～]\s*(\d[0-9\-/年月日.]*)",
+        r" \1 到 \2 ",
+        text,
+    )
+    return text.replace("~", "").replace("～", "")
+
+
+def clean_text_for_tts(text: Optional[str]) -> str:
+    """将答案原始文本清洗为适合语音合成（TTS）+ 字幕展示的纯文本（bug-115）
+
+    规则：
+      1. 删除 Markdown 语法符号（标题/粗体/斜体/删除线/引用/代码块/行内代码/分隔线/
+         表格符号/链接语法），仅保留正文文字；行内代码内容为命令/路径时删除；
+      2. 删除 HTML 标签及属性，保留标签内文字（块级标签转为段落分隔）；
+      3. 删除 LaTeX 公式（简单公式转口语描述，如 $x^2$ → "x 的平方"；复杂/无意义删除）、
+         控制字符、零宽字符、制表符、emoji；
+      4. 保留中文/英文标点、数字、%、货币符号（¥/$/°C）、版本号、商标符号等正常字符；
+      5. 数字区间波浪号（3~5）转 "到"；连续空格压缩为单个；段落间最多一个空行；
+         每句结尾补标点（标题行除外）。
+    """
+    if not text:
+        return ""
+
+    result = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 1. 删除代码块（整块删除）
+    result = re.sub(r"```.*?```", "", result, flags=re.DOTALL)
+
+    # 2. 删除 HTML：script/style 整体删除；块级标签转换行；其余标签删除保留内文
+    result = re.sub(r"<script[^>]*>.*?</script>", "", result, flags=re.DOTALL | re.IGNORECASE)
+    result = re.sub(r"<style[^>]*>.*?</style>", "", result, flags=re.DOTALL | re.IGNORECASE)
+
+    def _html_repl(m: re.Match) -> str:
+        tag = m.group(1).lower()
+        return "\n" if tag in _BLOCK_HTML_TAGS else ""
+
+    result = re.sub(r"</?([a-zA-Z][a-zA-Z0-9]*)(?:\s[^>]*)?/?>", _html_repl, result)
+
+    # 3. 删除 LaTeX 公式
+    result = re.sub(r"\$([^$\n]+?)\$", _replace_latex_dollar, result)
+    result = re.sub(r"\\\(([^\\\n]+?)\\\)", _replace_latex_paren, result)
+
+    # 4. Markdown 链接/图片语法 → 保留文字
+    result = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", result)
+    result = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", result)
+
+    # 5. 行内代码：内容为命令/路径则删除，否则保留文字
+    result = re.sub(
+        r"`([^`\n]+)`",
+        lambda m: "" if _is_code_like_content(m.group(1)) else m.group(1),
+        result,
+    )
+
+    # 6. 逐行处理行级 Markdown 语法（表格按块处理，避免分隔行遗留空行）
+    lines = result.split("\n")
+    cleaned = []  # (line, is_heading)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # 表格块：连续以 | 开头的行（含分隔行）合并处理，行间不留空行
+        if line.lstrip().startswith("|"):
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                row = lines[i]
+                if not re.fullmatch(r"\s*\|?[\s|:]+-{3,}[\s|:-]*\|?\s*", row):
+                    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+                    cleaned.append(("，".join(cells), False))
+                i += 1
+            continue
+        is_heading = bool(re.match(r"^\s*#{1,6}\s", line))
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)          # 标题标记
+        line = re.sub(r"^\s*>\s?", "", line)                # 引用标记
+        if re.fullmatch(r"\s*(?:-{3,}|\*{3,}|_{3,})\s*", line):
+            line = ""                                          # 分隔线
+        line = re.sub(r"^\s*[-*+]\s+", "", line)           # 无序列表标记
+        cleaned.append((line, is_heading))
+        i += 1
+
+    # 7~10. 逐行规范化
+    final_lines = []
+    for line, is_heading in cleaned:
+        line = _strip_emphasis(line)
+        line = _convert_tilde_ranges(line)
+        line = strip_emoji(line)
+        # 控制字符 / 零宽字符 / 制表符（→ 空格）
+        line = re.sub(
+            r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u2028\u2029\u2060\ufeff]",
+            "",
+            line,
+        )
+        line = line.replace("\t", " ")
+        line = re.sub(r" {2,}", " ", line)                  # 连续空格压缩
+        line = re.sub(r"^(\d{1,2})\.(?=[^\d\s])", r"\1. ", line)  # 列表序号补空格
+        if not is_heading:                                    # 句末标点（标题行除外）
+            stripped = line.rstrip(_SENTENCE_STRIP_CHARS + " ")
+            if stripped and not stripped.endswith(tuple(_SENTENCE_END_CHARS)):
+                stripped += "。"
+            line = stripped
+        final_lines.append((line, is_heading))
+
+    # 11. 合并：标题行后的空行剔除（Markdown 排版记号）；段落间最多一个空行
+    merged = []
+    for idx, (line, is_heading) in enumerate(final_lines):
+        if line == "" and idx > 0 and final_lines[idx - 1][1]:
+            continue
+        merged.append(line)
+    result = "\n".join(merged)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    result = "\n".join(l.strip() for l in result.split("\n"))
+    return result.strip()
+
+
 def format_recommendation(results: List[Dict[str, Any]]) -> str:
     """格式化推荐结果（用于 LLM 输出前的参考）"""
     lines = []
