@@ -12,6 +12,8 @@ dist/
 build/
 *.log
 
+logs/
+
 # 编辑器
 .vscode/
 .idea/

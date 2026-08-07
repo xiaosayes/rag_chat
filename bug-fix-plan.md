@@ -2329,3 +2329,53 @@ python scripts/build_knowledge_base.py --project jiabohui --source mixed \
 | 编号 | 验证方式 | 结果 |
 |------|---------|------|
 | bug-109 | `TestExcelSupport`（9 项）通过；综合实测（多 sheet/数字/日期/布尔/空行/自定义列名）通过；全量 232 passed | ✅ 已实现 |
+
+---
+
+## 新增变更（第九轮补 - Embedding 模型升级 text-embedding-v3 → text-embedding-v4）
+
+> 需求来源：用户要求将项目中使用的 text-embedding-v3 全部升级为 text-embedding-v4，API Key 不变，确保项目正常运行。
+> 全量测试：`pytest tests/ -q` → **236 passed**（原 232 + 新增 4，0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-110 | 变更：Embedding 模型从 text-embedding-v3 升级为 text-embedding-v4（API Key 不变） | `src/config.py`、`src/embeddings.py`、`.env.example`、README/project-context/DEPLOY_GUIDE | 模型升级 | 已完成 |
+
+## 问题详情
+
+### [bug-110] Embedding 模型升级 text-embedding-v3 → text-embedding-v4（模型升级）
+
+- **变更范围**：
+  1. `src/config.py`：`embedding_model_name` 默认值 `text-embedding-v3` → `text-embedding-v4`；
+  2. `src/embeddings.py`：`BailianEmbedding.__init__` 默认 `model` 参数 `text-embedding-v3` → `text-embedding-v4`；
+     注释同步更新（MAX_BATCH_SIZE=10 的 API 限制说明覆盖 v3/v4）；
+  3. `.env.example`：`EMBEDDING_MOD_NAME=text-embedding-v3` → `EMBEDDING_MODEL_NAME=text-embedding-v4`
+     （**顺带修正键名拼写**：原 `EMBEDDING_MOD_NAME` 缺 `EL`，与代码字段 `embedding_model_name`
+     不对应，按模板配置的用户该配置实际不生效）；
+  4. 文档：README.md（技术栈表/数据流/FAQ）、project-context.md（技术栈/模型选择/环境变量）、
+     DEPLOY_GUIDE.md（API 连通性测试命令）同步更新；历史更新日志（v1.3.x 中 v3 相关描述）保留原样。
+- **兼容性说明**：text-embedding-v4 与 v3 调用契约一致（`TextEmbedding.call(model, input, dimension, api_key)`），
+  单请求上限同为 10 条（MAX_BATCH_SIZE 钳制逻辑继续生效），维度支持同为 1024/768/512/256/128/64（默认 1024 不变）。
+- **风险分析**：低。仅模型名变化，API 调用方式/参数/批大小/维度均不变；`.env` 存量配置若显式写了
+  `EMBEDDING_MODEL_NAME=text-embedding-v3` 不会被覆盖（环境变量优先于默认值），需用户手动更新或删除该行。
+- **测试验证**：新增 `tests/test_edge_cases.py::TestEmbeddingModelUpgrade`（4 项）：
+  1. settings 默认模型为 v4；2. BailianEmbedding 默认 model 为 v4（与 settings 一致）；
+  3. RAGPipeline 构造使用 settings 模型名（升级后自动生效）；4. 批大小仍 ≤ API 上限 10。
+  全部通过；全量 `pytest tests/ -q` → **236 passed**（0 失败 0 错误）。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-110 | `TestEmbeddingModelUpgrade`（4 项）通过；全量 236 passed；语法检查通过 | ✅ 已完成 |
+
+## 服务器操作指引
+
+1. 同步 `src/config.py`、`src/embeddings.py`、`.env.example` 到服务器；
+2. 检查服务器 `.env`：若显式配置了 `EMBEDDING_MODEL_NAME=text-embedding-v3`，改为 `text-embedding-v4`
+   （或删除该行使用默认值）；若配置的是旧拼写 `EMBEDDING_MOD_NAME`（不生效），改为 `EMBEDDING_MODEL_NAME`；
+3. 重新构建或查询即使用 text-embedding-v4（API Key 不变）；
+   ⚠️ 注意：v3 与 v4 向量维度同为 1024 但**向量空间不同**，已用 v3 构建的 Qdrant 数据需**重新构建知识库**，
+   否则新旧向量混用会导致检索质量下降。

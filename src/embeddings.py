@@ -23,7 +23,7 @@ class BailianEmbedding:
     文档：https://help.aliyun.com/zh/dashscope/developer-reference/text-embedding
     """
 
-    # 单请求最大批次数（text-embedding-v3 API 限制：input.contents 不超过 10 条）
+    # 单请求最大批次数（text-embedding-v3/v4 API 限制：input.contents 不超过 10 条）
     # 实测超限报错：<400> InternalError.Algo.InvalidParameter: Value error,
     #   batch size is invalid, it should not be larger than 10.: input.contents
     # bug-096 修复：默认 batch_size=16 超出该上限，导致构建知识库时全部批次 400 失败
@@ -31,7 +31,7 @@ class BailianEmbedding:
 
     def __init__(
         self,
-        model: str = "text-embedding-v3",
+        model: str = "text-embedding-v4",
         dimension: int = 1024,
         api_key: Optional[str] = None,
         batch_size: int = 16,

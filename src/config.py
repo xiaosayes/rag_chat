@@ -41,8 +41,8 @@ class Settings(BaseSettings):
 
     # ========== Embedding 配置 ==========
     embedding_model_name: str = Field(
-        default="text-embedding-v3",
-        description="Embedding 模型名称（百炼）",
+        default="text-embedding-v4",
+        description="Embedding 模型名称（百炼，bug-110 已从 v3 升级至 v4）",
     )
     embedding_dimension: int = Field(
         default=1024,
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     )
     embedding_batch_size: int = Field(
         default=10,
-        description="Embedding 批处理大小（text-embedding-v3 单请求上限 10 条，bug-096）",
+        description="Embedding 批处理大小（单请求上限 10 条，bug-096）",
     )
 
     # ========== LLM 配置 ==========

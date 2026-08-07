@@ -1270,6 +1270,32 @@ class TestExcelSupport:
 
 
 # =============================================================================
+# Embedding 模型升级 text-embedding-v3 → text-embedding-v4（bug-110）
+# =============================================================================
+class TestEmbeddingModelUpgrade:
+    """验证默认 Embedding 模型已升级为 text-embedding-v4（API Key 不变）"""
+
+    def test_settings_default_model_v4(self):
+        """settings 默认 Embedding 模型为 text-embedding-v4"""
+        assert settings.embedding_model_name == "text-embedding-v4"
+
+    def test_bailian_embedding_default_model_v4(self):
+        """BailianEmbedding 默认 model 为 text-embedding-v4（与 settings 一致）"""
+        emb = BailianEmbedding()
+        assert emb.model == "text-embedding-v4"
+
+    def test_pipeline_uses_settings_model(self):
+        """RAGPipeline 构造时使用 settings 的模型名（升级后自动生效）"""
+        pipeline = RAGPipeline(local_mode=True)
+        assert pipeline.embedding.model == settings.embedding_model_name == "text-embedding-v4"
+
+    def test_batch_size_still_within_api_limit(self):
+        """升级后批大小仍不超过 API 单请求上限（10）"""
+        emb = BailianEmbedding(batch_size=16)
+        assert emb.batch_size <= BailianEmbedding.MAX_BATCH_SIZE == 10
+
+
+# =============================================================================
 # 运行入口
 # =============================================================================
 if __name__ == "__main__":

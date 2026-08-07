@@ -21,7 +21,7 @@
 | Excel 数据 | openpyxl（.xlsx） | 内置（可选依赖） |
 | 文档解析 | pypdf / python-docx / python-pptx / PaddleOCR | 本地 |
 | 文档切片 | 自定义 `SmartChunking v2`（3 切片: summary/detail/significance） | 内置 |
-| Embedding | 阿里云百炼 `text-embedding-v3`（1024 维） | **在线 API** |
+| Embedding | 阿里云百炼 `text-embedding-v4`（1024 维，bug-110 已从 v3 升级） | **在线 API** |
 | 向量数据库 | **Qdrant**（本地持久化 / 全内存模式） | 本地 |
 | 关键词检索 | **rank-bm25**（BM25Okapi，中文 unigram） | 内置（内存索引） |
 | 混合检索 | 自定义 `HybridRetriever`（并行语义 + BM25，RRF 融合，去重） | 内置 |
@@ -169,7 +169,7 @@
 | 备用 LLM | `qwen-max` | 复杂推理场景（长期规划、多步推理） |
 | 重排序模型 | `qwen3-reranker-4b` | 替代已下线的 gte-rerank，性价比均衡 |
 | 高精度重排序 | `qwen3-reranker-8b` | 更准但稍慢，通过配置项可选 |
-| Embedding 模型 | `text-embedding-v3` | 1024 维，中文语义理解优秀 |
+| Embedding 模型 | `text-embedding-v4` | 1024 维，中文语义理解优秀（bug-110 已从 v3 升级） |
 
 ### 关键业务规则
 
@@ -448,7 +448,7 @@ python app.py --project custom --port 7862
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `DASHSCOPE_API_KEY` | (必填) | 阿里云百炼 API Key |
-| `EMBEDDING_MODEL_NAME` | `text-embedding-v3` | Embedding 模型 |
+| `EMBEDDING_MODEL_NAME` | `text-embedding-v4` | Embedding 模型 |
 | `EMBEDDING_DIMENSION` | `1024` | 向量维度 |
 | `LLM_MODEL_NAME` | `qwen-plus` | LLM 模型 |
 | `LLM_TEMPERATURE` | `0.7` | 生成温度 |

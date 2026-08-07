@@ -275,7 +275,7 @@
 | **数据加载** | 自定义 `DataLoader` | v1 | 加载 JSON/CSV 数据，字段映射标准化 | 内置，零依赖 |
 | **多格式文档解析** | pypdf / python-docx / python-pptx / PaddleOCR | 最新 | 解析 PDF、Word、PPT、图片(OCR) 等格式 | 本地（GPU 可选） |
 | **文档切片** | 自定义 `SmartChunking` | v2 | 每项生成 3 个切片（summary/detail/significance），信息密度高、重叠少 | 内置 |
-| **Embedding 生成** | 阿里云百炼 `text-embedding-v3` | v3 | 1024 维向量，中文语义理解优秀，批处理并发 | **在线 API** |
+| **Embedding 生成** | 阿里云百炼 `text-embedding-v4` | v4 | 1024 维向量，中文语义理解优秀，批处理并发（bug-110 已从 v3 升级） | **在线 API** |
 | **Embedding 缓存** | 自定义 `EmbeddingCache` | v2 | 高频问题预计算 + 精确匹配 + 模式匹配，持久化到磁盘 | 内置 |
 | **向量数据库** | **Qdrant**（本地模式） | ≥1.9 | 本地持久化，零配置；支持本地持久模式（查询快） | 本地 |
 | **关键词检索** | **rank-bm25**（BM25Okapi） | ≥0.2 | 中文 unigram 分词，与语义检索互补 | 内置（内存索引） |
@@ -459,7 +459,7 @@ python scripts/run_qa.py -q "今天天气怎么样"
 
 ### 3. Embedding 生成
 
-使用百炼 `text-embedding-v3` 模型，每批 16 条并发，自动重试，缓存持久化。
+使用百炼 `text-embedding-v4` 模型（bug-110 已从 v3 升级），每批最多 10 条并发，自动重试，缓存持久化。
 
 ### 4. 数据入库
 
@@ -485,7 +485,7 @@ Step 1: 查询分类
 Step 2: 混合检索（并行）
 ────────────────────────────────────────────────────────────
 a) 语义检索（向量）:
-   用户问题 → text-embedding-v3 → 1024维向量
+   用户问题 → text-embedding-v4 → 1024维向量
    → Qdrant 余弦相似度搜索 → Top 20
 
 b) BM25 关键词检索:
@@ -1051,7 +1051,7 @@ python app.py --project museum --no-stream
 A: 登录 [阿里云百炼平台](https://bailian.console.aliyun.com/) → 右上角"API 密钥" → 创建 API Key。
 
 ### Q: 费用如何？
-A: 百炼 API 按量计费，qwen-plus 约 0.004元/千 tokens，text-embedding-v3 约 0.0007元/千 tokens。日常使用费用很低。
+A: 百炼 API 按量计费，qwen-plus 约 0.004元/千 tokens，text-embedding-v4 约 0.0007元/千 tokens。日常使用费用很低。
 
 ### Q: 如何添加更多数据？
 A: 编辑 `data/raw/{project_id}/data.json`，按照已有格式添加新条目，然后重新运行：
@@ -1083,7 +1083,7 @@ A: `cultural-relics-rag`。使用 `conda activate cultural-relics-rag` 激活。
 
 ### Q: 构建知识库报 Embedding 400 错误怎么办？
 A: 先看报错中的 `resp.message`（bug-095 起已输出服务端详情），常见三种原因：
-1. **批量超限**：`text-embedding-v3` 单请求最多 10 条，报 `batch size ... larger than 10`。代码已默认 `EMBEDDING_BATCH_SIZE=10` 且自动钳制超限配置，无需手工处理；
+1. **批量超限**：`text-embedding-v4` 单请求最多 10 条，报 `batch size ... larger than 10`。代码已默认 `EMBEDDING_BATCH_SIZE=10` 且自动钳制超限配置，无需手工处理；
 2. **维度不匹配**：`EMBEDDING_DIMENSION` 需为模型支持值（1024/768/512/256/128/64）；
 3. **文本超长**：单条文本超过模型 token 上限（8192 tokens），需缩短数据。
 

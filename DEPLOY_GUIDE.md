@@ -447,7 +447,7 @@ echo $DASHSCOPE_API_KEY
 # 测试 API 连通性
 python -c "
 from dashscope import TextEmbedding
-resp = TextEmbedding.call(model='text-embedding-v3', input='测试', api_key='$DASHSCOPE_API_KEY')
+resp = TextEmbedding.call(model='text-embedding-v4', input='测试', api_key='$DASHSCOPE_API_KEY')
 print('状态码:', resp.status_code)
 "
 ```
