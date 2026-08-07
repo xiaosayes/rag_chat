@@ -661,6 +661,7 @@ data/processed/
 | **PDF** | `.pdf` | pypdf | 提取文本内容和元数据 |
 | **Word** | `.docx` | python-docx | 提取段落和表格 |
 | **PPT** | `.pptx`, `.ppt` | python-pptx | 提取幻灯片文字 |
+| **Excel** | `.xlsx` | openpyxl | 表格型数据：每 sheet 第一行为表头，每行一条记录；任意列可检索（bug-109） |
 | **图片** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.tiff` | PaddleOCR (GPU) / Tesseract | OCR 文字识别 |
 
 ### 使用示例
@@ -671,6 +672,11 @@ python scripts/build_knowledge_base.py --project museum --source docs --doc-path
 
 # 混合模式（JSON 数据 + 文档）
 python scripts/build_knowledge_base.py --project enterprise --source mixed
+
+# Excel 表格数据（.xlsx）：直接放进文档目录（docs 模式自动识别）
+python scripts/build_knowledge_base.py --project jiabohui --source docs --doc-path ./data/raw/jiabohui
+# 或显式指定 Excel 文件（json 模式，注意必须 --json-path）
+python scripts/build_knowledge_base.py --project jiabohui --source json --json-path ./data/raw/jiabohui/参展商名单.xlsx
 
 # 禁用 OCR
 python scripts/build_knowledge_base.py --project museum --source docs --no-ocr

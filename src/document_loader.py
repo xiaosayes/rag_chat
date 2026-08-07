@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-from src.data_loader import Artifact
+from src.data_loader import Artifact, DataLoader
 from src.utils import generate_id
 
 
@@ -36,6 +36,7 @@ SUPPORTED_EXTENSIONS = {
     ".bmp": "image/bmp",
     ".tiff": "image/tiff",
     ".tif": "image/tiff",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 
@@ -501,14 +502,26 @@ class DocumentLoader:
         从文件或目录加载所有文档，统一转换为 Artifact 对象
         方便后续切片和入库
         """
+        artifacts: List[Artifact] = []
         if source.is_file():
+            # Excel 表格：每行一条记录，委托 DataLoader 解析（不经过单文档模型，bug-109）
+            if source.suffix.lower() == ".xlsx":
+                return DataLoader.load(source)
             docs = [self.load_file(source)]
         elif source.is_dir():
             docs = self.load_directory(source, recursive=recursive)
+            # Excel 表格单独收集（load_directory 的 extension_map 不含 .xlsx，
+            # 且 Excel 是多记录文件，不走单文档模型）
+            pattern = "**/*.xlsx" if recursive else "*.xlsx"
+            for xlsx_path in sorted(source.glob(pattern)):
+                if xlsx_path.is_file():
+                    try:
+                        artifacts.extend(DataLoader.load(xlsx_path))
+                    except Exception as e:
+                        logger.error(f"解析失败 {xlsx_path.name}: {e}")
         else:
             raise FileNotFoundError(f"路径不存在: {source}")
 
-        artifacts = []
         for doc in docs:
             # P1-5 修复：长文档按段切分为多个 Artifact，
             # 避免 document_to_artifact 的 5000 字符截断导致后续内容完全无法被检索

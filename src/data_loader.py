@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import csv
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
@@ -15,6 +16,35 @@ from dataclasses import dataclass, field, asdict
 from loguru import logger
 
 from src.utils import generate_id, load_json
+
+
+# ========== Excel (.xlsx) 支持（bug-109） ==========
+# 名称列候选：命中即作为记录名称（无法穷举所有项目列名，
+# 未命中的列会全部拼入 description 参与全文检索）
+_NAME_COLUMN_CANDIDATES = {
+    "名称", "name", "Name", "标题", "title", "Title",
+    "展商名称", "企业名称", "公司名称", "项目名称",
+    "品牌名称", "物料名称", "产品名称", "文件名称", "文档名称",
+}
+
+
+def _cell_to_str(value: Any) -> str:
+    """Excel 单元格值统一转字符串（数字/布尔/日期）"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    return str(value).strip()
+
+
+def _find_name_column(record: Dict[str, Any]) -> Optional[str]:
+    """识别记录中的名称列（候选列名优先，None 表示未识别）"""
+    for cand in _NAME_COLUMN_CANDIDATES:
+        if cand in record:
+            return cand
+    return None
 
 
 @dataclass
@@ -73,7 +103,7 @@ class Artifact:
 class DataLoader:
     """数据加载器"""
 
-    SUPPORTED_FORMATS = {"json", "csv"}
+    SUPPORTED_FORMATS = {"json", "csv", "xlsx"}
 
     @staticmethod
     def load(path: Path, format: Optional[str] = None) -> List[Artifact]:
@@ -87,6 +117,7 @@ class DataLoader:
         loader_map = {
             "json": DataLoader._load_json,
             "csv": DataLoader._load_csv,
+            "xlsx": DataLoader._load_xlsx,
         }
 
         loader = loader_map[format]
@@ -110,6 +141,72 @@ class DataLoader:
             data = list(reader)
         logger.info(f"已加载 {len(data)} 条数据 from {path}")
         return data
+
+    @staticmethod
+    def _load_xlsx(path: Path) -> List[Dict[str, Any]]:
+        """
+        加载 Excel (.xlsx) 格式（bug-109）
+
+        规则：
+          - 遍历所有 sheet（多 sheet 支持），每个 sheet 第一行为表头，后续行每行一条记录
+          - 名称列识别：列名命中候选集 → 否则取第一个非空列 → 兜底 "{sheet名}第N行"
+          - 任意未识别列以 "列名：值" 拼入 description，保证任何列内容可被全文检索命中
+          - 空行 / 空列跳过
+        """
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            raise ImportError(
+                "请先安装 openpyxl: pip install openpyxl（Excel 数据源支持）"
+            )
+        if not path.exists():
+            raise FileNotFoundError(f"文件不存在: {path}")
+
+        records: List[Dict[str, Any]] = []
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                rows = ws.iter_rows(values_only=True)
+                header: List[str] = []
+                row_idx = 0
+                for row in rows:
+                    if not header:
+                        header = [
+                            _cell_to_str(c) for c in row
+                        ]
+                        continue
+                    row_idx += 1
+                    # 空行跳过
+                    if all(_cell_to_str(c) == "" for c in row):
+                        continue
+                    record: Dict[str, Any] = {}
+                    for col_name, value in zip(header, row):
+                        col_name = col_name.strip()
+                        if not col_name:
+                            continue
+                        text = _cell_to_str(value)
+                        if text:
+                            record[col_name] = text
+                    if not record:
+                        continue
+                    # 名称列识别：候选列名 → 第一非空列 → 兜底
+                    name_col = _find_name_column(record)
+                    if name_col:
+                        record["name"] = record.pop(name_col)
+                    else:
+                        first_key = next(iter(record))
+                        record["name"] = record.pop(first_key)
+                    # 描述拼接：所有非 name 列以 "列名：值" 拼入，保证任意列可检索
+                    parts = [
+                        f"{k}：{v}" for k, v in record.items() if k != "name" and v
+                    ]
+                    record["description"] = "\n".join(parts)
+                    record["sheet"] = ws.title
+                    records.append(record)
+        finally:
+            wb.close()
+        logger.info(f"已加载 {len(records)} 条数据 from {path}")
+        return records
 
     @staticmethod
     def _normalize(item: Dict[str, Any]) -> Artifact:

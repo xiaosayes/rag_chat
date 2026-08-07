@@ -18,6 +18,7 @@
 | 环节 | 技术选型 | 部署方式 |
 |------|---------|---------|
 | 数据加载 | 自定义 `DataLoader` | 内置 |
+| Excel 数据 | openpyxl（.xlsx） | 内置（可选依赖） |
 | 文档解析 | pypdf / python-docx / python-pptx / PaddleOCR | 本地 |
 | 文档切片 | 自定义 `SmartChunking v2`（3 切片: summary/detail/significance） | 内置 |
 | Embedding | 阿里云百炼 `text-embedding-v3`（1024 维） | **在线 API** |
@@ -114,7 +115,7 @@
 |------|------|------|------|
 | 配置管理 | `src/config.py` | ✅ 完成 | Pydantic Settings，.env + 环境变量，类型校验 |
 | 工具函数 | `src/utils.py` | ✅ 完成 | 日志、JSON 读写、ID 生成 |
-| 数据加载 | `src/data_loader.py` | ✅ 完成 | JSON/CSV 加载，字段映射标准化 |
+| 数据加载 | `src/data_loader.py` | ✅ 完成 | JSON/CSV/Excel(.xlsx) 加载，字段映射标准化，任意列可检索（bug-109） |
 | 文档加载 | `src/document_loader.py` | ✅ 完成 | PDF/Word/TXT/MD/图片(OCR) |
 | 切片策略 | `src/chunking.py` | ✅ 完成 | SmartChunking v2，3 切片 |
 | Embedding | `src/embeddings.py` | ✅ 完成 | 百炼 API，批处理，缓存 |
@@ -497,7 +498,7 @@ data/
 | `src/reranker.py` | `BailianReranker` | ~150 | 重排序 + TF-IDF fallback |
 | `src/chunking.py` | `SmartChunking`, `ChunkingPipeline` | ~200 | 智能切片策略 |
 | `src/config.py` | `Settings` | ~120 | Pydantic 配置管理 |
-| `src/data_loader.py` | `DataLoader`, `Artifact` | ~150 | 数据加载与标准化 |
+| `src/data_loader.py` | `DataLoader`, `Artifact` | ~250 | 数据加载与标准化（JSON/CSV/Excel） |
 | `src/utils.py` | `setup_logger`, `load_json`, `save_json` | ~80 | 工具函数 |
 | `app.py` | `create_ui`, `answer_question` | ~250 | Gradio Web UI |
 | `scripts/build_knowledge_base.py` | `main` | ~100 | 知识库构建脚本 |

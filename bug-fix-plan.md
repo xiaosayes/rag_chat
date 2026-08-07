@@ -2257,3 +2257,75 @@ LLM_TEMPERATURE=0.7      # 保持默认，勿调高
 > 3. 服务器 gradio 前端资源旧版本残留（index-BZvZc4Wo.js ≠ 本地 index-BgYNBSAi.js，
 >    FORM_ELEMENT 警告来源）已通过重装 gradio 6.22.0 对齐
 > 最终状态：服务器 Web UI 正常，对话/检索区域可正常使用；223 passed。
+
+---
+
+## 新增功能（第九轮 - Excel 数据源支持）
+
+> 需求来源：多个项目（家博会等）拥有大量 Excel 表格数据（参展商名单、展位信息等），
+> 原系统仅支持 JSON/CSV 结构化数据与多格式文档，无法直接使用 `.xlsx`。
+> 设计文档：`docs/superpowers/specs/2026-08-06-excel-support-design.md`（已批准方案 A）
+> 全量测试：`pytest tests/ -q` → **232 passed**（原 223 + 新增 9，0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-109 | 新增功能：Excel (.xlsx) 表格数据作为知识库数据源（表格型，每行一条记录；多 sheet 支持；任意列可检索） | `src/data_loader.py`、`src/document_loader.py`、`requirements.txt` | 功能增强 | 已实现 |
+
+## 问题详情
+
+### [bug-109] Excel (.xlsx) 数据源支持（功能增强）
+
+- **需求确认**：
+  1. 形态为**表格型**（每行一条记录，列 = 字段）；
+  2. 列名**不可穷举**（不同项目字段各异），需通用策略——未识别列全部入库可检索；
+  3. 接入方式：**docs 模式**（目录自动识别）+ **json 模式**（`--json-path xxx.xlsx`）双入口；
+  4. **多 sheet** 支持，每个 sheet 独立成数据集；旧版 `.xls` 不支持（仅 openpyxl 支持的 .xlsx）。
+- **实现方案**（方案 A：共享核心 + 双入口委托）：
+  1. `src/data_loader.py`：
+     - `SUPPORTED_FORMATS` 增加 `"xlsx"`，`loader_map` 增加 `_load_xlsx`；
+     - `_load_xlsx`（openpyxl `read_only=True, data_only=True`）：遍历所有 sheet，第一行=表头，
+       后续行每行一条记录；单元格值统一转字符串（数字/布尔→str、日期→`YYYY-MM-DD`）；空行/空列跳过；
+     - **名称列三级识别**：① 列名命中候选集（名称/name/标题/展商名称/企业名称/公司名称/项目名称…）
+       → ② 否则取第一个非空列 → ③ 兜底 `"{sheet名}第N行"`；
+     - **任意列可检索**：所有非 name 列以 `"列名：值"` 拼入 description → 任何列内容均可被全文检索命中；
+     - `extra` 保留原始列数据 + `sheet` 名；
+  2. `src/document_loader.py`：`SUPPORTED_EXTENSIONS` 增加 `.xlsx`；`load_all_as_artifacts`
+     对 `.xlsx` 文件（单文件与目录两种路径）委托 `DataLoader.load`（Excel 为多记录文件，不走单文档模型）；
+     load_directory 的 extension_map 不含 .xlsx，目录模式下由 `load_all_as_artifacts` 单独 glob 收集；
+  3. `requirements.txt` 增加 `openpyxl>=3.1.0`（可选依赖，缺失时仅 Excel 功能不可用并给出友好 ImportError）。
+- **风险分析**：低-中。新增独立解析路径，未改动现有 JSON/CSV/文档解析逻辑（`_normalize` 保持不变，
+  通用列策略集中在 `_load_xlsx`，仅影响 Excel 路径）；openpyxl 缺失时友好报错不影响其他功能。
+- **测试验证**：新增 `tests/test_edge_cases.py::TestExcelSupport`（9 项）：
+  1. `DataLoader.load` 解析 .xlsx 返回正确条数与字段（标准列名）；
+  2. 名称列识别：自定义列名（展商名称）命中候选集；
+  3. 名称列兜底：无候选列时取第一个非空列；
+  4. 任意未识别列（展位号/联系人电话）拼入 description 可检索命中；
+  5. 多 sheet 各自独立处理，sheet 名进入 extra；
+  6. 空行跳过；
+  7. openpyxl 缺失时友好 ImportError（mock sys.modules）；
+  8. docs 模式 `load_all_as_artifacts` 识别单个 .xlsx 文件；
+  9. docs 模式目录中 .xlsx 与普通文档混合加载。
+  全部通过；全量 `pytest tests/ -q` → **232 passed**（0 失败 0 错误）。
+
+## 使用方式
+
+```bash
+# 方式一：docs 模式（.xlsx 直接放进文档目录，与 PDF/Word 混放）
+python scripts/build_knowledge_base.py --project jiabohui --source docs --doc-path ./data/raw/jiabohui
+
+# 方式二：json 模式（显式指定 Excel 文件，注意脚本默认只找 data.json/artifacts.json，必须 --json-path）
+python scripts/build_knowledge_base.py --project jiabohui --source json --json-path ./data/raw/jiabohui/参展商名单.xlsx
+
+# 方式三：mixed 模式（Excel 结构化数据 + 文档合并）
+python scripts/build_knowledge_base.py --project jiabohui --source mixed \
+  --json-path ./data/raw/jiabohui/参展商名单.xlsx \
+  --doc-path ./data/raw/jiabohui
+```
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-109 | `TestExcelSupport`（9 项）通过；综合实测（多 sheet/数字/日期/布尔/空行/自定义列名）通过；全量 232 passed | ✅ 已实现 |

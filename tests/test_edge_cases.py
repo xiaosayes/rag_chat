@@ -1140,6 +1140,136 @@ class TestWarmupRedundancy:
 
 
 # =============================================================================
+# Excel (.xlsx) 数据源支持（bug-109）
+# =============================================================================
+class TestExcelSupport:
+    """测试 Excel (.xlsx) 作为知识库数据源（表格型，每行一条记录）"""
+
+    @staticmethod
+    def _make_xlsx(tmp_path, sheets, filename="test.xlsx"):
+        """用 openpyxl 构造临时 .xlsx 文件
+        sheets: {sheet名: [行列表]}，每行第一个元素为表头
+        """
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.remove(wb.active)
+        for name, rows in sheets.items():
+            ws = wb.create_sheet(name)
+            for row in rows:
+                ws.append(row)
+        path = tmp_path / filename
+        wb.save(path)
+        return path
+
+    def test_load_xlsx_basic(self, tmp_path):
+        """DataLoader.load 解析 .xlsx 返回正确条数与字段（标准列名）"""
+        path = self._make_xlsx(tmp_path, {
+            "Sheet1": [
+                ["名称", "描述", "类别"],
+                ["展商A", "主营家具", "展商"],
+                ["展商B", "主营灯具", "展商"],
+            ]
+        })
+        artifacts = DataLoader.load(path)
+        assert len(artifacts) == 2
+        assert artifacts[0].name == "展商A"
+        assert artifacts[0].category == "展商"
+        assert "主营家具" in artifacts[0].description
+
+    def test_name_column_custom(self, tmp_path):
+        """名称列识别：自定义列名（展商名称）命中候选集"""
+        path = self._make_xlsx(tmp_path, {
+            "Sheet1": [
+                ["展商名称", "展位号", "主营产品"],
+                ["某某家居", "A-01", "定制家具"],
+            ]
+        })
+        artifacts = DataLoader.load(path)
+        assert len(artifacts) == 1
+        assert artifacts[0].name == "某某家居"
+        assert "展位号：A-01" in artifacts[0].description
+        assert "主营产品：定制家具" in artifacts[0].description
+
+    def test_name_column_fallback_first(self, tmp_path):
+        """名称列兜底：无候选列时取第一个非空列"""
+        path = self._make_xlsx(tmp_path, {
+            "Sheet1": [
+                ["编号", "说明"],
+                ["E001", "某展商说明"],
+            ]
+        })
+        artifacts = DataLoader.load(path)
+        assert len(artifacts) == 1
+        assert artifacts[0].name == "E001"
+
+    def test_unmapped_columns_in_description(self, tmp_path):
+        """任意未识别列内容拼入 description，可被全文检索命中"""
+        path = self._make_xlsx(tmp_path, {
+            "Sheet1": [
+                ["名称", "展位号", "联系人电话"],
+                ["展商C", "B-02", "13800000000"],
+            ]
+        })
+        artifacts = DataLoader.load(path)
+        assert len(artifacts) == 1
+        assert "展位号：B-02" in artifacts[0].description
+        assert "联系人电话：13800000000" in artifacts[0].description
+
+    def test_multi_sheet(self, tmp_path):
+        """多 sheet 各自独立处理，sheet 名进入 extra"""
+        path = self._make_xlsx(tmp_path, {
+            "展商": [["名称", "主营"], ["展商X", "家具"]],
+            "活动": [["名称", "时间"], ["新品发布会", "8月10日"]],
+        })
+        artifacts = DataLoader.load(path)
+        names = {a.name for a in artifacts}
+        assert "展商X" in names
+        assert "新品发布会" in names
+        sheet_names = {a.extra.get("sheet") for a in artifacts}
+        assert "展商" in sheet_names and "活动" in sheet_names
+
+    def test_skip_empty_rows(self, tmp_path):
+        """空行跳过"""
+        path = self._make_xlsx(tmp_path, {
+            "Sheet1": [
+                ["名称", "描述"],
+                ["展商A", "内容A"],
+                [None, None],
+                ["展商B", "内容B"],
+            ]
+        })
+        artifacts = DataLoader.load(path)
+        assert len(artifacts) == 2
+
+    def test_missing_openpyxl_friendly_error(self, tmp_path):
+        """openpyxl 缺失时抛出友好 ImportError（不崩溃）"""
+        path = self._make_xlsx(tmp_path, {"Sheet1": [["名称", "描述"], ["A", "B"]]})
+        with patch.dict(sys.modules, {"openpyxl": None}):
+            with pytest.raises(ImportError, match="openpyxl"):
+                DataLoader.load(path)
+
+    def test_docs_mode_single_file(self, tmp_path):
+        """docs 模式：load_all_as_artifacts 识别单个 .xlsx 文件"""
+        from src.document_loader import DocumentLoader
+        path = self._make_xlsx(tmp_path, {"展商": [["名称", "主营"], ["展商Y", "灯具"]]})
+        loader = DocumentLoader(enable_ocr=False)
+        artifacts = loader.load_all_as_artifacts(source=path, category="家博会资料")
+        assert len(artifacts) == 1
+        assert artifacts[0].name == "展商Y"
+
+    def test_docs_mode_directory_mixed(self, tmp_path):
+        """docs 模式：目录中 .xlsx 与普通文档混合加载"""
+        from src.document_loader import DocumentLoader
+        self._make_xlsx(tmp_path, {"展商": [["名称", "主营"], ["展商Z", "布艺"]]})
+        (tmp_path / "说明.txt").write_text("家博会观展须知内容", encoding="utf-8")
+        loader = DocumentLoader(enable_ocr=False)
+        artifacts = loader.load_all_as_artifacts(source=tmp_path, category="家博会资料")
+        names = [a.name for a in artifacts]
+        assert "展商Z" in names
+        assert any("说明" in n for n in names)
+
+
+# =============================================================================
 # 运行入口
 # =============================================================================
 if __name__ == "__main__":
