@@ -23,3 +23,6 @@ crops_labeled/
 psd_files/
 *.zip
 *.tar
+docs/
+# 项目资料文档（PDF/Word/Excel 数据源，不入库；服务器部署时单独上传）
+docs/jiabohui/
