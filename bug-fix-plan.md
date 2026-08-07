@@ -2498,3 +2498,52 @@ python scripts/build_knowledge_base.py --project jiabohui --source mixed \
 3. **根治重排质量（强烈建议）**：百炼控制台开通 `qwen3-reranker-4b`，或 `.env` 设
    `RERANKER_MODEL` 为已开通模型（如 qwen3-reranker-8b / 其他可用 rerank 模型），
    并确认日志不再出现 `Qwen3-Reranker API 异常: 400`（此后重排由语义模型精排，相关问题不再混入）。
+
+---
+
+## 新增问题（第九轮补 - bug-112 根因更正 + prompt 品类匹配增强）
+
+> 背景：用户确认服务器 `.env` 配置为 `RERANKER_MODEL=qwen3-rerank`（非 qwen3-reranker-4b），
+> 日志实证 `Qwen3-Reranker 重排序完成` 达 17+ 次（与百炼控制台 17 次成功调用一一对应）——
+> **重排 API 实际生效，未降级 TF-IDF**。此前 bug-112 将主因定为"qwen3-reranker-4b 未开通→降级 TF-IDF"
+> 的判断不成立，特此更正。
+> 全量测试：`pytest tests/ -q` → **243 passed**（0 失败 0 错误）
+
+## 问题总览
+
+| 编号 | 问题描述 | 涉及文件 | 严重程度 | 修复状态 |
+|------|---------|---------|---------|---------|
+| bug-112 | **根因更正**：重排 API（qwen3-rerank）已生效；"前进觅美/巴博罗"排进前 5 的真实原因为①数据层面两品牌确有沙发相关产品（语义重排判定相关）②recommend prompt 无品类匹配约束。**prompt 增强**：相关性指令升级为按用户需求"品类匹配"筛选 | `src/rag_pipeline.py`、`src/project.py` | P1 | 已修复（prompt 层） |
+
+## 问题详情
+
+### [bug-112 更正 + 增强] 推荐混入不相关项的根因修正与品类匹配指令（P1）
+
+- **根因更正**：服务器重排实际使用 `qwen3-rerank`（API 生效，日志 17+ 次"重排序完成"），
+  非此前判断的"未开通→TF-IDF 降级"。真实原因：
+  1. **数据层**：前进觅美（模块化组合沙发）/巴博罗（软体家具线）在知识库文本中确有沙发相关内容，
+     语义重排判定与"买沙发"相关度足够，排进前 5 是模型判断结果；
+  2. **prompt 层**：recommend prompt 无品类匹配约束，LLM 拿到候选后硬凑推荐数。
+- **修复方案（仅 prompt 增强，其他层暂不操作）**：默认 `SYSTEM_PROMPT_RECOMMEND` 与内置
+  museum/enterprise recommend 模板第 3 条升级为：
+  > "**相关性优先**：只推荐与用户问题**直接相关**的项；若参考信息中标明了**品类/类型/类别**，
+  > 优先推荐与用户需求品类匹配的项，品类明显不匹配的**不要推荐**（宁缺毋滥，不要为凑满数量硬推）"
+  前提：知识库 chunk 文本含品类信息（如"主营品类/类别"），LLM 才能据此判断——jiabohui 展位数据
+  若缺品类字样，需在后续数据层补充（本次不操作）。
+- **风险分析**：低。仅 prompt 指令文本变化，`{context}` 占位符保留。
+- **测试验证**：`TestRecommendPromptRelevance` 新增 `test_prompts_include_category_matching`
+  （断言默认 + 内置模板含"品类"指令）；全量 `pytest tests/ -q` → **243 passed**。
+
+## 验证结果
+
+| 编号 | 验证方式 | 结果 |
+|------|---------|------|
+| bug-112 | `TestRecommendPromptRelevance`（4 项）通过；全量 243 passed；服务器日志确认重排 API 生效（非 TF-IDF） | ✅ 已修复（prompt 层） |
+
+## 服务器操作指引
+
+1. 同步 `src/rag_pipeline.py`、`src/project.py` 到服务器；
+2. jiabohui 项目使用自定义 prompts（服务器 `data/projects/jiabohui.json`），recommend 模板
+   需手动把第 3 条改为同款"品类匹配"指令（编号顺延）；
+3. 重启服务验证：`python app.py --project jiabohui --host 0.0.0.0 --port 7860`，
+   再问"我要买沙发，推荐几个展位给我"——LLM 应依据品类匹配过滤设计品牌展位。

@@ -1360,6 +1360,8 @@ class TestRecommendPromptRelevance:
 
     # 相关性过滤指令的关键词（prompt 中必须出现）
     _RELEVANCE_HINT = "不要推荐"
+    # 品类匹配指令的关键词（prompt 中必须出现，bug-112 增强）
+    _CATEGORY_HINT = "品类"
 
     def test_default_recommend_prompt_has_relevance_filter(self):
         """默认 SYSTEM_PROMPT_RECOMMEND 应包含相关性过滤指令"""
@@ -1378,6 +1380,14 @@ class TestRecommendPromptRelevance:
         for prompts in (MUSEUM_PROMPTS, ENTERPRISE_PROMPTS):
             assert self._RELEVANCE_HINT in prompts["recommend"]
             assert "{context}" in prompts["recommend"], "{context} 占位符应保留"
+
+    def test_prompts_include_category_matching(self):
+        """默认 + 内置 recommend prompt 应包含品类匹配指令（按用户需求品类筛选）"""
+        from src.rag_pipeline import SYSTEM_PROMPT_RECOMMEND
+        from src.project import MUSEUM_PROMPTS, ENTERPRISE_PROMPTS
+        assert self._CATEGORY_HINT in SYSTEM_PROMPT_RECOMMEND
+        for prompts in (MUSEUM_PROMPTS, ENTERPRISE_PROMPTS):
+            assert self._CATEGORY_HINT in prompts["recommend"]
 
 
 # =============================================================================
