@@ -58,7 +58,9 @@ class TestCosyVoiceSynthesize:
             captured["model"] = kwargs.get("model")
             captured["voice"] = kwargs.get("voice")
             captured["callback"] = kwargs.get("callback")
-            return _FakeSynth()
+            synth = _FakeSynth()
+            synth.callback = kwargs.get("callback")
+            return synth
 
         monkeypatch.setattr("dashscope.audio.tts_v2.SpeechSynthesizer", _fake_synthesizer)
         tts = CosyVoiceTTS(model="cosyvoice-v3-flash", voice="boy_voice")
@@ -69,7 +71,13 @@ class TestCosyVoiceSynthesize:
 
     def test_synthesize_error_raises(self, monkeypatch):
         from src.tts import CosyVoiceTTS
-        monkeypatch.setattr("dashscope.audio.tts_v2.SpeechSynthesizer", lambda **kw: _FakeSynth(mode="error"))
+
+        def _fake_synthesizer(**kwargs):
+            synth = _FakeSynth(mode="error")
+            synth.callback = kwargs.get("callback")
+            return synth
+
+        monkeypatch.setattr("dashscope.audio.tts_v2.SpeechSynthesizer", _fake_synthesizer)
         tts = CosyVoiceTTS()
         try:
             tts.synthesize_sentence("x")

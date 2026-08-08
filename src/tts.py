@@ -59,21 +59,18 @@ class CosyVoiceTTS:
 
     @staticmethod
     def split_sentences(text: str, max_chars: int = 1000) -> List[str]:
-        """按句子边界（。！？；!?;\n）分段，合并短句至不超过 max_chars；超长单句硬切。"""
+        """按句子边界（。！？；!?;\n）分段；超长单句硬切。
+
+        不做短句合并：句子级流式播放按句 yield，每句一个音频段。
+        """
         import re
 
         text = (text or "").strip()
         if not text:
             return []
         raw_parts = [p.strip() for p in re.split(r"(?<=[。！？；!?;\n])", text) if p.strip()]
-        sentences: List[str] = []
-        for p in raw_parts:
-            if sentences and len(sentences[-1]) + len(p) <= max_chars:
-                sentences[-1] += p
-            else:
-                sentences.append(p)
         result: List[str] = []
-        for s in sentences:
+        for s in raw_parts:
             while len(s) > max_chars:
                 result.append(s[:max_chars])
                 s = s[max_chars:]
@@ -81,11 +78,12 @@ class CosyVoiceTTS:
         return result
 
     def synthesize_sentence(self, text: str) -> bytes:
-        """合成单句，返回完整 wav 字节。60s 超时抛 TimeoutError；on_error 抛 RuntimeError。"""
+        """合成单句，返回完整 wav 字节。60s 超时抛 TimeoutError；on_error 抛 RuntimeError。
+
+        音色未配置的友好提示由调用方（app 层）在调用前检查 settings.tts_voice。
+        """
         from dashscope.audio.tts_v2 import SpeechSynthesizer
 
-        if not self.voice:
-            raise RuntimeError("TTS 音色未配置（TTS_VOICE 为空），请在 .env 设置")
         collector = _ChunkCollector()
         synth = SpeechSynthesizer(
             model=self.model,
