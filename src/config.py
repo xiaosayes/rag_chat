@@ -80,6 +80,23 @@ class Settings(BaseSettings):
         description="是否启用联网搜索总开关（enable_search，按需自动启用；需百炼账号开通搜索能力）",
     )
 
+    # ========== 讯飞语音识别 (ASR) ==========
+    xfyun_app_id: str = Field(default="", description="讯飞开放平台 APP_ID（语音听写 IAT）")
+    xfyun_api_key: str = Field(default="", description="讯飞开放平台 API_KEY")
+    xfyun_api_secret: str = Field(default="", description="讯飞开放平台 API_SECRET")
+    asr_language: str = Field(default="zh_cn", description="识别语言（zh_cn 普通话）")
+    asr_accent: str = Field(default="mandarin", description="口音（mandarin 普通话）")
+    asr_vad_eos: int = Field(default=1800, ge=0, description="静音检测时长 ms（VAD 自动结束转写）")
+    asr_max_duration: int = Field(default=30, ge=1, description="最长录音秒数兜底（超时强制结束）")
+    asr_sample_rate: int = Field(default=16000, description="IAT 采样率（16k PCM）")
+    asr_dict_dir: Path = Field(default=Path("data/voice"), description="多音字/热词配置目录")
+
+    # ========== 语音合成 (TTS) ==========
+    tts_enabled: bool = Field(default=True, description="语音播报总开关（默认开）")
+    tts_model: str = Field(default="cosyvoice-v3-flash", description="TTS 模型（一期；二期真人音色用 cosyvoice-v3.5-flash）")
+    tts_voice: str = Field(default="", description="TTS 音色（默认小男孩，真实 API 确认后填入）")
+    tts_chunk_chars: int = Field(default=1000, ge=100, description="TTS 长文本分段长度（字符）")
+
     # ========== 意图理解（L1 语义 + L2 LLM 兜底）==========
     # 分层意图分类：L0 规则（is_kb_related）→ L1 向量语义 → L2 LLM 兜底
     intent_semantic_enabled: bool = Field(

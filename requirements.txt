@@ -2,6 +2,10 @@
 # 阿里云百炼 SDK（DashScope）
 dashscope>=1.20.0
 
+# 语音功能（bug-121）
+websocket-client>=1.7.0     # 讯飞 IAT WebSocket（ASR）
+static-ffmpeg>=1.5.0        # gradio 6 原生 HLS 流式音频输出所需（自带 ffmpeg/ffprobe 二进制，跨平台）
+
 # 向量数据库
 qdrant-client>=1.9.0
 

@@ -1449,3 +1449,31 @@ class TestDocumentControlCharCleaning:
         for doc in docs:
             assert "\x01" not in doc.content
             assert "杂字符" not in doc.content  # 控件字符被移除，前后文本合并
+
+
+class TestVoiceConfigDefaults:
+    """语音功能配置默认值（bug-121）"""
+
+    def test_xfyun_keys_default_empty(self):
+        from src.config import Settings
+        s = Settings(_env_file=None)
+        assert s.xfyun_app_id == ""
+        assert s.xfyun_api_key == ""
+        assert s.xfyun_api_secret == ""
+
+    def test_asr_defaults(self):
+        from src.config import Settings
+        s = Settings(_env_file=None)
+        assert s.asr_language == "zh_cn"
+        assert s.asr_accent == "mandarin"
+        assert s.asr_vad_eos == 1800
+        assert s.asr_max_duration == 30
+        assert s.asr_sample_rate == 16000
+
+    def test_tts_defaults(self):
+        from src.config import Settings
+        s = Settings(_env_file=None)
+        assert s.tts_enabled is True
+        assert s.tts_model == "cosyvoice-v3-flash"
+        assert s.tts_voice == ""
+        assert s.tts_chunk_chars == 1000
