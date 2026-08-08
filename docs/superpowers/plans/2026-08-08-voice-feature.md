@@ -1470,6 +1470,10 @@ def tts_after_answer(chatbot_history, enabled):
     if not settings.dashscope_api_key:
         yield gr.update(), gr.update(), "未配置百炼 Key（DASHSCOPE_API_KEY），语音播报不可用"
         return
+    if not settings.tts_voice:
+        # Task 6 将音色守卫从 synthesize_sentence 移至调用层（计划内矛盾修正）
+        yield gr.update(), gr.update(), "未配置 TTS 音色（TTS_VOICE 为空），请在 .env 设置"
+        return
     text = _extract_last_answer_text(chatbot_history)
     if not text:
         yield gr.update(), gr.update(), ""
