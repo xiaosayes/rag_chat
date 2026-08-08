@@ -107,6 +107,15 @@ SYSTEM_PROMPT_CHITCHAT = """你是一位友好的知识助手。
 5. 如果用户问题与知识库无关，不需要检索
 """
 
+# 知识库相关问题但无确切信息时的委婉回复（需求1：不随意作答、不幻觉乱答）
+# 命中场景：FAQ 未命中 + 检索为空，或检索结果相关度低（LLM 确认知识库无法回答），
+# 且该问题非时效/开放类（不能联网代答）或 LLM_ENABLE_SEARCH 总开关关闭
+# → 直接返回此固定文案，不调用 LLM 自由发挥（避免幻觉）
+KB_NO_INFO_REPLY = (
+    "抱歉，关于这个问题我暂时没有找到确切的信息，相关资料还在补充完善中。"
+    "您可以稍后再来问我，或通过官方渠道获取准确答复。"
+)
+
 
 class RAGPipeline:
     """
@@ -944,6 +953,48 @@ class RAGPipeline:
             return self.project_cfg.get_prompt("chitchat")
         return SYSTEM_PROMPT_CHITCHAT
 
+    def _match_faq(self, question: str) -> Optional[str]:
+        """L0 正则规则 FAQ 匹配：命中直接返回预置答案（最快路径）
+
+        规则来自项目配置 faq 字段：
+        [{"patterns": ["关键词1", "关键词2"], "answer": "预置答案"}, ...]
+        匹配策略：问题包含任一 pattern（子串匹配）即命中，按规则顺序返回第一个命中。
+        未配置 faq 或未命中返回 None（走正常 RAG 流程）。
+        """
+        if not self.project_cfg or not self.project_cfg.faq:
+            return None
+        q = (question or "").strip()
+        if not q:
+            return None
+        for rule in self.project_cfg.faq:
+            patterns = rule.get("patterns") or []
+            answer = rule.get("answer") or ""
+            if not patterns or not answer:
+                continue
+            for p in patterns:
+                if p and p in q:
+                    return answer
+        return None
+
+    def _with_default_subject(self, system_prompt: str) -> str:
+        """在 system prompt 末尾注入默认主体说明（需求3）
+
+        用户问题未明确指定主体/存在歧义时，默认按项目配置的 default_subject 作答
+        （如"中国家博会（广州）"），避免无实体词问题（"一天推荐路线"等）被泛化
+        为旅游攻略或其他展会/城市。未配置 default_subject 的项目返回原 prompt
+        （保持代码泛化，不硬编码领域词）。
+        """
+        subject = (self.project_cfg.default_subject if self.project_cfg else "") or ""
+        if not subject:
+            return system_prompt
+        note = (
+            "\n\n【默认主体】用户问题若未明确指定主体（如只说\"展会\"\"路线\"\"推荐\""
+            "\"有哪些\"\"怎么逛\"），一律默认指【" + subject + "】。"
+            "回答路线、推荐、逛展、信息查询类问题时，必须围绕" + subject +
+            "作答，不要泛化为旅游攻略，也不要引用其他城市/展会/活动的内容。"
+        )
+        return system_prompt + note
+
     # bug-106 修复：按需联网搜索。时效性关键词命中或问题类型为开放/未知时自动联网，
     # 纯知识库事实问题（文物名称/年代/形态等）不联网，避免无效搜索费用。
     # bug-116 修复：补充"上映/首映/开播/什么时候/何时/几点"等时效问句词，
@@ -1098,6 +1149,21 @@ class RAGPipeline:
         timings = {}
         t_start = time.time()
 
+        # L0 正则规则 FAQ：常见问题直接返回预置答案（最快路径，不调用检索/LLM）
+        faq_answer = self._match_faq(question)
+        if faq_answer:
+            logger.info(f"FAQ 规则命中: {question[:40]}")
+            timings["total"] = round((time.time() - t_start) * 1000)
+            return {
+                "answer": faq_answer,
+                "query_type": "faq",
+                "retrieved_chunks": [],
+                "context": "",
+                "timing": timings,
+                "from_kb": False,
+                "search_enabled": False,
+            }
+
         # 构建消息列表（含对话历史）
         messages = []
         if conversation_history:
@@ -1132,7 +1198,7 @@ class RAGPipeline:
             )
             answer = self.llm.chat(
                 messages=messages,
-                system_prompt=self._select_chitchat_prompt(),
+                system_prompt=self._with_default_subject(self._select_chitchat_prompt()),
                 enable_search=enable_search,
             )
             timings["total"] = round((time.time() - t_start) * 1000)
@@ -1159,19 +1225,21 @@ class RAGPipeline:
         timings["retrieve"] = round((time.time() - t_retrieve) * 1000)
 
         if not retrieve_results:
-            # 检索为空时仍调用 LLM，让模型基于对话历史或通用知识尝试回答
-            logger.info(f"检索无结果，尝试 LLM 基于对话历史回答: {question[:60]}...")
-            t_llm = time.time()
-            # bug-106：按需联网搜索
-            enable_search = settings.llm_enable_search and self._should_enable_search(
-                query_type, question
-            )
-            answer = self.llm.chat(
-                messages=messages,
-                system_prompt=self._select_chitchat_prompt(),
-                enable_search=enable_search,
-            )
-            timings["llm"] = round((time.time() - t_llm) * 1000)
+            # 检索无结果（需求1确认）：一律尝试联网搜索作答（不论是否时效问题）；
+            # enable_search 仍跟随 LLM_ENABLE_SEARCH 总开关（费用控制），总开关关时委婉回复
+            logger.info(f"检索无结果: {question[:60]}...")
+            if settings.llm_enable_search:
+                t_llm = time.time()
+                answer = self.llm.chat(
+                    messages=messages,
+                    system_prompt=self._with_default_subject(self._select_chitchat_prompt()),
+                    enable_search=True,
+                )
+                timings["llm"] = round((time.time() - t_llm) * 1000)
+                search_enabled = True
+            else:
+                answer = KB_NO_INFO_REPLY
+                search_enabled = False
             timings["total"] = round((time.time() - t_start) * 1000)
             return {
                 "answer": answer,
@@ -1180,7 +1248,7 @@ class RAGPipeline:
                 "context": "",
                 "timing": timings,
                 "from_kb": True,
-                "search_enabled": enable_search,
+                "search_enabled": search_enabled,
             }
 
         # 3. 重排序：常规规则是结果数 > 3 才重排（节省时间）；
@@ -1205,20 +1273,25 @@ class RAGPipeline:
         # 注意：降级行为（不携带无关上下文）独立于 LLM_ENABLE_SEARCH 总开关——
         # 即使总开关关闭，时效性问题 + 知识库无相关内容时也不应被家博会上下文带偏；
         # enable_search 参数仍跟随总开关（用户可控制是否实际联网）。
-        if (
-            temporal
-            and not self._has_relevant_results(retrieve_results, reranked, question)
-        ):
-            logger.info(
-                f"时效性问题且知识库无相关内容，转 LLM 通用回答: {question[:60]}..."
-            )
-            t_llm = time.time()
-            answer = self.llm.chat(
-                messages=messages,
-                system_prompt=self._select_chitchat_prompt(),
-                enable_search=settings.llm_enable_search,
-            )
-            timings["llm"] = round((time.time() - t_llm) * 1000)
+        # 检索结果相关度低（知识库无确切信息）→ 不携带无关上下文（需求1）：
+        #   时效/开放类（可联网）→ 联网搜索作答；否则 → 委婉回复"待补充"，不幻觉乱答。
+        # 降级行为独立于 LLM_ENABLE_SEARCH 总开关（bug-116 补强）；
+        # enable_search 参数跟随总开关与问题类型。
+        if not self._has_relevant_results(retrieve_results, reranked, question):
+            logger.info(f"知识库无确切信息: {question[:60]}...")
+            needs_search = self._should_enable_search(query_type, question)
+            if settings.llm_enable_search and needs_search:
+                t_llm = time.time()
+                answer = self.llm.chat(
+                    messages=messages,
+                    system_prompt=self._with_default_subject(self._select_chitchat_prompt()),
+                    enable_search=True,
+                )
+                timings["llm"] = round((time.time() - t_llm) * 1000)
+                search_enabled = True
+            else:
+                answer = KB_NO_INFO_REPLY
+                search_enabled = False
             timings["total"] = round((time.time() - t_start) * 1000)
             return {
                 "answer": answer,
@@ -1227,14 +1300,14 @@ class RAGPipeline:
                 "context": "",
                 "timing": timings,
                 "from_kb": True,
-                "search_enabled": settings.llm_enable_search,
+                "search_enabled": search_enabled,
             }
 
         # 4. 构建上下文（自动裁剪）
         context = self._build_context(retrieve_results)
 
-        # 5. 选择 Prompt 模板
-        system_prompt = self._select_prompt(query_type, context)
+        # 5. 选择 Prompt 模板（需求3：无明确主体时注入默认主体说明）
+        system_prompt = self._with_default_subject(self._select_prompt(query_type, context))
 
         # 6. 调用 LLM
         t_llm = time.time()
@@ -1298,6 +1371,16 @@ class RAGPipeline:
         timings = {}
         t_start = time.time()
 
+        # L0 正则规则 FAQ：常见问题直接返回预置答案（最快路径，不调用检索/LLM）
+        faq_answer = self._match_faq(question)
+        if faq_answer:
+            logger.info(f"FAQ 规则命中: {question[:40]}")
+            timings["retrieval"] = round((time.time() - t_start) * 1000)
+            yield {"type": "meta", "from_kb": False, "query_type": "faq",
+                   "chunks": [], "timing": timings, "search_enabled": False}
+            yield faq_answer
+            return
+
         messages = []
         if conversation_history:
             recent_history = conversation_history[-8:]
@@ -1336,7 +1419,7 @@ class RAGPipeline:
                    "chunks": [], "timing": timings, "search_enabled": enable_search}
             yield from self.llm.chat_stream(
                 messages=messages,
-                system_prompt=self._select_chitchat_prompt(),
+                system_prompt=self._with_default_subject(self._select_chitchat_prompt()),
                 enable_search=enable_search,
             )
             return
@@ -1352,21 +1435,22 @@ class RAGPipeline:
         timings["retrieve"] = round((time.time() - t_retrieve) * 1000)
 
         if not retrieve_results:
-            # 检索为空时仍调用 LLM，让模型基于对话历史或通用知识尝试回答
-            logger.info(f"检索无结果，尝试 LLM 基于对话历史回答: {question[:60]}...")
-            # bug-045 修复：同闲聊分支，流式模式下该指标为检索阶段耗时
+            # 检索无结果（需求1确认）：一律尝试联网搜索作答（不论是否时效问题）；
+            # enable_search 仍跟随 LLM_ENABLE_SEARCH 总开关（费用控制），总开关关时委婉回复
+            logger.info(f"检索无结果: {question[:60]}...")
             timings["retrieval"] = round((time.time() - t_start) * 1000)
-            # bug-106：按需联网搜索
-            enable_search = settings.llm_enable_search and self._should_enable_search(
-                query_type, question
-            )
-            yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
-                   "chunks": [], "timing": timings, "search_enabled": enable_search}
-            yield from self.llm.chat_stream(
-                messages=messages,
-                system_prompt=self._select_chitchat_prompt(),
-                enable_search=enable_search,
-            )
+            if settings.llm_enable_search:
+                yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+                       "chunks": [], "timing": timings, "search_enabled": True}
+                yield from self.llm.chat_stream(
+                    messages=messages,
+                    system_prompt=self._with_default_subject(self._select_chitchat_prompt()),
+                    enable_search=True,
+                )
+            else:
+                yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+                       "chunks": [], "timing": timings, "search_enabled": False}
+                yield KB_NO_INFO_REPLY
             return
 
         t_rerank = time.time()
@@ -1380,30 +1464,29 @@ class RAGPipeline:
             reranked = True
         timings["rerank"] = round((time.time() - t_rerank) * 1000)
 
-        # bug-116 修复：时效性问题（需联网）但知识库检索结果相关度低
-        # （如问"电影什么时候上映"检索到家博会无关文档）→ 不携带无关上下文，
-        # 改走 LLM 通用回答，避免"以参考信息为准"导致的拒答（流式）。
-        # 降级行为独立于 LLM_ENABLE_SEARCH 总开关（见非流式注释）；
-        # enable_search 参数跟随总开关。
-        if (
-            temporal
-            and not self._has_relevant_results(retrieve_results, reranked, question)
-        ):
-            logger.info(
-                f"时效性问题且知识库无相关内容，转 LLM 通用回答: {question[:60]}..."
-            )
+        # 检索结果相关度低（知识库无确切信息）→ 不携带无关上下文（需求1）：
+        #   时效/开放类（可联网）→ 联网搜索作答；否则 → 委婉回复"待补充"，不幻觉乱答。
+        if not self._has_relevant_results(retrieve_results, reranked, question):
+            logger.info(f"知识库无确切信息: {question[:60]}...")
             timings["retrieval"] = round((time.time() - t_start) * 1000)
-            yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
-                   "chunks": [], "timing": timings, "search_enabled": settings.llm_enable_search}
-            yield from self.llm.chat_stream(
-                messages=messages,
-                system_prompt=self._select_chitchat_prompt(),
-                enable_search=settings.llm_enable_search,
-            )
+            needs_search = self._should_enable_search(query_type, question)
+            if settings.llm_enable_search and needs_search:
+                yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+                       "chunks": [], "timing": timings, "search_enabled": True}
+                yield from self.llm.chat_stream(
+                    messages=messages,
+                    system_prompt=self._with_default_subject(self._select_chitchat_prompt()),
+                    enable_search=True,
+                )
+            else:
+                yield {"type": "meta", "from_kb": True, "query_type": query_type.value,
+                       "chunks": [], "timing": timings, "search_enabled": False}
+                yield KB_NO_INFO_REPLY
             return
 
         context = self._build_context(retrieve_results)
-        system_prompt = self._select_prompt(query_type, context)
+        # 需求3：无明确主体时注入默认主体说明
+        system_prompt = self._with_default_subject(self._select_prompt(query_type, context))
 
         # 先 yield 检索结果的元数据（含计时信息）
         chunks_info = [

@@ -149,6 +149,11 @@ class ProjectConfig:
         self.description = config.get("description", "")
         self.collection_name = config.get("collection_name", f"project_{project_id}")
         self.prompts = config.get("prompts", {})
+        # L0 正则规则 FAQ：常见问题预置答案（命中直接返回，最快路径，不调用检索/LLM）
+        # 结构：[{"patterns": ["关键词1", "关键词2"], "answer": "预置答案"}, ...]
+        self.faq = config.get("faq", [])
+        # 默认主体：用户问题未明确指定主体时，默认按该主体作答（如"中国家博会（广州）"）
+        self.default_subject = config.get("default_subject", "")
         self.data_dir = settings.project_root / "data" / "raw" / project_id
         self.processed_dir = settings.project_root / "data" / "processed" / project_id
 

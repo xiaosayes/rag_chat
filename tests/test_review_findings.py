@@ -17,12 +17,13 @@ from src.chunking import Chunk, ChunkingPipeline, SmartChunking
 from src.config import settings
 from src.data_loader import DataLoader, Artifact
 from src.embeddings import BailianEmbedding
-from src.rag_pipeline import RAGPipeline, QueryType
+from src.rag_pipeline import RAGPipeline, QueryType, KB_NO_INFO_REPLY
 from src.retriever import BM25Retriever, HybridRetriever
 from src.reranker import BailianReranker
 from src.vector_store import VectorStore
 from src.cache import EmbeddingCache, LRUCache
 from src.utils import generate_id, save_json, load_json
+from src.project import ProjectConfig
 
 
 # =============================================================================
@@ -1383,10 +1384,13 @@ class TestTemporalQuerySearch:
 
         with patch.object(settings, "llm_enable_search", False):
             result = p.query("大唐妖探电影什么时候上映？")
-        # 总开关关：仍应降级（检索结果为空），但 enable_search 跟随总开关为 False
+        # 总开关关：仍应降级（不携带无关上下文），且不调用 LLM 自由发挥——
+        # 需求1：知识库无确切信息 → 直接委婉回复"待补充"，不幻觉乱答
         assert result["retrieved_chunks"] == [], "总开关关时也不应携带无关上下文"
         assert result["search_enabled"] is False
-        assert "你是一位友好的知识助手" in p.llm.chat.call_args.kwargs["system_prompt"]
+        assert result["answer"] == KB_NO_INFO_REPLY
+        # LLM 仅被调用 1 次（相关性确认），未被用于生成回答
+        assert p.llm.chat.call_count == 1
 
     def test_query_degraded_with_few_lowscore_chunks(self):
         """bug-116 补强2：检索结果 ≤3 条（不触发常规重排）且分数低 →
@@ -1591,3 +1595,369 @@ class TestTemporalQuerySearch:
             result = p.query("大唐妖探啥时上")
         assert result["retrieved_chunks"] == [], "语义层命中应降级"
         assert result["search_enabled"] is True
+
+# =============================================================================
+# 22. L0 正则规则 FAQ + 知识库无确切信息委婉回复 + 默认主体（用户需求 1/2/3）
+# =============================================================================
+class TestL0FAQAndNoInfoRouting:
+    """需求2：L0 正则规则 FAQ 命中直接返回预置答案（最快路径，不调用检索/LLM）；
+    需求1：知识库相关问题无确切信息 → 委婉回复\"待补充\"，不幻觉乱答；
+    需求3：无明确主体/歧义 → 默认按项目 default_subject 作答。"""
+
+    def _make_pipeline(self):
+        from src.rag_pipeline import RAGPipeline
+        p = RAGPipeline(local_mode=True)
+        p._ensure_knowledge_base = MagicMock()
+        # 避免语义联网判断依赖真实 embedding（测试环境无 API Key）
+        p._needs_search_semantic = MagicMock(return_value=False)
+        return p
+
+    def test_faq_match_returns_predefined_answer(self):
+        """FAQ 命中：非流式直接返回预置答案，不调用检索/LLM"""
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "faq": [{"patterns": ["开放时间", "几点开门"], "answer": "08:30-18:00"}]
+        })
+        p.hybrid_retriever.retrieve = MagicMock()
+        p.llm.chat = MagicMock(return_value="不应被调用")
+        result = p.query("请问展会开放时间是什么时候？")
+        assert result["answer"] == "08:30-18:00"
+        assert result["query_type"] == "faq"
+        assert result["retrieved_chunks"] == []
+        p.hybrid_retriever.retrieve.assert_not_called()
+        p.llm.chat.assert_not_called()
+
+    def test_faq_match_streaming(self):
+        """FAQ 命中：流式先 yield meta（query_type=faq）再 yield 答案"""
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "faq": [{"patterns": ["几点开门"], "answer": "09:30-18:00"}]
+        })
+        events = list(p.query_stream("展会几点开门？"))
+        assert events[0]["type"] == "meta"
+        assert events[0]["query_type"] == "faq"
+        assert events[-1] == "09:30-18:00"
+
+    def test_faq_miss_falls_through_to_normal_flow(self):
+        """FAQ 未命中：回落正常流程（走闲聊/检索）"""
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "faq": [{"patterns": ["开放时间"], "answer": "08:30-18:00"}]
+        })
+        p.is_kb_related = MagicMock(return_value=False)
+        p.llm.chat = MagicMock(return_value="闲聊回答")
+        result = p.query("你好呀")
+        assert result["query_type"] == "chitchat"
+        p.llm.chat.assert_called_once()
+
+    def test_empty_retrieval_non_temporal_returns_no_info(self):
+        """检索为空 + 非时效问题 → 委婉回复\"待补充\"，不调用 LLM 自由发挥"""
+        from src.rag_pipeline import QueryType
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="不应被调用")
+        result = p.query("司母戊鼎有多重")
+        assert result["answer"] == KB_NO_INFO_REPLY
+        assert result["from_kb"] is True
+        assert result["search_enabled"] is False
+        p.llm.chat.assert_not_called()
+
+    def test_empty_retrieval_temporal_searches_online(self):
+        """检索为空 + 时效问题 + 总开关开 → 联网搜索作答（需求2：检索无结果→联网）"""
+        from src.rag_pipeline import QueryType
+        from src.config import settings
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="电影《大唐妖探》定档 2026 年 8 月上映。")
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("大唐妖探电影什么时候上映？")
+        assert result["search_enabled"] is True
+        assert result["answer"] == "电影《大唐妖探》定档 2026 年 8 月上映。"
+        assert p.llm.chat.call_args.kwargs.get("enable_search") is True
+
+    def test_empty_retrieval_temporal_switch_off_returns_no_info(self):
+        """检索为空 + 时效问题 + 总开关关 → 委婉回复（不联网不乱答）"""
+        from src.rag_pipeline import QueryType
+        from src.config import settings
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="不应被调用")
+        with patch.object(settings, "llm_enable_search", False):
+            result = p.query("大唐妖探电影什么时候上映？")
+        assert result["answer"] == KB_NO_INFO_REPLY
+        assert result["search_enabled"] is False
+        p.llm.chat.assert_not_called()
+
+    def test_low_relevance_non_temporal_returns_no_info(self):
+        """非时效 + 检索结果相关度低（LLM 确认无关）→ 委婉回复，不携带无关上下文"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c9", artifact_id="a9", artifact_name="家博会手册",
+                           text="第55届中国家博会（广州）参展商手册", chunk_type="detail", metadata={})
+        low = [(fake_chunk, round(0.30 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low)
+        p.reranker.rerank = MagicMock(return_value=low)
+        # LLM 相关性确认返回 no（知识库无法回答）→ 委婉回复
+        p.llm.chat = MagicMock(side_effect=["no"])
+        result = p.query("司母戊鼎有多重")
+        assert result["answer"] == KB_NO_INFO_REPLY
+        assert result["retrieved_chunks"] == []
+        # 仅相关性确认调用 1 次，未用于生成回答
+        assert p.llm.chat.call_count == 1
+
+    def test_low_relevance_non_temporal_llm_confirms_relevant_keeps_rag(self):
+        """非时效 + 检索分低但 LLM 确认知识库能回答 → 仍走 RAG（不误伤）"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c10", artifact_id="a10", artifact_name="司母戊鼎",
+                           text="商代青铜重器", chunk_type="detail", metadata={})
+        low = [(fake_chunk, round(0.31 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low)
+        p.reranker.rerank = MagicMock(return_value=low)
+        # LLM 确认相关（不以 no 开头）→ 走 RAG
+        p.llm.chat = MagicMock(return_value="司母戊鼎是商代青铜器。")
+        result = p.query("司母戊鼎是什么时期的青铜器")
+        assert result["retrieved_chunks"] != []
+        assert result["answer"] == "司母戊鼎是商代青铜器。"
+
+    def test_default_subject_injected_when_configured(self):
+        """需求3：配置 default_subject 时，无明确主体问题注入默认主体说明"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "default_subject": "中国家博会（广州）",
+            "prompts": {"factual": "factual 模板 {context}"},
+        })
+        p._classify_intent = MagicMock(return_value=(QueryType.RECOMMENDATION, "test"))
+        fake_chunk = Chunk(id="c11", artifact_id="a11", artifact_name="参观地图",
+                           text="第55届中国家博会（广州）参观地图", chunk_type="detail", metadata={})
+        high = [(fake_chunk, 0.85)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=high)
+        p.reranker.rerank = MagicMock(return_value=high)
+        p.llm.chat = MagicMock(return_value="B区户外路线推荐")
+        result = p.query("一天推荐路线")
+        assert result["retrieved_chunks"] != []
+        assert "中国家博会（广州）" in p.llm.chat.call_args.kwargs["system_prompt"]
+
+    def test_default_subject_not_injected_when_not_configured(self):
+        """未配置 default_subject 的项目（保持代码泛化）→ prompt 不注入"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c12", artifact_id="a12", artifact_name="司母戊鼎",
+                           text="商代青铜重器", chunk_type="detail", metadata={})
+        high = [(fake_chunk, 0.85)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=high)
+        p.reranker.rerank = MagicMock(return_value=high)
+        p.llm.chat = MagicMock(return_value="商代青铜器。")
+        result = p.query("司母戊鼎是什么时期的")
+        assert result["retrieved_chunks"] != []
+# =============================================================================
+# 22. L0 正则规则 FAQ + 知识库无确切信息委婉回复 + 默认主体（用户需求 1/2/3）
+# =============================================================================
+class TestL0FAQAndNoInfoRouting:
+    """需求2：L0 正则规则 FAQ 命中直接返回预置答案（最快路径，不调用检索/LLM）；
+    需求1：知识库相关问题无确切信息 → 委婉回复"待补充"，不幻觉乱答；
+    需求3：无明确主体/歧义 → 默认按项目 default_subject 作答。"""
+
+    def _make_pipeline(self):
+        from src.rag_pipeline import RAGPipeline
+        p = RAGPipeline(local_mode=True)
+        p._ensure_knowledge_base = MagicMock()
+        # 避免语义联网判断依赖真实 embedding（测试环境无 API Key）
+        p._needs_search_semantic = MagicMock(return_value=False)
+        return p
+
+    def test_faq_match_returns_predefined_answer(self):
+        """FAQ 命中：非流式直接返回预置答案，不调用检索/LLM"""
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "faq": [{"patterns": ["开放时间", "几点开门"], "answer": "08:30-18:00"}]
+        })
+        p.hybrid_retriever.retrieve = MagicMock()
+        p.llm.chat = MagicMock(return_value="不应被调用")
+        result = p.query("请问展会开放时间是什么时候？")
+        assert result["answer"] == "08:30-18:00"
+        assert result["query_type"] == "faq"
+        assert result["retrieved_chunks"] == []
+        p.hybrid_retriever.retrieve.assert_not_called()
+        p.llm.chat.assert_not_called()
+
+    def test_faq_match_streaming(self):
+        """FAQ 命中：流式先 yield meta（query_type=faq）再 yield 答案"""
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "faq": [{"patterns": ["几点开门"], "answer": "09:30-18:00"}]
+        })
+        events = list(p.query_stream("展会几点开门？"))
+        assert events[0]["type"] == "meta"
+        assert events[0]["query_type"] == "faq"
+        assert events[-1] == "09:30-18:00"
+
+    def test_faq_miss_falls_through_to_normal_flow(self):
+        """FAQ 未命中：回落正常流程（走闲聊/检索）"""
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "faq": [{"patterns": ["开放时间"], "answer": "08:30-18:00"}]
+        })
+        p.is_kb_related = MagicMock(return_value=False)
+        p.llm.chat = MagicMock(return_value="闲聊回答")
+        result = p.query("你好呀")
+        assert result["query_type"] == "chitchat"
+        p.llm.chat.assert_called_once()
+
+    def test_empty_retrieval_non_temporal_switch_off_returns_no_info(self):
+        """检索为空 + 总开关关（费用控制）→ 委婉回复"待补充"，不调用 LLM 自由发挥"""
+        from src.rag_pipeline import QueryType
+        from src.config import settings
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="不应被调用")
+        with patch.object(settings, "llm_enable_search", False):
+            result = p.query("展位费能开发票吗")
+        assert result["answer"] == KB_NO_INFO_REPLY
+        assert result["from_kb"] is True
+        assert result["search_enabled"] is False
+        p.llm.chat.assert_not_called()
+
+    def test_empty_retrieval_non_temporal_searches_online(self):
+        """检索为空 + 总开关开 → 一律联网搜索作答（用户确认：不论是否时效问题）"""
+        from src.rag_pipeline import QueryType
+        from src.config import settings
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="展位费发票需以展会官方财务通道为准。")
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("展位费能开发票吗")
+        assert result["search_enabled"] is True
+        assert result["answer"] == "展位费发票需以展会官方财务通道为准。"
+        assert p.llm.chat.call_args.kwargs.get("enable_search") is True
+
+    def test_empty_retrieval_temporal_searches_online(self):
+        """检索为空 + 时效问题 + 总开关开 → 联网搜索作答（需求2：检索无结果→联网）"""
+        from src.rag_pipeline import QueryType
+        from src.config import settings
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="电影《大唐妖探》定档 2026 年 8 月上映。")
+        with patch.object(settings, "llm_enable_search", True):
+            result = p.query("大唐妖探电影什么时候上映？")
+        assert result["search_enabled"] is True
+        assert result["answer"] == "电影《大唐妖探》定档 2026 年 8 月上映。"
+        assert p.llm.chat.call_args.kwargs.get("enable_search") is True
+
+    def test_empty_retrieval_temporal_switch_off_returns_no_info(self):
+        """检索为空 + 时效问题 + 总开关关 → 委婉回复（不联网不乱答）"""
+        from src.rag_pipeline import QueryType
+        from src.config import settings
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        p.hybrid_retriever.retrieve = MagicMock(return_value=[])
+        p.llm.chat = MagicMock(return_value="不应被调用")
+        with patch.object(settings, "llm_enable_search", False):
+            result = p.query("大唐妖探电影什么时候上映？")
+        assert result["answer"] == KB_NO_INFO_REPLY
+        assert result["search_enabled"] is False
+        p.llm.chat.assert_not_called()
+
+    def test_low_relevance_non_temporal_returns_no_info(self):
+        """非时效 + 检索结果相关度低（LLM 确认无关）→ 委婉回复，不携带无关上下文"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c9", artifact_id="a9", artifact_name="家博会手册",
+                           text="第55届中国家博会（广州）参展商手册", chunk_type="detail", metadata={})
+        low = [(fake_chunk, round(0.30 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low)
+        p.reranker.rerank = MagicMock(return_value=low)
+        # LLM 相关性确认返回 no（知识库无法回答）→ 委婉回复
+        p.llm.chat = MagicMock(side_effect=["no"])
+        result = p.query("司母戊鼎有多重")
+        assert result["answer"] == KB_NO_INFO_REPLY
+        assert result["retrieved_chunks"] == []
+        # 仅相关性确认调用 1 次，未用于生成回答
+        assert p.llm.chat.call_count == 1
+
+    def test_low_relevance_non_temporal_llm_confirms_relevant_keeps_rag(self):
+        """非时效 + 检索分低但 LLM 确认知识库能回答 → 仍走 RAG（不误伤）"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c10", artifact_id="a10", artifact_name="司母戊鼎",
+                           text="商代青铜重器", chunk_type="detail", metadata={})
+        low = [(fake_chunk, round(0.31 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low)
+        p.reranker.rerank = MagicMock(return_value=low)
+        # LLM 确认相关（不以 no 开头）→ 走 RAG
+        p.llm.chat = MagicMock(return_value="司母戊鼎是商代青铜器。")
+        result = p.query("司母戊鼎是什么时期的青铜器")
+        assert result["retrieved_chunks"] != []
+        assert result["answer"] == "司母戊鼎是商代青铜器。"
+
+    def test_default_subject_injected_when_configured(self):
+        """需求3：配置 default_subject 时，无明确主体问题注入默认主体说明"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p.project_cfg = ProjectConfig("test", {
+            "default_subject": "中国家博会（广州）",
+            "prompts": {"factual": "factual 模板 {context}"},
+        })
+        p._classify_intent = MagicMock(return_value=(QueryType.RECOMMENDATION, "test"))
+        fake_chunk = Chunk(id="c11", artifact_id="a11", artifact_name="参观地图",
+                           text="第55届中国家博会（广州）参观地图", chunk_type="detail", metadata={})
+        high = [(fake_chunk, 0.85)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=high)
+        p.reranker.rerank = MagicMock(return_value=high)
+        p.llm.chat = MagicMock(return_value="B区户外路线推荐")
+        result = p.query("一天推荐路线")
+        assert result["retrieved_chunks"] != []
+        assert "中国家博会（广州）" in p.llm.chat.call_args.kwargs["system_prompt"]
+
+    def test_default_subject_not_injected_when_not_configured(self):
+        """未配置 default_subject 的项目（保持代码泛化）→ prompt 不注入"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c12", artifact_id="a12", artifact_name="司母戊鼎",
+                           text="商代青铜重器", chunk_type="detail", metadata={})
+        high = [(fake_chunk, 0.85)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=high)
+        p.reranker.rerank = MagicMock(return_value=high)
+        p.llm.chat = MagicMock(return_value="商代青铜器。")
+        result = p.query("司母戊鼎是什么时期的")
+        assert result["retrieved_chunks"] != []
+        assert "默认主体" not in p.llm.chat.call_args.kwargs["system_prompt"]
+
+    def test_stream_low_relevance_returns_no_info(self):
+        """流式：非时效 + 低相关（LLM 确认无关）→ meta + 委婉回复文案"""
+        from src.rag_pipeline import QueryType
+        from src.chunking import Chunk
+        p = self._make_pipeline()
+        p._classify_intent = MagicMock(return_value=(QueryType.FACTUAL, "test"))
+        fake_chunk = Chunk(id="c13", artifact_id="a13", artifact_name="家博会手册",
+                           text="第55届中国家博会（广州）参展商手册", chunk_type="detail", metadata={})
+        low = [(fake_chunk, round(0.30 - i * 0.02, 3)) for i in range(5)]
+        p.hybrid_retriever.retrieve = MagicMock(return_value=low)
+        p.reranker.rerank = MagicMock(return_value=low)
+        p.llm.chat = MagicMock(side_effect=["no"])
+        events = list(p.query_stream("司母戊鼎有多重"))
+        assert events[0]["type"] == "meta"
+        assert events[0]["chunks"] == []
+        assert events[0]["search_enabled"] is False
+        assert events[-1] == KB_NO_INFO_REPLY

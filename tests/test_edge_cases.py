@@ -1397,3 +1397,55 @@ class TestRecommendPromptRelevance:
 # =============================================================================
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short", "-x"])
+# =============================================================================
+# Bug 117-b: 文档加载时清洗控件字符（PDF 提取的 \x00-\x1f 等杂字符）
+# =============================================================================
+class TestDocumentControlCharCleaning:
+    """测试 DocumentLoader 加载时清洗控件字符（bug-117b）"""
+
+    def test_load_file_strips_control_chars(self, tmp_path):
+        """load_file 应去除文本中的 C0 控件字符（如 \x01），保留正常内容"""
+        from src.document_loader import DocumentLoader
+
+        content = "正常内容\x01还有\x02更多\x00文本"
+        doc_path = tmp_path / "test_ctrl.txt"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        loader = DocumentLoader(enable_ocr=False)
+        doc = loader.load_file(doc_path)
+        # 控件字符应被去除，正常文本保留
+        assert "\x01" not in doc.content
+        assert "\x02" not in doc.content
+        assert "\x00" not in doc.content
+        assert "正常内容" in doc.content
+        assert "还有" in doc.content and "更多" in doc.content and "文本" in doc.content
+
+    def test_load_file_keeps_newlines_and_tabs(self, tmp_path):
+        """清洗不应误伤 \n \t 等有意义空白"""
+        from src.document_loader import DocumentLoader
+
+        content = "第一行\n第二行\t带制表符"
+        doc_path = tmp_path / "test_nl.txt"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        loader = DocumentLoader(enable_ocr=False)
+        doc = loader.load_file(doc_path)
+        assert "第一行\n第二行" in doc.content
+        assert "\t" in doc.content
+
+    def test_load_directory_applies_cleaning(self, tmp_path):
+        """load_directory 加载的所有文档同样清洗"""
+        from src.document_loader import DocumentLoader
+
+        for name in ["a.txt", "b.md"]:
+            with open(tmp_path / name, "w", encoding="utf-8") as f:
+                f.write(f"{name}内容\x01杂字符")
+
+        loader = DocumentLoader(enable_ocr=False)
+        docs = loader.load_directory(tmp_path)
+        assert len(docs) == 2
+        for doc in docs:
+            assert "\x01" not in doc.content
+            assert "杂字符" not in doc.content  # 控件字符被移除，前后文本合并
