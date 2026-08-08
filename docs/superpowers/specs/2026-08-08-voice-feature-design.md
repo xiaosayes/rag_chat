@@ -51,9 +51,13 @@
 │     │  最终答案
 │     ▼  clean_text_for_tts(answer)（复用 bug-115）
 ├─ [TTS 播报]  respond().then() 链 ──► src/tts.py（cosyvoice-v3-flash 流式合成）
-│     │  音频块缓冲 → wav 文件
+│     │  按句合成 → 每句 yield wav
+│     │  ▼
+│     │  gr.Audio(streaming=True)（gradio 6 原生 HLS 流式输出，
+│     │  static-ffmpeg 提供 ffmpeg/ffprobe）→ 第一句就绪即播放，逐句无缝续播
+│     │  + 完整 wav 静态副本（可重播）
 │     ▼
-│   gr.Audio(autoplay=True) 播放（重播=点击播放器）
+│   自动播放 + 手动重播
 │
 └─ [配置]  src/config.py（.env 新增讯飞 3 键 + TTS 配置）
            data/voice/asr_dict.json（全局多音字/热词）
@@ -65,11 +69,11 @@
 | 文件 | 职责 |
 |------|------|
 | `src/asr.py`（新增） | 讯飞 IAT WebSocket 客户端：鉴权、帧组装、热词/纠错、VAD/超时、流式部分结果 |
-| `src/tts.py`（新增） | CosyVoice TTS 封装：流式合成回调、长文本分段、wav 输出、二期音色管理工具 |
+| `src/tts.py`（新增） | CosyVoice TTS 封装：流式合成回调、按句分段、句子级流式播放（gradio HLS）、重播缓存、二期音色管理工具 |
 | `src/config.py`（修改） | 新增讯飞 3 键 + ASR/TTS 配置项 |
 | `app.py`（修改） | ASR 录音组件 + 流式转写处理器 + TTS 播报 `.then()` 链 + 开关 |
 | `data/voice/*.json`（新增） | 多音字/热词配置（全局 + 项目覆盖） |
-| `requirements.txt`（修改） | 新增 `websocket-client>=1.7.0`（本地已装 1.7.0） |
+| `requirements.txt`（修改） | 新增 `websocket-client>=1.7.0`（本地已装）+ `static-ffmpeg`（gradio 原生 HLS 流式播放所需，自带跨平台 ffmpeg/ffprobe 二进制） |
 | `.env` / `.env.example`（修改） | 新增讯飞密钥与 TTS 配置注释 |
 | `README.md` / `DEPLOY_GUIDE.md`（修改） | 语音功能使用说明、多音字/热词指南、二期音色定制指引 |
 
@@ -155,12 +159,17 @@ CosyVoiceTTS(model="cosyvoice-v3-flash", voice="<小男孩音色 id>", format="w
 
 **核心方法**：
 
-- `synthesize_stream(text, on_chunk: Callable[[bytes], None])` — 流式合成：内部 `SpeechSynthesizer(model=..., voice=..., callback=_ChunkCallback)` + `synth.call(text)`；回调 `on_data(bytes)` 逐块转发给 `on_chunk`；`on_complete`/`on_error` 结束/抛错
-- `synthesize_to_file(text, path) -> Path` — 流式合成 + 缓冲写入 wav（供播放端单次交付）
-- `split_text(text) -> list[str]` — 长文本按句子边界（`。！？；\n` 等）分段，每段 ≤ `chunk_chars`（cosyvoice 单次合成长度上限防御）
+- `synthesize_sentence(text) -> bytes` — 单句合成：`SpeechSynthesizer(model=..., voice=..., callback=_ChunkCallback)` + `synth.call(text)`；`on_data(bytes)` 收集完整 wav 字节返回；`on_error` 抛错
+- `split_sentences(text) -> list[str]` — 按句子边界（`。！？；\n` 等）分段，每段 ≤ `chunk_chars`（cosyvoice 单次合成长度上限防御）
+- `synthesize_stream(text, on_sentence: Callable[[str, bytes], None])` — **句子级流式合成**：逐句 `synthesize_sentence`，每句完成后立即回调 `on_sentence(句文本, wav字节)`，调用方（app.py 生成器）随即 yield 给前端播放——**第一句合成完即开播，边合成边续播**
 - `ensure_voice(...)` / `list_custom_voices()` — 包装 `VoiceEnrollmentService`（二期音色管理，v1 提供只读工具）
 
-**播放策略（v1）**：合成流式（SDK 回调收集）→ 缓冲完整 wav → `gr.Audio(autoplay=True)` 单次交付播放。"边生成边播"需自定义前端组件（方案 A，用户已否决），v1 不做；cosyvoice-v3-flash 合成远快于实时，额外延迟约 1-2s，可接受。预留 `min_buffer_bytes` 参数便于二期升级。
+**播放机制（v1，已实测验证）**：
+
+- 依赖 `static-ffmpeg`（pip 包，自带 ffmpeg/ffprobe 二进制，跨平台，无需系统安装）：启动时 `static_ffmpeg.add_paths()` 将二进制加入 PATH（必须在 import pydub/gradio 前）
+- 前端：`gr.Audio(streaming=True)` 输出组件 + 生成器逐句 yield wav 字节 → gradio 6 原生 `stream_output` 将每块转 AAC(adts) 追加到 HLS playlist（m3u8）→ 浏览器 hls.js 无缝播放（已实测 wav→AAC 转换通过）
+- 重播：全部句子合成完成后，将完整 wav 写入缓存文件，设置到静态 `gr.Audio`（重播组件），点击即可重播（零再合成开销）
+- 若 static-ffmpeg 缺失/转换失败：降级为"全部合成完一次性播放"（v1 旧策略），不阻塞回答展示
 
 ### 4.3 `src/config.py` 新增配置
 
@@ -220,25 +229,31 @@ TTS_VOICE=<小男孩音色 id>
 
 **已知限制（Gradio 原生）**：`gr.Audio` 的麦克风录音无法由服务端编程停止（VAD 只能自动结束**转写**，浏览器录音需用户再次点击麦克风停止）。妥协方案：VAD 触发后转写已完成并填入输入框，此后到达的音频块被忽略（用户可边改文字边点麦克风停止录音）。若需"录音也随 VAD 自动停止"，需轻量 JS 桥接（方案 2 录音层，约 30-50 行，二期可加）——**本设计 v1 采用无 JS 妥协方案**，评审时确认。
 
-**TTS 播报**：
+**TTS 播报（句子级流式播放）**：
 
 ```
-respond(...) 调用链追加:
-  respond(...).then(tts_after_answer, inputs=[chatbot, tts_enabled_checkbox],
-                    outputs=[tts_audio, tts_status])
-  tts_after_answer(chatbot_history, enabled):
+UI:
+  tts_audio = gr.Audio(streaming=True, label="语音播报")   —— 自动流式播放（HLS）
+  tts_replay = gr.Audio(label="重播")                        —— 完整 wav 静态副本，可点击重播
+  tts_enabled = gr.Checkbox(label="语音播报", value=True)    —— 默认开启（用户确认）
+  tts_status = gr.Markdown("")                              —— 状态（播报中/已播报/失败）
+
+事件链（respond 完成后触发）:
+  respond(...).then(tts_after_answer, inputs=[chatbot, tts_enabled],
+                    outputs=[tts_audio, tts_replay, tts_status])
+  tts_after_answer(chatbot_history, enabled) 为生成器:
     - enabled=False / 无最后一条 assistant / 无 DASHSCOPE_API_KEY → 跳过
     - 提取最后一条 assistant 正文（按 **[检索来源]** 截断，复用 _convert_history 逻辑）
     - text = clean_text_for_tts(正文)（复用 bug-115）
-    - synthesize_to_file(text) → gr.Audio(value=wav, autoplay=True) → 状态"已播报"
-    - 异常 → 状态显示错误，不影响回答内容
-
-UI:
-  tts_audio = gr.Audio(label="语音播报", autoplay=True)   —— 最新回答音频，可点击重播
-  tts_enabled = gr.Checkbox(label="语音播报", value=True) —— 默认开启（用户确认）
+    - 按句切分 → 逐句 synthesize_sentence → 每句 yield wav 字节
+        → gradio HLS 流式播放（第一句就绪即播，无缝续播）
+    - 全部完成 → 完整 wav 写入缓存 → 设置 tts_replay 静态值 → 状态"已播报"
+    - 异常 → 状态显示错误，回答内容不受影响
 ```
 
 **流式/非流式均适用**：TTS 在 `respond().then()` 中触发，只对**最终完整答案**合成一次（不做逐 token 合成）。
+
+**已知限制（Gradio 原生，已确认）**：VAD 只能自动结束转写，浏览器录音需用户再点一次麦克风停止（无 JS 方案，v1 接受）。
 
 ---
 
@@ -276,10 +291,11 @@ answer_question 产出最终答案（流式聚合完成 / 非流式返回）
 |------|------|
 | 未配置 XFYUN 三键 | ASR 组件禁用 + 状态栏提示"未配置讯飞密钥，请在 .env 补充 XFYUN_APP_ID/API_KEY/API_SECRET" |
 | 未配置 DASHSCOPE_API_KEY | TTS 跳过 + 状态"未配置百炼 Key，语音播报不可用"（回答照常显示） |
+| static-ffmpeg 缺失/转换失败 | 降级"全部合成完一次性播放"（v1 旧策略），不阻塞回答展示；日志告警 |
 | 讯飞连接失败/鉴权失败 | 每次录音独立重试 1 次（新建连接），仍失败 → 状态栏报错，不崩溃 |
 | 讯飞 API 返回错误码 | 日志记录 code/message，状态栏提示，本次录音丢弃 |
-| TTS 合成失败 | 记录日志，状态"语音播报失败"，回答内容不受影响 |
-| 长答案超 TTS 单次上限 | `split_text()` 分段顺序合成，逐段拼接 |
+| TTS 单句合成失败 | 跳过该句（或停止并提示），已播放部分不受影响；回答内容不受影响 |
+| 长答案超 TTS 单次上限 | `split_sentences()` 分段，逐句合成 |
 | 录音中用户切换项目 | 结束当前 ASR 会话（finish + close），丢弃未完成文本 |
 
 ---
@@ -314,10 +330,11 @@ answer_question 产出最终答案（流式聚合完成 / 非流式返回）
 | Gradio 6 `gr.Audio(streaming=True)` 流式输入行为未实测 | 中 | 实现第一步做 spike 验证；不可用则降级方案 2（JS MediaRecorder 录音层，后端 ASR 模块不变） |
 | cosyvoice-v3-flash 小男孩音色 id 未知 | 中 | 真实 API 列表/试听确认；`TTS_VOICE` 配置项可随时更换 |
 | 讯飞热词拼音标注格式（`词(拼音)`）需验证 | 低 | 真实 Key 冒烟一次；不生效则纠错映射兜底（功能不缺失） |
-| VAD 无法自动停止浏览器录音（Gradio 原生限制） | 低 | v1 妥协（转写自动结束、录音由用户点停）；二期可加轻量 JS |
+| VAD 无法自动停止浏览器录音（Gradio 原生限制） | 低 | v1 妥协（转写自动结束、录音由用户点停，已确认）；二期可加轻量 JS |
+| gradio 6 原生 HLS 流式输出依赖 static-ffmpeg | 低 | 已实测 wav→AAC 转换通过；pip 包自带二进制跨平台；缺失时降级一次性播放 |
 | 音频格式/采样率转换错误 | 低 | `_to_pcm16k` 单测覆盖（wav 48k/16k、纯 PCM） |
-| 长答案 TTS 超限 | 低 | `split_text()` 分段 |
-| 依赖增加（websocket-client） | 低 | 已装 1.7.0；加入 requirements.txt 即可 |
+| 长答案 TTS 超限 | 低 | `split_sentences()` 分段 |
+| 依赖增加（websocket-client、static-ffmpeg） | 低 | websocket-client 已装 1.7.0；static-ffmpeg 已实测可用 |
 
 ---
 
@@ -380,9 +397,9 @@ answer_question 产出最终答案（流式聚合完成 / 非流式返回）
 ## 11. 验收标准
 
 1. 前端点击麦克风开始说话 → 实时流式出字 → 静音 ~2s（或 30s 兜底）自动结束转写 → 文字填入输入框 → 用户改写 → 点发送，问题正常进入问答流程
-2. 回答完成后自动语音播报（默认开），可点击重播；关闭"语音播报"开关后不再播报
+2. 回答完成后**第一句话合成完即开始自动播报**，后续句子无缝续播（默认开启）；可点击"重播"再次播放；关闭"语音播报"开关后不再播报
 3. 多音字/热词配置（全局 + 项目覆盖）生效，README 提供使用说明
-4. 未配置密钥时功能优雅降级（ASR 禁用提示 / TTS 跳过），不影响问答主流程
+4. 未配置密钥/ffmpeg 缺失时功能优雅降级（ASR 禁用提示 / TTS 跳过或降级一次性播放），不影响问答主流程
 5. 全量测试通过（新增 ASR/TTS/UI 测试全部通过，既有 397 passed 不回退）
 6. README / .env.example 记录全部新配置项与二期音色定制指引
 
@@ -392,8 +409,8 @@ answer_question 产出最终答案（流式聚合完成 / 非流式返回）
 
 1. `src/config.py` + `.env.example`（配置先行）
 2. `src/asr.py`（鉴权/帧/热词/纠错/会话，mock 测试）
-3. Gradio 6 Audio streaming spike（验证流式输入行为，决定是否需 JS 降级）
-4. `src/tts.py`（流式合成/分段/写 wav，mock 测试）
+3. Gradio 6 Audio streaming spike（验证流式输入行为）——**输出流式（HLS）已实测通过（static-ffmpeg）**
+4. `src/tts.py`（句子级流式合成/分段/重播缓存，mock 测试）
 5. `app.py` 集成（ASR 流式处理器 + `.then()` TTS 链 + UI）
-6. 真实 API 冒烟（音色确认、热词拼音验证）
+6. 真实 API 冒烟（音色确认、热词拼音验证、ASR 端到端）
 7. 文档（README 使用指南 + 二期指引）+ 全量回归
