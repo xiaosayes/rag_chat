@@ -521,7 +521,7 @@ def load_dict(project_id: str = "", dict_dir: Optional[Path] = None) -> dict:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pytest tests/test_asr.py -v`
-Expected: 全部通过（TestAudioBootstrap 2 + 本任务 13）
+Expected: 全部通过（TestAudioBootstrap 2 + 本任务 14）
 
 - [ ] **Step 5: Commit**
 
@@ -1072,7 +1072,7 @@ class CosyVoiceTTS:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pytest tests/test_tts.py -v`
-Expected: 10 passed
+Expected: 9 passed
 
 - [ ] **Step 5: 语法检查 + Commit**
 
@@ -1531,7 +1531,7 @@ Expected: 全部通过（TestAsrStreamChunk 3 + TestAsrStreamStop 2 + TestTtsAft
 - [ ] **Step 6: 既有回归 + 语法检查**
 
 Run: `python -m py_compile app.py` 且 `pytest tests/ -q`
-Expected: 397 passed + 新增 9 项 = 406 passed（2 项已知失败 bug-117b 除外）
+Expected: 397 passed + 新增 45 项 = 442 passed（2 项已知失败 bug-117b 除外）
 
 - [ ] **Step 7: Commit**
 
@@ -1616,7 +1616,7 @@ EOF
 
 > 需求：Web UI 新增语音说话（讯飞 IAT 流式 ASR）与答案语音播报（百炼 CosyVoice）。
 > 设计文档：docs/superpowers/specs/2026-08-08-voice-feature-design.md（已批准）
-> 全量测试：`pytest tests/ -q` → **406 passed**（原 397 + 新增 9，0 失败 0 错误）
+> 全量测试：`pytest tests/ -q` → **442 passed**（原 397 + 新增 45，0 失败 0 错误）
 
 ## 问题总览
 
@@ -1634,13 +1634,13 @@ EOF
 
 | 编号 | 验证方式 | 结果 |
 |------|---------|------|
-| bug-121 | 新增 `tests/test_asr.py` / `tests/test_tts.py` / `tests/test_voice_ui.py` 共 19 项全部通过；真实 API 冒烟（音色确认/热词拼音/ASR 端到端）；全量 406 passed | ✅ 已实现 |
+| bug-121 | 新增 `tests/test_asr.py` / `tests/test_tts.py` / `tests/test_voice_ui.py` 共 45 项全部通过；真实 API 冒烟（音色确认/热词拼音/ASR 端到端）；全量 442 passed | ✅ 已实现 |
 ```
 
 - [ ] **Step 5: 全量回归**
 
 Run: `pytest tests/ -q`
-Expected: 406 passed（2 项已知失败 bug-117b 除外）
+Expected: 442 passed（2 项已知失败 bug-117b 除外）
 
 - [ ] **Step 6: Commit**
 
