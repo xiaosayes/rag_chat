@@ -9,12 +9,14 @@ import base64
 import hashlib
 import hmac
 import json
+import threading
 import time
 import urllib.parse
 from email.utils import formatdate
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import websocket
 from loguru import logger
 
 IAT_HOST = "iat-api.xfyun.cn"
@@ -151,9 +153,6 @@ class IflytekASR:
 
     def connect(self) -> None:
         """建立 WebSocket 连接并启动接收线程。"""
-        import websocket
-        import threading
-
         url = self.build_auth_url(self.api_key, self.api_secret)
         self._ws = websocket.create_connection(url, timeout=10)
         threading.Thread(target=self._recv_loop, daemon=True).start()
