@@ -13,11 +13,18 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 语音功能（bug-121）：gradio 导入即触发 pydub 导入，pydub 在 import 时缓存
+# ffmpeg 查找结果，因此 HLS 流式音频输出所需的 ffmpeg 引导必须在 gradio 之前执行
+from src.audio_bootstrap import ensure_ffmpeg
+
+ensure_ffmpeg()
+
 import gradio as gr
 from loguru import logger
 
 from src.config import settings
 from src.utils import setup_logger, clean_text_for_tts
+from src.asr import IflytekASR, _to_pcm16k, load_dict
 from src.rag_pipeline import RAGPipeline
 from src.project import project_manager
 
@@ -169,6 +176,68 @@ def init_pipeline(project_id: str = ""):
         except Exception as e:
             logger.warning(f"预热失败: {e}")
     return new_pipeline
+
+
+# ========== 语音功能（bug-121）：ASR 语音输入 ==========
+
+def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
+    """Gradio Audio stream 事件：音频块送达 → 送入讯飞 ASR → 实时更新输入框。
+
+    差分发送：兼容"增量块"与"累计录音"两种前端语义（只发送新增的 PCM 长度）。
+    VAD（服务端静默判定）或最长录音超时 → 自动结束转写，填入最终文本。
+    """
+    if not (settings.xfyun_app_id and settings.xfyun_api_key and settings.xfyun_api_secret):
+        yield state, gr.update(), gr.update(value="未配置讯飞密钥（XFYUN_APP_ID/API_KEY/API_SECRET），请在 .env 补充")
+        return
+    if not audio_filepath:
+        yield state, gr.update(), gr.update(value="")
+        return
+    if state is None:
+        cfg = load_dict(project_id, settings.asr_dict_dir)
+        state = {
+            "session": IflytekASR(
+                settings.xfyun_app_id, settings.xfyun_api_key, settings.xfyun_api_secret,
+                language=settings.asr_language, accent=settings.asr_accent,
+                vad_eos_ms=settings.asr_vad_eos, hotwords=cfg["hotwords"],
+                corrections=cfg["corrections"],
+            ),
+            "sent_bytes": 0,
+            "started": time.time(),
+            "finalized": False,
+        }
+    asr = state["session"]
+    if state["finalized"]:
+        # VAD 已结束转写：忽略后续音频块（等待用户停止录音）
+        yield state, gr.update(), gr.update(value="已识别完成，可修改后发送")
+        return
+    try:
+        raw = Path(audio_filepath).read_bytes()
+        pcm = _to_pcm16k(raw, settings.asr_sample_rate)
+        new_pcm = pcm[state["sent_bytes"]:]
+        if new_pcm:
+            asr.feed(new_pcm)
+            state["sent_bytes"] += len(new_pcm)
+    except Exception as e:
+        logger.warning(f"ASR 音频处理失败: {e}")
+        yield state, gr.update(), gr.update(value=f"识别出错: {e}")
+        return
+    text = asr.correct(asr.current_text)
+    if asr.is_final() or time.time() - state["started"] > settings.asr_max_duration:
+        final = asr.finish()
+        state["finalized"] = True
+        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+        return
+    yield state, gr.update(value=text) if text else gr.update(), gr.update(value="识别中…")
+
+
+def asr_stream_stop(state, project_id: str = ""):
+    """Gradio Audio stop 事件：用户停止录音 → 结束 ASR 会话，返回最终文本。"""
+    if state and state.get("session"):
+        final = state["session"].finish()
+        state = None
+        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+    else:
+        yield state, gr.update(), gr.update(value="")
 
 
 def _convert_history(history: list) -> list:
@@ -436,6 +505,17 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                     submit_btn = gr.Button("发送", variant="primary", scale=1, min_width=80)
 
                 with gr.Row():
+                    voice_audio = gr.Audio(
+                        sources=["microphone"],
+                        streaming=True,
+                        type="filepath",
+                        label="语音输入（点击开始说话，说完静默约 2 秒自动转写）",
+                        scale=6,
+                    )
+                    voice_status = gr.Markdown("", scale=4)
+                    asr_state = gr.State(None)
+
+                with gr.Row():
                     use_stream = gr.Checkbox(label="流式输出", value=default_stream)
                     clear_btn = gr.Button("清空对话", variant="secondary", size="sm", scale=1)
 
@@ -490,6 +570,19 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
         submit_btn.click(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
         clear_btn.click(clear_history, None, [chatbot, chunks_json])
         status_btn.click(get_system_status, [project_dropdown], [status_text])
+
+        # 语音功能（bug-121）：ASR 流式输入
+        voice_audio.stream(
+            asr_stream_chunk,
+            [voice_audio, asr_state, project_dropdown],
+            [asr_state, msg, voice_status],
+            stream_every=0.5,
+        )
+        voice_audio.stop(
+            asr_stream_stop,
+            [asr_state, project_dropdown],
+            [asr_state, msg, voice_status],
+        )
 
         for btn in example_btns:
             btn.click(respond, [btn, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
