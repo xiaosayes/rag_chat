@@ -25,6 +25,7 @@ from loguru import logger
 from src.config import settings
 from src.utils import setup_logger, clean_text_for_tts
 from src.asr import IflytekASR, _to_pcm16k, load_dict
+from src.tts import CosyVoiceTTS
 from src.rag_pipeline import RAGPipeline
 from src.project import project_manager
 
@@ -238,6 +239,71 @@ def asr_stream_stop(state, project_id: str = ""):
         yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
     else:
         yield state, gr.update(), gr.update(value="")
+
+
+# ========== 语音功能（bug-121）：TTS 语音播报（句子级流式） ==========
+
+def _extract_last_answer_text(history) -> str:
+    """取对话历史最后一条 assistant 正文（去掉 **[检索来源]** 及之后内容）。"""
+    if not history:
+        return ""
+    last = history[-1]
+    if isinstance(last, dict):
+        content = _extract_text(last.get("content", ""))
+    elif isinstance(last, (list, tuple)) and len(last) > 1:
+        content = _extract_text(last[1])
+    else:
+        content = ""
+    marker = "**[检索来源]**"
+    idx = content.find(marker)
+    if idx >= 0:
+        content = content[:idx].rstrip()
+        # 去掉正文末尾残留的分隔符（\n---\n 或 \n\n---\n\n），与 _convert_history 一致
+        if content.endswith("---"):
+            content = content[:-3].rstrip()
+    return content.strip()
+
+
+def _write_replay_wav(chunks):
+    """合并各句 wav 字节写入重播缓存文件，返回 Path。"""
+    cache_dir = settings.project_root / "data" / "processed" / "tts_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / "last_answer.wav"
+    CosyVoiceTTS.write_wav(b"".join(chunks), path)
+    return path
+
+
+def tts_after_answer(chatbot_history, enabled):
+    """respond 完成后触发：句子级流式播报 + 完整重播副本（生成器）。"""
+    if not enabled:
+        yield gr.update(), gr.update(), gr.update(value="")
+        return
+    if not settings.dashscope_api_key:
+        yield gr.update(), gr.update(), gr.update(value="未配置百炼 Key（DASHSCOPE_API_KEY），语音播报不可用")
+        return
+    if not settings.tts_voice:
+        # Task 6 将音色守卫从 synthesize_sentence 移至调用层（计划内矛盾修正）
+        yield gr.update(), gr.update(), gr.update(value="未配置 TTS 音色（TTS_VOICE 为空），请在 .env 设置")
+        return
+    text = _extract_last_answer_text(chatbot_history)
+    if not text:
+        yield gr.update(), gr.update(), gr.update(value="")
+        return
+    text = clean_text_for_tts(text)
+    tts = CosyVoiceTTS(model=settings.tts_model, voice=settings.tts_voice,
+                       chunk_chars=settings.tts_chunk_chars)
+    chunks = []
+    try:
+        for sentence in tts.split_sentences(text, settings.tts_chunk_chars):
+            wav = tts.synthesize_sentence(sentence)
+            chunks.append(wav)
+            # 句子级流式：每句合成完立即 yield（gradio HLS 无缝续播）
+            yield gr.update(value=wav), gr.update(), gr.update(value="播报中…")
+        replay_path = _write_replay_wav(chunks)
+        yield gr.update(), gr.update(value=str(replay_path)), gr.update(value="已播报（可点击重播）")
+    except Exception as e:
+        logger.warning(f"TTS 播报失败: {e}")
+        yield gr.update(), gr.update(), gr.update(value=f"语音播报失败: {e}")
 
 
 def _convert_history(history: list) -> list:
@@ -536,6 +602,12 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                     "- [低] = 低相关度"
                 )
 
+                gr.Markdown("### 语音播报")
+                tts_audio = gr.Audio(streaming=True, label="播报（自动播放）", visible=True)
+                tts_replay = gr.Audio(label="重播", visible=True)
+                tts_enabled = gr.Checkbox(label="语音播报", value=True)
+                tts_status = gr.Markdown("")
+
         # 示例问题
         with gr.Row():
             gr.Markdown("**试试这些问题:**")
@@ -566,8 +638,8 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
             for result in answer_question(message, chat_history, stream, project):
                 yield "", result[0], result[1]
 
-        msg.submit(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
-        submit_btn.click(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
+        msg_submit = msg.submit(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
+        submit_click = submit_btn.click(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
         clear_btn.click(clear_history, None, [chatbot, chunks_json])
         status_btn.click(get_system_status, [project_dropdown], [status_text])
 
@@ -586,6 +658,13 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
 
         for btn in example_btns:
             btn.click(respond, [btn, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
+
+        # 语音功能（bug-121）：回答完成后自动语音播报（句子级流式播放 + 重播）
+        # 示例按钮不触发播报（避免误播），用户可后续按需加入
+        for dep in (msg_submit, submit_click):
+            dep.then(tts_after_answer,
+                     inputs=[chatbot, tts_enabled],
+                     outputs=[tts_audio, tts_replay, tts_status])
 
         demo.load(get_system_status, [project_dropdown], [status_text])
 

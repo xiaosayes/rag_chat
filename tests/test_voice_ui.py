@@ -107,3 +107,74 @@ class TestAsrStreamStop:
         from app import asr_stream_stop
         results = list(asr_stream_stop(None, ""))
         assert results[0][0] is None
+
+class _FakeTTS:
+    """模拟 CosyVoiceTTS：每句返回固定 wav。"""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def split_sentences(self, text, max_chars=1000):
+        from src.tts import CosyVoiceTTS
+        return CosyVoiceTTS.split_sentences(text, max_chars)
+
+    def synthesize_sentence(self, text):
+        return b"fake-wav"
+
+
+class TestTtsAfterAnswer:
+    def test_disabled_skips(self):
+        from app import tts_after_answer
+        results = list(tts_after_answer([], False))
+        assert len(results) == 1
+
+    def test_no_key_shows_message(self, monkeypatch):
+        from app import tts_after_answer
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.dashscope_api_key = ""  # 强制空 Key（Settings 仍会读 os.environ，测试需确定性）
+        monkeypatch.setattr("app.settings", s)
+        results = list(tts_after_answer([{"role": "user", "content": "q"},
+                                         {"role": "assistant", "content": "答"}], True))
+        assert "未配置百炼 Key" in results[0][2]["value"]
+
+    def test_no_voice_shows_message(self, monkeypatch):
+        from app import tts_after_answer
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.dashscope_api_key = "dummy"
+        monkeypatch.setattr("app.settings", s)
+        results = list(tts_after_answer([{"role": "user", "content": "q"},
+                                         {"role": "assistant", "content": "答"}], True))
+        assert "未配置 TTS 音色" in results[0][2]["value"]
+
+    def test_streams_sentences_and_replay(self, monkeypatch, tmp_path):
+        from app import tts_after_answer
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.dashscope_api_key = "dummy"
+        s.tts_chunk_chars = 1000
+        s.tts_model = "cosyvoice-v3-flash"
+        s.tts_voice = "v"
+        monkeypatch.setattr("app.settings", s)
+        monkeypatch.setattr("app.CosyVoiceTTS", _FakeTTS)
+        monkeypatch.setattr("app._write_replay_wav",
+                           lambda chunks: tmp_path / "replay.wav")
+        history = [{"role": "user", "content": "q"},
+                   {"role": "assistant", "content": "第一句。第二句！\n\n---\n\n**[检索来源]**\n1. **司母戊鼎**"}]
+        results = list(tts_after_answer(history, True))
+        # 每句一个流式 yield + 最终重播 yield
+        assert len(results) == 3
+        assert results[0][0]["value"] == b"fake-wav"  # 句子 1 流式
+        assert results[1][0]["value"] == b"fake-wav"  # 句子 2 流式
+        assert "已播报" in results[2][2]["value"]
+        assert results[2][1]["value"] == str(tmp_path / "replay.wav")
+
+    def test_extract_last_answer_strips_sources(self):
+        from app import _extract_last_answer_text
+        history = [{"role": "user", "content": "q"},
+                   {"role": "assistant", "content": "正文内容\n\n---\n\n**[检索来源]**\n1. **x**"}]
+        assert _extract_last_answer_text(history) == "正文内容"
