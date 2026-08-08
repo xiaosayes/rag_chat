@@ -1,4 +1,5 @@
 """语音功能测试（bug-121）：src/asr.py 与音频环境引导"""
+import time
 import base64
 import json
 
@@ -113,3 +114,70 @@ class TestIflytekDict:
         from src.asr import load_dict
         d = load_dict("", tmp_path)
         assert d == {"hotwords": [], "corrections": {}}
+
+
+class _FakeWS:
+    """模拟 websocket 连接：记录发送的帧，按队列返回响应。"""
+
+    def __init__(self, responses=None):
+        self.sent = []
+        self.responses = list(responses or [])
+        self.closed = False
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def recv(self):
+        if self.responses:
+            return self.responses.pop(0)
+        time.sleep(0.05)
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+class TestIflytekSession:
+    def test_feed_sends_frame_and_returns_partial(self):
+        from src.asr import IflytekASR
+        fake = _FakeWS()
+        asr = IflytekASR("a", "k", "s", _ws=fake)
+        asr._handle_message(json.dumps({"code": 0, "data": {"result": {"pgs": "apd", "ws": [{"cw": [{"w": "你好"}]}]}}}))
+        text = asr.feed(b"\x00\x01")
+        assert text == "你好"
+        first = json.loads(fake.sent[0])
+        assert first["data"]["status"] == 0  # 首帧
+        text2 = asr.feed(b"\x00\x01")
+        assert json.loads(fake.sent[1])["data"]["status"] == 1  # 中间帧
+
+    def test_finish_sends_last_frame_and_returns_final(self):
+        from src.asr import IflytekASR
+        fake = _FakeWS()
+        asr = IflytekASR("a", "k", "s", _ws=fake)
+        asr._handle_message(json.dumps({"code": 0, "data": {"result": {"pgs": "apd", "ls": True, "ws": [{"cw": [{"w": "你好"}]}]}}}))
+        final = asr.finish()
+        assert final == "你好"
+        assert json.loads(fake.sent[-1])["data"]["status"] == 2  # 尾帧
+        assert fake.closed is True
+
+    def test_finish_idempotent(self):
+        from src.asr import IflytekASR
+        asr = IflytekASR("a", "k", "s")
+        assert asr.finish() == ""  # 未连接不崩溃
+        assert asr.finish() == ""
+
+    def test_connect_builds_url_and_starts_thread(self, monkeypatch):
+        from src.asr import IflytekASR
+        fake = _FakeWS()
+        monkeypatch.setattr("src.asr.websocket.create_connection", lambda url, timeout: fake)
+        started = {}
+
+        def _fake_thread(*a, **kw):
+            started["daemon"] = kw.get("daemon")
+            return type("T", (), {"start": lambda self: None})()
+
+        monkeypatch.setattr("src.asr.threading.Thread", _fake_thread)
+        asr = IflytekASR("a", "k", "s")
+        asr.connect()
+        assert started["daemon"] is True
+        assert fake.closed is False

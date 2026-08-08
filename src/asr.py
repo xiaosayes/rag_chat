@@ -147,6 +147,57 @@ class IflytekASR:
         return self._final_text
 
 
+    # ---------- 会话 ----------
+
+    def connect(self) -> None:
+        """建立 WebSocket 连接并启动接收线程。"""
+        import websocket
+        import threading
+
+        url = self.build_auth_url(self.api_key, self.api_secret)
+        self._ws = websocket.create_connection(url, timeout=10)
+        threading.Thread(target=self._recv_loop, daemon=True).start()
+
+    def _recv_loop(self) -> None:
+        while self._ws is not None:
+            try:
+                data = self._ws.recv()
+            except Exception:
+                break  # 连接关闭/异常
+            if data is None:
+                continue
+            self._handle_message(data)
+
+    def feed(self, pcm: bytes) -> str:
+        """发送一帧 16k PCM 音频，返回当前累积识别文本（含部分结果）。"""
+        if self._ws is None:
+            self.connect()
+        status = 0 if self._first_frame else 1
+        self._ws.send(self._build_frame(pcm, status))
+        self._first_frame = False
+        return self._current_text
+
+    def finish(self) -> str:
+        """发送尾帧并等待最终结果，关闭连接。幂等。"""
+        if self._ws is None:
+            return self._final_text or self._current_text
+        self._ws.send(self._build_frame(b"", 2))
+        deadline = time.time() + 10
+        while not self._is_final and time.time() < deadline:
+            time.sleep(0.05)
+        result = self._final_text or self._current_text
+        self.close()
+        return result
+
+    def close(self) -> None:
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+
 def load_dict(project_id: str = "", dict_dir: Optional[Path] = None) -> dict:
     """加载多音字/热词配置：全局 asr_dict.json + 项目 {project_id}_asr_dict.json（项目覆盖）。
 
