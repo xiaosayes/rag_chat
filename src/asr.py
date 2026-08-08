@@ -224,3 +224,55 @@ def load_dict(project_id: str = "", dict_dir: Optional[Path] = None) -> dict:
     seen = set()
     merged["hotwords"] = [w for w in merged["hotwords"] if not (w in seen or seen.add(w))]
     return merged
+
+def _to_pcm16k(audio_bytes: bytes, target_rate: int = 16000) -> bytes:
+    """将 wav 容器或裸 PCM 归一化为 16kHz 单声道 16bit little-endian PCM。
+
+    - wav 容器 → wave 模块剥离头部取 PCM
+    - 多声道 → 取平均合成单声道
+    - 采样率 ≠ target → numpy 线性重采样
+    """
+    import io
+    import wave
+
+    if audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+        with wave.open(io.BytesIO(audio_bytes), "rb") as w:
+            rate = w.getframerate()
+            channels = w.getnchannels()
+            width = w.getsampwidth()
+            pcm = w.readframes(w.getnframes())
+    else:
+        pcm, rate, channels, width = audio_bytes, target_rate, 1, 2
+
+    if width != 2:
+        raise ValueError(f"不支持的位深: {width * 8}bit（仅支持 16bit PCM）")
+
+    if channels > 1:
+        pcm = _downmix_to_mono(pcm, channels)
+
+    if rate != target_rate:
+        pcm = _resample_pcm(pcm, rate, target_rate)
+
+    return pcm
+
+
+def _downmix_to_mono(pcm: bytes, channels: int) -> bytes:
+    import array
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    mono = array.array("h")
+    for i in range(0, len(samples) - channels + 1, channels):
+        mono.append(sum(samples[i:i + channels]) // channels)
+    return mono.tobytes()
+
+
+def _resample_pcm(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
+    import numpy as np
+
+    data = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    src_len = len(data)
+    dst_len = int(src_len * dst_rate / src_rate)
+    x_old = np.linspace(0, 1, num=src_len, endpoint=False)
+    x_new = np.linspace(0, 1, num=dst_len, endpoint=False)
+    resampled = np.interp(x_new, x_old, data).astype(np.int16)
+    return resampled.tobytes()

@@ -181,3 +181,48 @@ class TestIflytekSession:
         asr.connect()
         assert started["daemon"] is True
         assert fake.closed is False
+
+
+def _make_wav(sample_rate: int, channels: int, frames: int = 16000) -> bytes:
+    """生成指定采样率/声道数的正弦波 wav。"""
+    import io
+    import math
+    import struct
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        data = b""
+        for i in range(frames):
+            v = int(4000 * math.sin(2 * math.pi * 440 * i / sample_rate))
+            data += struct.pack("<h", v) * channels
+        w.writeframes(data)
+    return buf.getvalue()
+
+
+class TestPcmPreprocess:
+    def test_wav_16k_mono_extracts_pcm(self):
+        from src.asr import _to_pcm16k
+        wav = _make_wav(16000, 1)
+        pcm = _to_pcm16k(wav, 16000)
+        assert len(pcm) == 16000 * 2  # 1s * 16bit
+
+    def test_wav_48k_resampled_to_16k(self):
+        from src.asr import _to_pcm16k
+        wav = _make_wav(48000, 1, frames=48000)
+        pcm = _to_pcm16k(wav, 16000)
+        assert len(pcm) == 16000 * 2  # 48k 1s → 16k 1s
+
+    def test_stereo_downmixed_to_mono(self):
+        from src.asr import _to_pcm16k
+        wav = _make_wav(16000, 2, frames=16000)
+        pcm = _to_pcm16k(wav, 16000)
+        assert len(pcm) == 16000 * 2
+
+    def test_raw_pcm_passthrough(self):
+        from src.asr import _to_pcm16k
+        raw = b"\x00\x01" * 100
+        assert _to_pcm16k(raw, 16000) == raw
