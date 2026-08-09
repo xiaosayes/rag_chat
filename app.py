@@ -680,6 +680,10 @@ def main():
     # bug-054 修复：补全 README/DEPLOY_GUIDE 中已声明但缺失的 --project / --no-stream 参数
     parser.add_argument("--project", type=str, default="", help="项目 ID（如 museum、enterprise）")
     parser.add_argument("--no-stream", action="store_true", help="禁用流式输出")
+    # bug-122：语音输入（麦克风）需 HTTPS 安全上下文，原生 SSL 启动：
+    # python app.py --ssl-keyfile certs/key.pem --ssl-certfile certs/cert.pem
+    parser.add_argument("--ssl-keyfile", type=str, default="", help="HTTPS 证书私钥路径（语音输入需 HTTPS，两个 ssl 参数需同时提供）")
+    parser.add_argument("--ssl-certfile", type=str, default="", help="HTTPS 证书路径（语音输入需 HTTPS，两个 ssl 参数需同时提供）")
     args = parser.parse_args()
 
     setup_logger(settings.log_level)
@@ -701,6 +705,14 @@ def main():
         # bug-098：Gradio 6.0 将 theme/css 移到 launch()
         launch_kwargs["theme"] = _UI_THEME
         launch_kwargs["css"] = _UI_CSS
+    if args.ssl_keyfile or args.ssl_certfile:
+        # bug-122：浏览器 getUserMedia 要求安全上下文（HTTPS/localhost），
+        # 自签或正式证书均可；仅提供其一则报错提示
+        if args.ssl_keyfile and args.ssl_certfile:
+            launch_kwargs["ssl_keyfile"] = args.ssl_keyfile
+            launch_kwargs["ssl_certfile"] = args.ssl_certfile
+        else:
+            raise SystemExit("--ssl-keyfile 与 --ssl-certfile 必须同时提供")
     demo.launch(**launch_kwargs)
 
 

@@ -3446,6 +3446,7 @@ LLM 从联网结果得知"8月22日上映"，计算"距今天(8月7日)几天"�
 | bug-119 | 无 L0 正则 FAQ 层：常见问题（开放时间/时间/地址）走完整检索+LLM 链路，慢且易错 | `src/rag_pipeline.py`、`src/project.py`、`data/projects/jiabohui.json` | P1 | 已修复 |
 | bug-120 | 无明确主体问题（"一天推荐路线"）被泛化为旅游攻略（评测 501/502/516 根因） | `src/rag_pipeline.py`、`src/project.py`、`data/projects/jiabohui.json` | P1 | 已修复 |
 | bug-121 | 新增语音功能：讯飞 ASR 流式转写 + 百炼 CosyVoice TTS 句子级流式播报 + Web UI 集成（含真实 API 冒烟修正 3 项） | `src/asr.py`、`src/tts.py`、`src/audio_bootstrap.py`、`src/config.py`、`app.py`、`tests/test_asr.py`、`tests/test_tts.py`、`tests/test_voice_ui.py` | 新功能 | 已实现 |
+| bug-122 | 服务器部署后浏览器无法访问麦克风："无法访问媒体设备"（http 非安全上下文，getUserMedia 被浏览器拒绝） | `app.py` | P1 | 已修复 |
 
 ## 问题详情
 
@@ -3564,3 +3565,32 @@ LLM 从联网结果得知"8月22日上映"，计算"距今天(8月7日)几天"�
   - gradio `Audio(streaming=True)` 依赖 ffmpeg（static-ffmpeg 已内置，`add_paths()` 必须在 `import gradio` 前调用）
   - 浏览器录音停止需用户再点一次麦克风（Gradio 原生限制，无自定义 JS，已确认接受）
 - **验证**：新增 `tests/test_asr.py`（23 项）、`tests/test_tts.py`（9 项）、`tests/test_voice_ui.py`（10 项）；全量 **442 passed**（2 项已知失败 bug-117b 除外）；真实 API 冒烟：TTS 合成 ✅、ASR 识别 ✅（见上）
+
+### [bug-122] 服务器部署后浏览器无法访问麦克风（语音输入点录制报错）
+
+- **现象**：服务器启动服务后，本地浏览器点击「语音输入」录制按钮报错："无法访问媒体设备。请检查您是否在安全来源或本地主机上运行（或者您已经通过 ssl_verify 传递了有效的 SSL 证书），并且您已经允许浏览器访问您的设备"。
+- **根因**：浏览器安全上下文（secure context）限制——`getUserMedia`（麦克风）**仅允许 HTTPS 页面或 localhost** 使用；通过 `http://服务器IP:7860` 访问属于非安全来源，浏览器直接拒绝。gradio 提示文案中的 `ssl_verify` 只是提示语，不是开关。
+- **影响范围**：所有语音输入（ASR）功能在非安全上下文不可用；文本问答不受影响。
+- **修复方案**：`app.py` 增加 `--ssl-keyfile` / `--ssl-certfile` 启动参数（gradio 6 `launch()` 原生支持，两者必须同时提供），使服务可直接以 HTTPS 启动；另提供生产级 Nginx + Let's Encrypt 反代方案（见下）。
+- **服务器操作**（自签证书，最快落地）：
+  ```bash
+  mkdir -p certs && cd certs
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 \
+    -subj "/CN=服务器IP或域名" -addext "subjectAltName=IP:服务器IP,DNS:域名"
+  cd ..
+  python app.py --project museum --host 0.0.0.0 \
+    --ssl-keyfile certs/key.pem --ssl-certfile certs/cert.pem
+  ```
+  浏览器访问 `https://服务器IP:7860`，首次提示"不安全"→ 高级 → 继续前往（自签证书信任后麦克风可用）。
+- **生产方案（有域名）**：Nginx 443 反代 + Let's Encrypt：
+  ```bash
+  sudo apt install -y nginx certbot python3-certbot-nginx
+  sudo certbot --nginx -d your-domain.com   # 自动签发证书并改写 Nginx 配置
+  ```
+  反代配置要点：`listen 443 ssl;` + `ssl_certificate`/`ssl_certificate_key` + WebSocket 升级头（`Upgrade`/`Connection`，语音为长连接需保留）。
+- **调试备选**：Chrome 打开 `chrome://flags/#unsafely-treat-insecure-origin-as-secure`，把 `http://服务器IP:7860` 加入允许列表（仅调试，不推荐生产）。
+- **风险**：
+  - 自签证书浏览器首次需手动信任（对内部用户可接受；正式对外建议 Let's Encrypt）
+  - 语音 WebSocket/流式长连接需 Nginx 正确配置 `proxy_read_timeout`/`Upgrade` 头
+  - 服务器防火墙需放行 443（或自签直连的 7860）
+- **验证**：`python app.py --help` 显示新增参数；`--ssl-*` 二者缺一会明确报错退出；全量回归 **442 passed**（2 项已知失败 bug-117b 除外）；浏览器 HTTPS 实测麦克风可用（需用户浏览器验证）。
