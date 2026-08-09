@@ -33,6 +33,14 @@
 ### v1.3.5-pre (开发中) — 新增功能与修复（第九/十/十一轮）
 
 #### 新增功能
+- **语音输入与播报（bug-121）**：Web UI 新增语音功能——
+  - **ASR 语音输入**：讯飞语音听写（IAT v2）WebSocket 流式转写，点击麦克风开始说话，**边说边出字**；
+    说完静默约 2 秒自动结束（服务端 VAD），最长 30 秒兜底；识别文字自动填入输入框，可改写后发送；
+    支持自定义多音字/热词（`data/voice/asr_dict.json` 全局 + `data/voice/{project_id}_asr_dict.json` 项目覆盖）
+  - **TTS 语音播报**：阿里百炼 `cosyvoice-v3-flash`（默认音色 `longanyang` 小男孩），**句子级流式播放**
+    （第一句合成完即播，逐句无缝续播），回答完成后自动播报 + 可点击重播；
+    “语音播报”开关默认开启；二期可定制真人音色（`cosyvoice-v3.5-flash` 音色库，见使用指南）
+  - 密钥与模型均走 `.env` 配置（`XFYUN_APP_ID/XFYUN_API_KEY/XFYUN_API_SECRET`、`DASHSCOPE_API_KEY`、`TTS_MODEL/TTS_VOICE`）
 - **Excel (.xlsx) 数据源支持（bug-109）**：表格型 Excel 可直接作为知识库数据源（每行一条记录、多 sheet 支持、任意列可检索）；docs 模式自动识别 + json 模式 `--json-path xxx.xlsx` 双入口；openpyxl 可选依赖
 - **Embedding 模型升级 text-embedding-v3 → v4（bug-110）**：默认模型升级，API 契约/批大小上限/维度不变；`.env.example` 顺带修正键名拼写 `EMBEDDING_MOD_NAME` → `EMBEDDING_MODEL_NAME`
 - **意图理解分层分类（bug-113）**：用户意图理解从纯规则升级为工业界主流的**分层级联**——
@@ -445,6 +453,80 @@ python scripts/run_qa.py -q "青铜器和瓷器有什么区别" --project museum
 python scripts/run_qa.py -q "你好，你是谁"
 python scripts/run_qa.py -q "今天天气怎么样"
 ```
+
+---
+
+## 语音功能使用指南（bug-121）
+
+### 1. 配置
+
+在 `.env` 中配置（模板见 `.env.example`）：
+
+```bash
+# 讯飞语音听写（ASR）
+XFYUN_APP_ID=your-app-id
+XFYUN_API_KEY=your-api-key
+XFYUN_API_SECRET=your-api-secret
+
+# 阿里云百炼 TTS（复用 DASHSCOPE_API_KEY）
+DASHSCOPE_API_KEY=sk-xxx
+TTS_ENABLED=true
+TTS_MODEL=cosyvoice-v3-flash
+TTS_VOICE=longanyang          # 默认小男孩音色
+TTS_CHUNK_CHARS=1000
+```
+
+### 2. 语音输入（ASR）
+
+1. 点击「语音输入」面板的麦克风图标，开始说话
+2. 识别文字**边说边出字**，实时填入输入框
+3. 说完**停顿约 2 秒**自动结束转写（服务端 VAD 静音检测）；最长 30 秒兜底
+4. 识别结果可**直接改写**，再点「发送」
+
+> 说明：静默自动结束只作用于转写；浏览器录音需**再点一次麦克风**手动停止（Gradio 原生限制，无需自定义 JS）。
+
+### 3. 多音字 / 热词配置
+
+配置文件：`data/voice/asr_dict.json`（全局）与 `data/voice/{project_id}_asr_dict.json`（项目覆盖，优先级更高）：
+
+```json
+{
+  "hotwords": ["司母戊鼎", "清明上河图"],
+  "corrections": {"四亩无顶": "司母戊鼎"}
+}
+```
+
+- **hotwords**：热词列表。⚠️ 一期暂不生效——讯飞 IAT v2 接口不支持 `business.hotwords` 参数
+  （实测拒绝 10163），需走「热词表 vocabulary_id」接口，二期接入；配置格式与拼音标注
+  `词(拼音)` 已预留
+- **corrections**：纠错映射（识别结果后处理替换，**立即生效**）。键为可能识别错的写法，值为正确写法，
+  多字符键优先匹配
+
+### 4. 语音播报（TTS）
+
+- 回答完成后**自动播报**（句子级流式：第一句合成完即播，逐句无缝续播）；「语音播报」开关默认开启，可关闭
+- 播报完成后「重播」区出现完整音频，可点击重听
+- 更换音色：修改 `.env` 的 `TTS_VOICE`（`cosyvoice-v3-flash` 可用音色以百炼控制台为准）
+
+### 5. 二期：定制真人音色（cosyvoice-v3.5-flash）
+
+1. 在百炼控制台开通 `cosyvoice-v3.5-flash` 模型
+2. 用音色定制接口注册音色（需提供一段真人录音样本，如 10-60 秒清晰人声 wav）：
+
+```python
+from dashscope.audio.tts_v2 import VoiceEnrollmentService
+service = VoiceEnrollmentService()
+result = service.create_voice(
+    target_model="cosyvoice-v3.5-flash",
+    prefix="my_voice",
+    url="https://your-host/sample.wav",  # 录音样本公网可访问地址
+    language_hints=["zh"],
+)
+# 返回 voice_id，如 my_voice_xxx
+```
+
+3. `.env` 切换：`TTS_MODEL=cosyvoice-v3.5-flash`、`TTS_VOICE=<voice_id>`，重启即可
+4. 音色管理：`list_voices` / `query_voice` / `update_voice` / `delete_voice`（见 dashscope SDK 文档）
 
 ---
 

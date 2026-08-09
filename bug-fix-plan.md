@@ -3445,6 +3445,7 @@ LLM 从联网结果得知"8月22日上映"，计算"距今天(8月7日)几天"�
 | bug-118 | 检索为空/相关度低时仍让 LLM 基于通用知识自由发挥 → 幻觉乱答（评测 111/314/404 稳定幻觉根因之一） | `src/rag_pipeline.py` | P0 | 已修复 |
 | bug-119 | 无 L0 正则 FAQ 层：常见问题（开放时间/时间/地址）走完整检索+LLM 链路，慢且易错 | `src/rag_pipeline.py`、`src/project.py`、`data/projects/jiabohui.json` | P1 | 已修复 |
 | bug-120 | 无明确主体问题（"一天推荐路线"）被泛化为旅游攻略（评测 501/502/516 根因） | `src/rag_pipeline.py`、`src/project.py`、`data/projects/jiabohui.json` | P1 | 已修复 |
+| bug-121 | 新增语音功能：讯飞 ASR 流式转写 + 百炼 CosyVoice TTS 句子级流式播报 + Web UI 集成（含真实 API 冒烟修正 3 项） | `src/asr.py`、`src/tts.py`、`src/audio_bootstrap.py`、`src/config.py`、`app.py`、`tests/test_asr.py`、`tests/test_tts.py`、`tests/test_voice_ui.py` | 新功能 | 已实现 |
 
 ## 问题详情
 
@@ -3545,3 +3546,21 @@ LLM 从联网结果得知"8月22日上映"，计算"距今天(8月7日)几天"�
 
 与第十三轮一致：同步 `src/rag_pipeline.py`、`src/project.py`、`data/projects/jiabohui.json`，
 重启服务。服务器需确认 `.env` 已配置 `LLM_ENABLE_SEARCH=true`（否则空检索仍委婉回复）。
+
+### [bug-121] 语音功能：讯飞 ASR + 百炼 CosyVoice TTS（需求新增）
+
+- **需求**：Web UI 增加语音能力——
+  1. **ASR**：讯飞语音听写（IAT v2）WebSocket 流式转写，点击开始 → 边说边出字 → 静音（~1.5-2s，服务端 VAD）自动结束 + 30s 兜底 → 文字填入输入框可改写 → 发送；支持全局 + 项目级多音字/热词配置（`data/voice/asr_dict.json` + `data/voice/{project_id}_asr_dict.json`）
+  2. **TTS**：百炼 `cosyvoice-v3-flash`（默认 `longanyang` 小男孩，真实 API 确认），**句子级流式播放**（第一句合成完即播、逐句无缝续播），回答后自动播报 + 可重播，默认开启；二期 `cosyvoice-v3.5-flash` 真人音色定制（操作指引已写入 README）
+- **根因 / 实现**：新增 `src/asr.py`（HMAC-SHA256 鉴权、wpgs 动态修正解析、纠错后处理、`_to_pcm16k` wav→16k PCM 重采样）、`src/tts.py`（`CosyVoiceTTS` 合成/分句/流式）、`src/audio_bootstrap.py`（static-ffmpeg 引导，gradio 流式 HLS 转 AAC 依赖）、`src/config.py` 新增 xfyun_*/asr_*/tts_* 配置；`app.py` 接入 `gr.Audio(streaming=True)` 输入 + `gr.Audio(streaming=True)` 播报输出（respond().then 链，示例按钮不触发播报）
+- **真实 API 冒烟发现的 3 项修正**（mock 测试无法覆盖，均已实测验证）：
+  1. **`SpeechSynthesizer.format` 必须传 `AudioFormat` 枚举**（`WAV_24000HZ_MONO_16BIT`）而非字符串 `"wav"`（`'str' object has no attribute 'sample_rate'`）→ `src/tts.py` 默认值改为枚举
+  2. **`SpeechSynthesizer.__init__` 不接受 `sample_rate` 关键字**（dashscope 1.25.1，采样率由 format 枚举携带）→ 移除该参数
+  3. **讯飞 IAT v2 不支持 `business.hotwords`**（实测 `10163: param validate error: '$.business.hotwords' unknown field`）→ 不再发送到帧；热词配置保留（二期接 vocabulary_id 热词表接口），**纠错映射 corrections 后处理立即生效**
+- **音色确认**：`cosyvoice-v3-flash` 用 `longxiaochun` 等 v1/v2 音色全部 418（v3 音色集不同），用户指定 `longanyang` 实测 OK（154KB 音频）；端到端闭环：TTS 合成"你好，我是小虎，很高兴认识你。" → ASR 精确还原
+- **风险**：
+  - 讯飞 IAT 免费/试用额度有限；无密钥时 UI 提示配置，不阻塞文本问答
+  - TTS 每次回答调用逐句合成，长回答句数多时播报耗时与费用线性增长
+  - gradio `Audio(streaming=True)` 依赖 ffmpeg（static-ffmpeg 已内置，`add_paths()` 必须在 `import gradio` 前调用）
+  - 浏览器录音停止需用户再点一次麦克风（Gradio 原生限制，无自定义 JS，已确认接受）
+- **验证**：新增 `tests/test_asr.py`（23 项）、`tests/test_tts.py`（9 项）、`tests/test_voice_ui.py`（10 项）；全量 **442 passed**（2 项已知失败 bug-117b 除外）；真实 API 冒烟：TTS 合成 ✅、ASR 识别 ✅（见上）

@@ -2,7 +2,7 @@
 
 协议：wss://iat-api.xfyun.cn/v2/iat
   - 鉴权：HMAC-SHA256 签名（host/date/request-line）→ base64 authorization
-  - 请求帧：common(app_id) + business(language/domain/accent/vad_eos/dwa/hotwords) + data(status/format/encoding/audio)
+  - 请求帧：common(app_id) + business(language/domain/accent/vad_eos/dwa) + data(status/format/encoding/audio)
   - 响应：code=0 时 data.result 含部分结果（wpgs 动态修正：pgs=rpl 替换 / apd 追加；ls=true 为最终结果）
 """
 import base64
@@ -84,8 +84,9 @@ class IflytekASR:
             "vad_eos": self.vad_eos_ms,
             "dwa": "wpgs",
         }
-        if self.hotwords:
-            business["hotwords"] = " ".join(self.hotwords)
+        # 注：讯飞 IAT v2 真实接口不支持 business.hotwords
+        # （实测 10163: param validate error: '$.business.hotwords' unknown field），
+        # 热词需走 vocabulary_id 热词表接口（二期）。配置保留在 asr_dict.json，此处不再发送。
         return json.dumps({
             "common": {"app_id": self.app_id},
             "business": business,

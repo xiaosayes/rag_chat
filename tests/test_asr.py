@@ -40,11 +40,14 @@ class TestIflytekFrames:
         assert frame["data"]["encoding"] == "raw"
         assert base64.b64decode(frame["data"]["audio"]) == b"\x00\x01"
 
-    def test_hotwords_joined_with_space(self):
+    def test_hotwords_stored_but_not_sent(self):
+        # 讯飞 IAT v2 真实接口不支持 business.hotwords（实测 10163 unknown field），
+        # 热词仅保留在实例上（供二期 vocabulary_id 接入），不发送到帧。
         from src.asr import IflytekASR
         asr = IflytekASR("a", "k", "s", hotwords=["司母戊鼎", "重庆(chong qing)"])
+        assert asr.hotwords == ["司母戊鼎", "重庆(chong qing)"]
         frame = json.loads(asr._build_frame(b"", 2))
-        assert frame["business"]["hotwords"] == "司母戊鼎 重庆(chong qing)"
+        assert "hotwords" not in frame["business"]
         assert frame["business"]["dwa"] == "wpgs"
 
     def test_no_hotwords_omits_key(self):

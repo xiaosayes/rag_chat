@@ -46,13 +46,16 @@ class CosyVoiceTTS:
         self,
         model: str = "cosyvoice-v3-flash",
         voice: str = "",
-        format: str = "wav",
+        format=None,  # dashscope AudioFormat 枚举；None → WAV 24kHz
         sample_rate: int = 24000,
         chunk_chars: int = 1000,
     ):
+        from dashscope.audio.tts_v2 import AudioFormat
+
         self.model = model
         self.voice = voice
-        self.format = format
+        # 真实 API 冒烟（Task 9）发现：SpeechSynthesizer 的 format 需 AudioFormat 枚举而非字符串
+        self.format = format or AudioFormat.WAV_24000HZ_MONO_16BIT
         self.sample_rate = sample_rate
         self.chunk_chars = chunk_chars
         ensure_ffmpeg()  # 防御性引导（app 入口已提前调用）
@@ -89,7 +92,6 @@ class CosyVoiceTTS:
             model=self.model,
             voice=self.voice,
             format=self.format,
-            sample_rate=self.sample_rate,
             callback=collector,
         )
         synth.call(text)
