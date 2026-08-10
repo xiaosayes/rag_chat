@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     tts_model: str = Field(default="cosyvoice-v3-flash", description="TTS 模型（一期；二期真人音色用 cosyvoice-v3.5-flash）")
     tts_voice: str = Field(default="", description="TTS 音色（默认小男孩，真实 API 确认后填入）")
     tts_chunk_chars: int = Field(default=1000, ge=100, description="TTS 长文本分段长度（字符）")
+    tts_accum_chars: int = Field(default=20, ge=1, description="语音播报攒字缓冲区：LLM 流式输出攒够该字数触发一次 TTS 合成（bug-121）")
+    tts_first_batch_blocks: int = Field(default=5, ge=1, description="语音播报双缓冲区：首次攒满该数量的合成块合并播报（bug-121）")
 
     # ========== 意图理解（L1 语义 + L2 LLM 兜底）==========
     # 分层意图分类：L0 规则（is_kb_related）→ L1 向量语义 → L2 LLM 兜底

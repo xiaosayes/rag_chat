@@ -460,3 +460,155 @@ class TestGradioHlsReusePatch:
         src = open(js[0], encoding="utf-8").read()
         assert "Se instanceof Il" in src, "patch 未生效：JS 缺少 Se instanceof Il"
         assert "Se=!0}else" not in src, "patch 未生效：旧 Se=!0 仍存在"
+
+
+class TestTTSAccumDoubleBuffer:
+    """bug-121 攒字缓冲区 + 语音播报双缓冲区逻辑。"""
+
+    def _make_wav(self, seconds, freq=440):
+        import struct
+        import math
+        import io
+        import wave
+
+        rate = 16000
+        n = int(rate * seconds)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+            frames = b"".join(
+                struct.pack("<h", int(3000 * math.sin(2 * math.pi * freq * i / rate)))
+                for i in range(n)
+            )
+            w.writeframes(frames)
+        return buf.getvalue()
+
+    def test_take_sentence_prefers_boundary_else_hard_cut(self):
+        from app import _take_sentence
+
+        # 前 20 字内出现句尾标点 → 在标点处切
+        text = "前面内容凑凑凑凑凑。第二句还有更多的内容在这里面"
+        seg, rest = _take_sentence(text, 20)
+        assert seg.endswith("。")
+        assert "第二句" in rest
+        # 无标点 → 硬切 20 字
+        text2 = "啊" * 30
+        seg2, rest2 = _take_sentence(text2, 20)
+        assert len(seg2) == 20
+        assert rest2 == "啊" * 10
+        # 空输入
+        assert _take_sentence("  ", 20) == ("", "")
+        # 不足阈值 → 整段返回
+        assert _take_sentence("短句。", 20) == ("短句。", "")
+
+    def test_maybe_play_batch_first_batch_waits_for_blocks(self):
+        from app import _maybe_play_batch
+
+        blocks = [self._make_wav(0.3)] * 4
+        assert _maybe_play_batch(blocks, True, 0.0) is None  # 4 块不够 5
+        blocks.append(self._make_wav(0.3))
+        batch = _maybe_play_batch(blocks, True, 0.0)
+        assert batch is not None
+        assert batch[:4] == b"RIFF"
+        # 空缓冲不播
+        assert _maybe_play_batch([], True, 0.0) is None
+
+    def test_maybe_play_batch_subsequent_waits_for_duration(self):
+        from app import _maybe_play_batch
+
+        # 上次批 1.0s，当前攒 0.6s → 不播
+        blocks = [self._make_wav(0.3), self._make_wav(0.3)]
+        assert _maybe_play_batch(blocks, False, 1.0) is None
+        # 攒到 1.2s ≥ 1.0s → 播
+        blocks.append(self._make_wav(0.6))
+        batch = _maybe_play_batch(blocks, False, 1.0)
+        assert batch is not None
+
+    def test_merge_wavs_removes_duplicate_headers(self):
+        import io
+        import wave
+
+        from app import _merge_wavs
+
+        merged = _merge_wavs([self._make_wav(0.5), self._make_wav(0.5, freq=880)])
+        assert merged.count(b"RIFF") == 1
+        with wave.open(io.BytesIO(merged), "rb") as w:
+            assert w.getnframes() == 16000  # 1.0s @16k
+
+    def test_respond_accumulates_and_replays(self, monkeypatch, tmp_path):
+        """respond 集成：mock answer_question 流式输出 + mock TTS，
+        验证攒字触发合成、结尾合并播报、重播文件生成。"""
+        import app as app_mod
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.project_root = tmp_path
+        monkeypatch.setattr(app_mod, "settings", s)
+
+        base = "这是第一段回答内容用于测试攒字功能。"
+        calls = []
+
+        class FakeTTS:
+            def synthesize_sentence(self, text):
+                calls.append(text)
+                return self.make_wav(0.2)
+
+            def split_sentences(self, text, n):
+                return [text]
+
+            @staticmethod
+            def make_wav(seconds):
+                import io
+                import wave
+
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+                    w.writeframes(b"\x00\x00" * int(16000 * seconds))
+                return buf.getvalue()
+
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
+
+        def fake_answer(q, h, stream, project):
+            for i in (1, 2, 3):
+                yield h + [("user", q), ("assistant", base * i)], "[]"
+
+        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
+
+        results = list(app_mod.respond("q", [], True, "museum", True))
+        # 攒字触发合成（base 15 字，3 段增量 → 至少 2 次合成）
+        assert len(calls) >= 2
+        # 播报批输出（bytes）
+        batches = [r[3] for r in results if isinstance(r[3], bytes)]
+        assert batches, "应至少有一批播报音频"
+        # 重播文件更新
+        replay = [r[4] for r in results if isinstance(r[4], dict) and r[4].get("value")]
+        assert replay
+        assert Path(replay[-1]["value"]).exists()
+
+    def test_respond_tts_failure_does_not_break_answer(self, monkeypatch, tmp_path):
+        """TTS 合成抛异常时回答流不受影响（事件不中断）。"""
+        import app as app_mod
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.project_root = tmp_path
+        monkeypatch.setattr(app_mod, "settings", s)
+
+        class BoomTTS:
+            def synthesize_sentence(self, text):
+                raise RuntimeError("合成失败")
+
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: BoomTTS())
+
+        def fake_answer(q, h, stream, project):
+            yield h + [("user", q), ("assistant", "回答一。")], "[]"
+            yield h + [("user", q), ("assistant", "回答一。回答二。")], "[]"
+
+        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
+
+        results = list(app_mod.respond("q", [], True, "museum", True))
+        # 回答输出仍正常（chatbot 更新）
+        chatbot_updates = [r[1] for r in results if isinstance(r[1], list)]
+        assert chatbot_updates
+        assert "回答一" in chatbot_updates[-1][-1][1]

@@ -373,6 +373,118 @@ def _write_replay_wav(chunks):
     return path
 
 
+_SENTENCE_END = "。！？…；"
+
+
+def _take_sentence(text: str, chunk_chars: int):
+    """从攒字缓冲区开头取一段待合成文本（优先在句尾标点处切分）。
+
+    bug-121：攒字缓冲区攒够 chunk_chars 字后，若在句中间硬切会切出孤立标点
+    （CosyVoice invalid text），此处优先找句尾标点；无标点则硬切（中文无标点
+   短句 CosyVoice 可正常合成）。
+
+    Returns:
+        (seg, rest)：seg 为本次合成文本，rest 为剩余待攒文本。
+    """
+    text = text.strip()
+    if not text:
+        return "", ""
+    if len(text) <= chunk_chars:
+        return text, ""
+    head = text[:chunk_chars]
+    cut = -1
+    for i in range(len(head) - 1, -1, -1):
+        if head[i] in _SENTENCE_END:
+            cut = i + 1
+            break
+    if cut < 0:
+        probe = text[: chunk_chars * 2]
+        for i in range(len(probe) - 1, chunk_chars - 1, -1):
+            if probe[i] in _SENTENCE_END:
+                cut = i + 1
+                break
+    if cut < 0:
+        cut = chunk_chars
+    return text[:cut], text[cut:].strip()
+
+
+def _wav_duration(wav_bytes: bytes) -> float:
+    """wav 字节时长（秒），解析失败返回 0。"""
+    import io
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            return w.getnframes() / w.getframerate()
+    except Exception:
+        return 0.0
+
+
+def _merge_wavs(chunks: list) -> bytes:
+    """合并多个 wav 字节为单个 wav（去重复头，仅拼接 PCM）。
+
+    bug-121：直接 b"".join 会保留重复头（后段头被当 PCM 播放损坏），
+    与 _write_replay_wav 同逻辑，此处返回 bytes 供流式播报使用。
+    """
+    import io
+    import wave
+
+    if not chunks:
+        return b""
+    if len(chunks) == 1:
+        return chunks[0]
+    with wave.open(io.BytesIO(chunks[0]), "rb") as w:
+        rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    pcm_parts = []
+    for c in chunks:
+        with wave.open(io.BytesIO(c), "rb") as w:
+            pcm_parts.append(w.readframes(w.getnframes()))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(b"".join(pcm_parts))
+    return buf.getvalue()
+
+
+def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: float):
+    """语音播报双缓冲区策略：决定本次是否合并播报最新攒到的音频块。
+
+    bug-121：首次攒满 tts_first_batch_blocks 个合成块合并播报；后续每次播报
+    （由于后端无法感知前端播放结束）以"攒到的音频时长 ≥ 上一批播报时长"近似
+    上次播报结束，将攒到的块统一合并播报，循环直至回答结束。
+
+    Returns:
+        可播报的合并 wav bytes；不满足条件返回 None（块继续攒）。
+    """
+    if not audio_blocks:
+        return None
+    if first_play:
+        if len(audio_blocks) < settings.tts_first_batch_blocks:
+            return None
+        return _merge_wavs(audio_blocks)
+    cur_dur = sum(_wav_duration(b) for b in audio_blocks)
+    if cur_dur < last_batch_dur:
+        return None
+    return _merge_wavs(audio_blocks)
+
+
+def _init_tts():
+    """创建 TTS 实例前的守卫检查；不可用时返回 None（respond 静默跳过播报）。"""
+    if not ensure_ffmpeg():
+        logger.warning("ffmpeg 不可用，语音播报不可用（请安装 static-ffmpeg）")
+        return None
+    if not settings.dashscope_api_key:
+        logger.warning("未配置 DASHSCOPE_API_KEY，语音播报不可用")
+        return None
+    if not settings.tts_voice:
+        logger.warning("未配置 TTS 音色（TTS_VOICE 为空），语音播报不可用")
+        return None
+    return CosyVoiceTTS(model=settings.tts_model, voice=settings.tts_voice,
+                        chunk_chars=settings.tts_chunk_chars)
+
+
 def tts_after_answer(chatbot_history, enabled):
     """respond 完成后触发：句子级流式播报 + 完整重播副本（生成器）。"""
     logger.info(f"TTS 播报触发: enabled={enabled}, key={'OK' if settings.dashscope_api_key else '缺失'}, voice={settings.tts_voice!r}")
@@ -547,6 +659,80 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             error_msg = f"查询出错: {e}"
             _update_last_assistant(history, question, error_msg)
             yield history, ""
+
+
+def respond(message, chat_history, stream, project, tts_enabled):
+    """回答 + 语音播报（攒字缓冲区 + 播报双缓冲区，bug-121）。
+
+    a. 攒字：LLM 流式输出文本攒够 tts_accum_chars(20) 字 → 触发一次 TTS 合成
+    b. 双缓冲：首次攒满 tts_first_batch_blocks(5) 个合成块合并播报；后续以
+       "攒到音频时长 ≥ 上一批时长"近似上次播报结束，统一合并播报，循环至回答结束
+    合成/播报任何异常都不影响回答输出（try/except 包裹，避免事件中断导致后续无法发送）。
+    """
+    if not message or not message.strip():
+        yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
+        return
+    tts = _init_tts() if tts_enabled else None
+    tts_text_buf = ""   # 攒字缓冲区（待合成的文本）
+    audio_blocks = []   # 播报双缓冲 A：合成完成待播的音频块
+    replay_blocks = []  # 全部已合成音频块（结尾合并写重播文件）
+    first_play = True   # 是否首次播报（攒满 5 块才首播）
+    last_batch_dur = 0.0
+    prev_text = ""
+    try:
+        for result in answer_question(message, chat_history, stream, project):
+            yield "", result[0], result[1], gr.update(), gr.update(), gr.update()
+            if tts is None:
+                continue
+            cur_text = clean_text_for_tts(_extract_last_answer_text(result[0]))
+            if len(cur_text) <= len(prev_text):
+                continue
+            tts_text_buf += cur_text[len(prev_text):]
+            prev_text = cur_text
+            # a. 攒字：够阈值 → 合成（优先句边界切分）
+            while tts_text_buf and len(tts_text_buf) >= settings.tts_accum_chars:
+                seg, tts_text_buf = _take_sentence(tts_text_buf, settings.tts_accum_chars)
+                if not seg:
+                    break
+                try:
+                    wav = tts.synthesize_sentence(seg)
+                    audio_blocks.append(wav)
+                    replay_blocks.append(wav)
+                    logger.info(f"TTS 合成块({len(replay_blocks)}): {seg[:30]}")
+                except Exception as e:
+                    logger.warning(f"TTS 合成失败: {e}")
+            # b. 双缓冲播报（首次 5 块 / 后续按时长）
+            batch = _maybe_play_batch(audio_blocks, first_play, last_batch_dur)
+            if batch is not None:
+                audio_blocks = []
+                first_play = False
+                last_batch_dur = _wav_duration(batch)
+                yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
+                    gr.update(value="播报中…")
+        # 回答结束：剩余不足阈值的文本 + 剩余音频块合并播报 + 重播
+        if tts is not None:
+            if tts_text_buf.strip():
+                try:
+                    wav = tts.synthesize_sentence(tts_text_buf.strip())
+                    audio_blocks.append(wav)
+                    replay_blocks.append(wav)
+                except Exception as e:
+                    logger.warning(f"TTS 合成失败: {e}")
+            if audio_blocks:
+                batch = _merge_wavs(audio_blocks)
+                yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
+                    gr.update(value="播报中…")
+            if replay_blocks:
+                replay_path = _write_replay_wav(replay_blocks)
+                yield gr.update(), gr.update(), gr.update(), gr.update(), \
+                    gr.update(value=str(replay_path)), gr.update(value="已播报（可点击重播）")
+            else:
+                yield gr.update(), gr.update(), gr.update(), gr.update(), \
+                    gr.update(), gr.update(value="")
+    except Exception as e:
+        logger.warning(f"语音播报异常（不影响回答）: {e}")
+        yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), \
+            gr.update(value=f"语音播报异常: {e}")
 
 
 def format_answer(answer: str, chunks: list, timing: dict = None) -> str:
@@ -743,18 +929,6 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                         example_btns.append(btn)
 
         # ========== 事件绑定 ==========
-
-        def respond(message, chat_history, stream, project, tts_enabled):
-            if not message or not message.strip():
-                yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
-                return
-            for result in answer_question(message, chat_history, stream, project):
-                yield "", result[0], result[1], gr.update(), gr.update(), gr.update()
-            # 回答完成：语音播报并入同一事件流（gradio 6.22 的 then 链不支持 streaming 输出，
-            # 实测 HLS 流式仅对直接触发的事件生效；故此处直接调用 tts_after_answer）
-            if tts_enabled:
-                for audio_upd, replay_upd, status_upd in tts_after_answer(chat_history, True):
-                    yield gr.update(), gr.update(), gr.update(), audio_upd, replay_upd, status_upd
 
         tts_outputs = [msg, chatbot, chunks_json, tts_audio, tts_replay, tts_status]
         no_tts = gr.State(False)  # 示例按钮不触发播报（避免误播）

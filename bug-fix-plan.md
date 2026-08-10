@@ -3566,6 +3566,25 @@ LLM 从联网结果得知"8月22日上映"，计算"距今天(8月7日)几天"�
   - 浏览器录音停止需用户再点一次麦克风（Gradio 原生限制，无自定义 JS，已确认接受）
 - **验证**：新增 `tests/test_asr.py`（23 项）、`tests/test_tts.py`（9 项）、`tests/test_voice_ui.py`（10 项）；全量 **442 passed**（2 项已知失败 bug-117b 除外）；真实 API 冒烟：TTS 合成 ✅、ASR 识别 ✅（见上）
 
+### [bug-121 追加] 流式播报链路修复 + 攒字/双缓冲播报逻辑（第二轮无声等）
+
+- **问题 1：流式播报根本不生效（前端无 /stream/ 请求、无声音）**
+  - 根因（本地逐步复现验证）：① gradio 6.22 的 `then` 链事件**不支持 streaming 输出**（本地实测 `dep.then()` 生成器无任何值）；② streaming 输出组件 yield `gr.update(value=wav)` 会被 gradio **跳过 streaming 处理**（`KeyError: 2` + 无 /stream/ 请求）
+  - 修复：TTS 播报**并入 respond 主事件**（不再用 then 链）；播报位置 **yield 直接 bytes 值**（非 gr.update）
+  - 验证：真实 TTS 合成端到端，playlist 动态增长（1→2 segment）+ ENDLIST 正常
+- **问题 2：第二轮起自动播报无声（第一轮正常）**
+  - 根因：gradio 6.22 前端 `StaticAudio` 组件 `ke()` 用组件级布尔标记 `Se`，**同一 Audio 组件只创建一次 hls**（`Se=!0` 后 `!Se` 恒假），后续轮次的流式值不再加载 playlist
+  - 修复：`src/audio_bootstrap.py` 新增 `patch_gradio_hls_reuse()`（app 启动时幂等执行）：`Se` 改为保存 hls 实例，重复流式先 `destroy()` 旧实例再重建；node 模拟 4 轮验证 destroy→重建逻辑正确，JS 语法 OK
+  - 风险：修改 gradio 分发包 JS（升级/重装会被覆盖，启动时自动重新 patch）；未匹配（版本变化）时仅告警不阻断
+- **问题 3：第 3 轮问答无法发送（服务器）**
+  - 本地 gradio_client 三轮连续（含真实 TTS 合成）全部正常，**无法本地复现**（需确认：疑服务器事件队列因前序播报异常中断而卡死/隧道 WebSocket 不稳定）
+  - 加固：respond 内 TTS 合成/播报全部 try/except 包裹，**播报异常不影响回答流与事件结束**
+- **需求变更：攒字缓冲区 + 语音播报双缓冲区**（替换"回答完成后逐句播报"）
+  - a. 攒字：LLM 流式输出文本攒够 `tts_accum_chars=20` 字 → 触发一次 TTS 合成（`_take_sentence` 优先句尾标点切分，无标点硬切）
+  - b. 双缓冲：首次攒满 `tts_first_batch_blocks=5` 个合成块合并播报（`_maybe_play_batch`）；后续后端无法感知前端播完，以"攒到音频时长 ≥ 上一批时长"近似播报结束，统一合并播报，循环至回答结束；结尾剩余块合并 + 写重播文件
+  - respond 提为模块级（可测试）；合成/播报异常不影响回答
+- **验证**：新增 `_take_sentence`/`_maybe_play_batch`/`_merge_wavs`/respond 集成 6 项测试；端到端（真实 TTS 合成 × 三轮）：每轮 6 次合成（攒字生效）、2 个播报批（首批 5 块合并、结尾 ENDLIST）、重播正常；全量 **463 passed**（2 项已知失败 bug-117b 除外）
+
 ### [bug-122] 服务器部署后浏览器无法访问麦克风（语音输入点录制报错）
 
 - **现象**：服务器启动服务后，本地浏览器点击「语音输入」录制按钮报错："无法访问媒体设备。请检查您是否在安全来源或本地主机上运行（或者您已经通过 ssl_verify 传递了有效的 SSL 证书），并且您已经允许浏览器访问您的设备"。
