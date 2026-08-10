@@ -111,3 +111,19 @@ class TestCosyVoiceSynthesize:
         p = tmp_path / "a.wav"
         CosyVoiceTTS.write_wav(b"data", p)
         assert p.read_bytes() == b"data"
+    def test_parens_not_split_into_orphan(self):
+        """括号内标点不产生孤立闭合片段（如 "）。"），避免 CosyVoice 报 invalid text。"""
+        from src.tts import CosyVoiceTTS
+        text = "交通路线（地铁怎么坐？打车定位到哪儿？接驳车在哪上？）。"
+        parts = CosyVoiceTTS.split_sentences(text, max_chars=1000)
+        assert any("交通路线" in p for p in parts)
+        assert all(p.strip() != "）。" for p in parts)
+        assert not any(p.startswith("）。") or p == "）" for p in parts)
+        assert "".join(parts).replace("\n", "") == text
+
+    def test_balanced_parens_kept_intact(self):
+        from src.tts import CosyVoiceTTS
+        text = "请参考（详见指南。）。"
+        parts = CosyVoiceTTS.split_sentences(text, max_chars=1000)
+        assert any("详见指南" in p for p in parts)
+        assert all(p.strip() != "）。" for p in parts)

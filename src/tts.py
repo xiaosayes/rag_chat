@@ -58,6 +58,17 @@ class _ChunkCollector:
         pass
 
 
+def _unbalanced_parens(s: str) -> bool:
+    """判断字符串是否有未闭合的括号（（【「《[ 等）。"""
+    depth = 0
+    for ch in s:
+        if ch in "（【「《[":
+            depth += 1
+        elif ch in "）】」》]" and depth > 0:
+            depth -= 1
+    return depth > 0
+
+
 class CosyVoiceTTS:
     """CosyVoice TTS 封装：逐句合成 + 句子级流式回调。"""
 
@@ -85,6 +96,8 @@ class CosyVoiceTTS:
         """按句子边界（。！？；!?;\n）分段；超长单句硬切。
 
         不做短句合并：句子级流式播放按句 yield，每句一个音频段。
+        括号内标点不视为句边界：切分后合并括号未闭合的片段，
+        避免产生孤立闭合片段（如 "）。"）导致 CosyVoice 报 invalid text（bug-121 实测）。
         """
         import re
 
@@ -92,8 +105,15 @@ class CosyVoiceTTS:
         if not text:
             return []
         raw_parts = [p.strip() for p in re.split(r"(?<=[。！？；!?;\n])", text) if p.strip()]
+        # 合并括号未闭合的片段（如 "交通路线（地铁怎么坐？" + "）。"）
+        merged: List[str] = []
+        for part in raw_parts:
+            if merged and _unbalanced_parens(merged[-1]):
+                merged[-1] += part
+            else:
+                merged.append(part)
         result: List[str] = []
-        for s in raw_parts:
+        for s in merged:
             while len(s) > max_chars:
                 result.append(s[:max_chars])
                 s = s[max_chars:]
