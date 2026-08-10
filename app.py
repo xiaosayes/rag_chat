@@ -338,11 +338,33 @@ def _extract_last_answer_text(history) -> str:
 
 
 def _write_replay_wav(chunks):
-    """合并各句 wav 字节写入重播缓存文件，返回 Path。"""
+    """合并各句 wav 字节写入重播缓存文件，返回 Path。
+
+    bug-121：多个 wav 直接 b"".join 会保留重复头（后段头被当 PCM，播放到一半损坏），
+    此处用 wave 只取 PCM 拼接，保留第一个 wav 的参数。
+    """
+    import io
+    import wave
+
     cache_dir = settings.project_root / "data" / "processed" / "tts_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / "last_answer.wav"
-    CosyVoiceTTS.write_wav(b"".join(chunks), path)
+    if not chunks:
+        path.write_bytes(b"")
+        return path
+    with wave.open(io.BytesIO(chunks[0]), "rb") as w:
+        rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    pcm_parts = []
+    for c in chunks:
+        with wave.open(io.BytesIO(c), "rb") as w:
+            pcm_parts.append(w.readframes(w.getnframes()))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(b"".join(pcm_parts))
+    path.write_bytes(buf.getvalue())
     return path
 
 
@@ -687,7 +709,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                 )
 
                 gr.Markdown("### 语音播报")
-                tts_audio = gr.Audio(streaming=True, label="播报（自动播放）", visible=True)
+                tts_audio = gr.Audio(streaming=True, autoplay=True, label="播报（自动播放）", visible=True)
                 tts_replay = gr.Audio(label="重播", visible=True)
                 tts_enabled = gr.Checkbox(label="语音播报", value=True)
                 tts_status = gr.Markdown("")

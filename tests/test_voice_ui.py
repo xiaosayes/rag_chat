@@ -399,3 +399,38 @@ class TestTtsFfmpegGuard:
             [{"role": "user", "content": "q"},
              {"role": "assistant", "content": "回答"}], True))
         assert "ffmpeg" in results[0][2]["value"]
+
+
+class TestWriteReplayWav:
+    def _make_wav(self, seconds: float, freq: int = 440) -> bytes:
+        import io, wave
+        rate = 8000
+        n = int(rate * seconds)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * n)
+        return buf.getvalue()
+
+    def test_merges_wav_chunks_without_double_headers(self, monkeypatch, tmp_path):
+        """拼接多个 wav 时去掉重复头（否则后段 wav 头被当 PCM，播放到一半损坏）。"""
+        from app import _write_replay_wav
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.project_root = tmp_path
+        monkeypatch.setattr("app.settings", s)
+        # 用真实 CosyVoiceTTS.write_wav（静态方法，不碰 API）
+        from src.tts import CosyVoiceTTS
+
+        wavs = [self._make_wav(1.0), self._make_wav(0.5, freq=880)]
+        path = _write_replay_wav(wavs)
+        assert path.exists()
+        data = path.read_bytes()
+        assert data[:4] == b"RIFF"
+        # 合并后应只有 1 个 wav 头（RIFF 只出现一次）
+        assert data.count(b"RIFF") == 1
+        # 总时长 = 1.5s @8k = 12000 frames
+        import wave, io
+        with wave.open(io.BytesIO(data), "rb") as w:
+            assert w.getnframes() == 12000
