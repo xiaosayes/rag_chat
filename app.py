@@ -208,32 +208,35 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             "finalized": False,
             "fed": False,
             "last_key": None,
+            "pcm_buffer": b"",
         }
     asr = state["session"]
     try:
         raw = Path(audio_filepath).read_bytes()
         key = hashlib.md5(raw).hexdigest()
         if state["fed"] and key == state["last_key"]:
-            # gradio 6.22 录音中 value 不更新（MediaRecorder timeslice 未设置）：
-            # 相同文件 = 陈旧 value（录音中或已稳定），忽略避免重复 feed
-            yield state, gr.update(), gr.update(
-                value="已识别完成，可修改后发送" if state["finalized"] else "识别中…"
-            )
+            # gradio 6.22 录音中每 0.5s 发一个独立 wav 增量块（size 恒定）；
+            # 相同块重复 = 录音已停止（value 稳定）→ 完成识别
+            if not state["finalized"]:
+                final = asr.finish()
+                state["finalized"] = True
+                logger.info(f"ASR 最终结果: {final}")
+                yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+            else:
+                yield state, gr.update(), gr.update(value="已识别完成，可修改后发送")
             return
         logger.info(f"ASR stream 回调: file={Path(audio_filepath).name} size={len(raw)} magic={raw[:4].hex()}")
-        pcm = _to_pcm16k(raw, settings.asr_sample_rate)
-        new_pcm = pcm[state["sent_bytes"]:]
+        # 新块（录音中增量）：每块独立转 PCM16k → 追加累积 → 增量 feed（只发新增部分）
+        pcm_block = _to_pcm16k(raw, settings.asr_sample_rate)
+        state["pcm_buffer"] = state["pcm_buffer"] + pcm_block
+        new_pcm = state["pcm_buffer"][state["sent_bytes"]:]
         if new_pcm:
-            logger.info(f"ASR feed: +{len(new_pcm)} bytes (共 {len(pcm)})")
+            logger.info(f"ASR feed: +{len(new_pcm)} bytes (buffer {len(state['pcm_buffer'])}, 已发 {state['sent_bytes']})")
             asr.feed(new_pcm)
             state["sent_bytes"] += len(new_pcm)
             state["fed"] = True
         state["last_key"] = key
-        # gradio 6.22 只在录音停止后发送新音频 → 新 value 到达 = 录音已结束 → 完成识别
-        final = asr.finish()
-        state["finalized"] = True
-        logger.info(f"ASR 最终结果: {final}")
-        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+        yield state, gr.update(), gr.update(value="识别中…")
         return
     except Exception as e:
         logger.warning(f"ASR 音频处理失败: {e}")
@@ -242,19 +245,15 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
 
 
 def asr_stream_stop(state, project_id: str = ""):
-    """Gradio Audio stop 事件：用户停止录音。
+    """Gradio Audio stop 事件：用户停止录音 → 结束 ASR 会话，返回最终文本。
 
-    gradio 6.22 录音中音频不实时到达，新音频在停止后的 stream 回调中处理：
-    - 已在 stream 回调中完成识别（finalized）→ finish（幂等）并清空会话；
-    - 尚未完成（音频可能还在路上）→ 不 finish（避免空结果覆盖输入框），保留会话。
+    gradio 6.22 停止后前端不再发送新块；此处 finish（幂等）收尾并清空会话。
     """
     if state and state.get("session"):
-        if state.get("finalized"):
-            final = state["session"].finish()
-            state = None
-            yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
-        else:
-            yield state, gr.update(), gr.update(value="识别中…")
+        final = state["session"].finish()
+        state["finalized"] = True
+        state = None
+        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
     else:
         yield state, gr.update(), gr.update(value="")
 
