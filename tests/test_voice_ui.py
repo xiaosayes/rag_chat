@@ -501,27 +501,30 @@ class TestTTSAccumDoubleBuffer:
         # 不足阈值 → 整段返回
         assert _take_sentence("短句。", 20) == ("短句。", "")
 
-    def test_maybe_play_batch_first_batch_waits_for_blocks(self):
+    def test_maybe_play_batch_first_batch_waits_for_llm_chunks(self):
         from app import _maybe_play_batch
 
-        blocks = [self._make_wav(0.3)] * 4
-        assert _maybe_play_batch(blocks, True, 0.0) is None  # 4 块不够 5
-        blocks.append(self._make_wav(0.3))
-        batch = _maybe_play_batch(blocks, True, 0.0)
+        blocks = [self._make_wav(0.3)] * 3
+        # 4 个 LLM chunk 不够 5 → 不播
+        assert _maybe_play_batch(blocks, True, 0.0, 4) is None
+        # 5 个 LLM chunk → 播
+        batch = _maybe_play_batch(blocks, True, 0.0, 5)
         assert batch is not None
         assert batch[:4] == b"RIFF"
+        # 无合成块，即使 chunk 数够也不播
+        assert _maybe_play_batch([], True, 0.0, 10) is None
         # 空缓冲不播
-        assert _maybe_play_batch([], True, 0.0) is None
+        assert _maybe_play_batch([], True, 0.0, 0) is None
 
     def test_maybe_play_batch_subsequent_waits_for_duration(self):
         from app import _maybe_play_batch
 
         # 上次批 1.0s，当前攒 0.6s → 不播
         blocks = [self._make_wav(0.3), self._make_wav(0.3)]
-        assert _maybe_play_batch(blocks, False, 1.0) is None
+        assert _maybe_play_batch(blocks, False, 1.0, 99) is None
         # 攒到 1.2s ≥ 1.0s → 播
         blocks.append(self._make_wav(0.6))
-        batch = _maybe_play_batch(blocks, False, 1.0)
+        batch = _maybe_play_batch(blocks, False, 1.0, 99)
         assert batch is not None
 
     def test_merge_wavs_removes_duplicate_headers(self):
@@ -612,3 +615,45 @@ class TestTTSAccumDoubleBuffer:
         chatbot_updates = [r[1] for r in results if isinstance(r[1], list)]
         assert chatbot_updates
         assert "回答一" in chatbot_updates[-1][-1][1]
+
+    def test_respond_first_play_at_5_llm_chunks(self, monkeypatch, tmp_path):
+        """首播在攒满 5 个 LLM 流式输出 chunk 时触发（每 chunk 约 10-15 字）。"""
+        import app as app_mod
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.project_root = tmp_path
+        monkeypatch.setattr(app_mod, "settings", s)
+
+        class FakeTTS:
+            def synthesize_sentence(self, text):
+                return self.make_wav(0.2)
+
+            def split_sentences(self, text, n):
+                return [text]
+
+            @staticmethod
+            def make_wav(seconds):
+                import io
+                import wave
+
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+                    w.writeframes(b"\x00\x00" * int(16000 * seconds))
+                return buf.getvalue()
+
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
+
+        base = "这是回答内容的流式片段。"  # 12 字/增量
+        def fake_answer(q, h, stream, project):
+            for i in range(1, 7):  # 6 个 LLM chunk
+                yield h + [{"role": "user", "content": q},
+                           {"role": "assistant", "content": base * i}], "[]"
+
+        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
+
+        results = list(app_mod.respond("q", [], True, "museum", True))
+        batches = [r[3] for r in results if isinstance(r[3], bytes)]
+        # 首播批（第 5 chunk 时）+ 结尾批
+        assert len(batches) >= 2, f"应有首播批+结尾批，实际 {len(batches)} 批"

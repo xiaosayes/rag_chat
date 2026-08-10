@@ -448,12 +448,19 @@ def _merge_wavs(chunks: list) -> bytes:
     return buf.getvalue()
 
 
-def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: float):
+def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: float,
+                      llm_chunk_count: int = 0):
     """语音播报双缓冲区策略：决定本次是否合并播报最新攒到的音频块。
 
-    bug-121：首次攒满 tts_first_batch_blocks 个合成块合并播报；后续每次播报
-    （由于后端无法感知前端播放结束）以"攒到的音频时长 ≥ 上一批播报时长"近似
-    上次播报结束，将攒到的块统一合并播报，循环直至回答结束。
+    bug-121：首次攒满 tts_first_batch_blocks(5) 个 **LLM 流式输出 chunk**（每块约
+    10-15 字）后合并播报；后续每次播报（后端无法感知前端播放结束）以"攒到的音频
+    时长 ≥ 上一批播报时长"近似上次播报结束，将攒到的块统一合并播报，循环直至回答结束。
+
+    Args:
+        audio_blocks: 已合成待播的音频块；
+        first_play: 是否首次播报（由 LLM chunk 数决定）；
+        last_batch_dur: 上一批播报音频时长（秒）；
+        llm_chunk_count: 已输出的 LLM 流式 chunk 数（仅首播判断使用）。
 
     Returns:
         可播报的合并 wav bytes；不满足条件返回 None（块继续攒）。
@@ -461,7 +468,7 @@ def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: floa
     if not audio_blocks:
         return None
     if first_play:
-        if len(audio_blocks) < settings.tts_first_batch_blocks:
+        if llm_chunk_count < settings.tts_first_batch_blocks:
             return None
         return _merge_wavs(audio_blocks)
     cur_dur = sum(_wav_duration(b) for b in audio_blocks)
@@ -676,9 +683,10 @@ def respond(message, chat_history, stream, project, tts_enabled):
     tts_text_buf = ""   # 攒字缓冲区（待合成的文本）
     audio_blocks = []   # 播报双缓冲 A：合成完成待播的音频块
     replay_blocks = []  # 全部已合成音频块（结尾合并写重播文件）
-    first_play = True   # 是否首次播报（攒满 5 块才首播）
+    first_play = True   # 是否首次播报（攒满 tts_first_batch_blocks 个 LLM chunk 才首播）
     last_batch_dur = 0.0
     prev_text = ""
+    llm_chunk_count = 0  # LLM 流式输出 chunk 计数（首播判据，每块约 10-15 字）
     try:
         for result in answer_question(message, chat_history, stream, project):
             yield "", result[0], result[1], gr.update(), gr.update(), gr.update()
@@ -689,6 +697,7 @@ def respond(message, chat_history, stream, project, tts_enabled):
                 continue
             tts_text_buf += cur_text[len(prev_text):]
             prev_text = cur_text
+            llm_chunk_count += 1  # 一个 LLM 流式输出 chunk（约 10-15 字）
             # a. 攒字：够阈值 → 合成（优先句边界切分）
             while tts_text_buf and len(tts_text_buf) >= settings.tts_accum_chars:
                 seg, tts_text_buf = _take_sentence(tts_text_buf, settings.tts_accum_chars)
@@ -701,8 +710,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
                     logger.info(f"TTS 合成块({len(replay_blocks)}): {seg[:30]}")
                 except Exception as e:
                     logger.warning(f"TTS 合成失败: {e}")
-            # b. 双缓冲播报（首次 5 块 / 后续按时长）
-            batch = _maybe_play_batch(audio_blocks, first_play, last_batch_dur)
+            # b. 双缓冲播报（首次攒满 5 个 LLM chunk / 后续按时长）
+            batch = _maybe_play_batch(audio_blocks, first_play, last_batch_dur, llm_chunk_count)
             if batch is not None:
                 audio_blocks = []
                 first_play = False
