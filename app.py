@@ -352,6 +352,13 @@ def tts_after_answer(chatbot_history, enabled):
     if not enabled:
         yield gr.update(), gr.update(), gr.update(value="")
         return
+    if not ensure_ffmpeg():
+        # gradio 6 流式播报依赖 pydub+ffmpeg 转 ADTS；服务器缺 ffmpeg 时明确提示（bug-121 实测）
+        logger.warning("ffmpeg 不可用，语音播报不可用（请安装 static-ffmpeg）")
+        yield gr.update(), gr.update(), gr.update(
+            value="服务器缺少 ffmpeg（请执行 pip install static-ffmpeg 后重启），语音播报不可用"
+        )
+        return
     if not settings.dashscope_api_key:
         yield gr.update(), gr.update(), gr.update(value="未配置百炼 Key（DASHSCOPE_API_KEY），语音播报不可用")
         return

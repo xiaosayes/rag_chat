@@ -382,3 +382,20 @@ class TestAsrSilenceAutoStop:
         st2, _, _ = list(asr_stream_chunk(str(chunk), st, ""))[0]
         assert st2["silent_blocks"] == 0
         assert st2["finalized"] is False
+
+
+class TestTtsFfmpegGuard:
+    def test_no_ffmpeg_shows_message(self, monkeypatch):
+        """服务器缺少 ffmpeg（static-ffmpeg 未安装）→ 明确提示而非静默失败。"""
+        from app import tts_after_answer
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.dashscope_api_key = "dummy"
+        s.tts_voice = "v"
+        monkeypatch.setattr("app.settings", s)
+        monkeypatch.setattr("app.ensure_ffmpeg", lambda: False)
+        results = list(tts_after_answer(
+            [{"role": "user", "content": "q"},
+             {"role": "assistant", "content": "回答"}], True))
+        assert "ffmpeg" in results[0][2]["value"]
