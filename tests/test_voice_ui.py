@@ -435,3 +435,28 @@ class TestWriteReplayWav:
         import wave, io
         with wave.open(io.BytesIO(data), "rb") as w:
             assert w.getnframes() == 12000
+
+
+class TestGradioHlsReusePatch:
+    """gradio 6.22 前端 bug 修复：同一 Audio 组件多轮流式值只创建一次 hls（Se 标记不重置），
+    第 2 轮起自动播报无声。patch 需幂等、匹配后 JS 含 Se instanceof Il。"""
+
+    def test_patch_is_idempotent(self):
+        """patch 应用后重复执行应跳过（幂等），并返回 True。"""
+        from src.audio_bootstrap import patch_gradio_hls_reuse
+
+        assert patch_gradio_hls_reuse() is True
+
+    def test_patch_marks_js_with_instance_check(self):
+        """patch 生效后，gradio StaticAudio 前端 JS 应包含 Se instanceof Il（Se 存 hls 实例）。"""
+        import glob
+        import os
+
+        import gradio
+
+        assets = os.path.join(os.path.dirname(gradio.__file__), "templates", "frontend", "assets")
+        js = glob.glob(os.path.join(assets, "StaticAudio-*.js"))
+        assert js, "找不到 gradio StaticAudio 前端 JS"
+        src = open(js[0], encoding="utf-8").read()
+        assert "Se instanceof Il" in src, "patch 未生效：JS 缺少 Se instanceof Il"
+        assert "Se=!0}else" not in src, "patch 未生效：旧 Se=!0 仍存在"

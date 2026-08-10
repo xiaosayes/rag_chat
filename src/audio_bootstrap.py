@@ -3,7 +3,53 @@
 必须在 import gradio 之前调用 ensure_ffmpeg()（gradio 导入即触发 pydub 导入，
 pydub 在 import 时缓存 ffmpeg 查找结果）。
 """
+import glob
+import os
+
 from loguru import logger
+
+
+def patch_gradio_hls_reuse() -> bool:
+    """修复 gradio 6.22 前端 bug：同一 Audio 组件的多次流式值只创建一次 hls。
+
+    压缩 JS 中 ke() 用组件级标记 Se（布尔）记录"已创建 hls"，第二轮起的流式值
+    （is_stream=true）因 !Se 为假而不再加载新 playlist → 自动播报第 2 轮起无声
+    （bug-121 实测：本地两轮后端均正常输出 playlist，前端无 /stream/ 请求）。
+
+    patch：Se 改为保存 hls 实例，重复流式先 destroy 旧实例再重建（幂等，重复
+    执行安全；gradio 升级后文件名/内容变化则跳过并告警）。
+    """
+    try:
+        import gradio
+
+        assets_dir = os.path.join(
+            os.path.dirname(os.path.abspath(gradio.__file__)),
+            "templates", "frontend", "assets",
+        )
+        old1 = "if(Il.isSupported()&&!Se){"
+        new1 = "if(Il.isSupported()){if(Se instanceof Il){Se.destroy(),Se=!1}"
+        old2 = "}),Se=!0}else Se||="
+        new2 = "}),Se=t}else Se||="
+        for f in glob.glob(os.path.join(assets_dir, "StaticAudio-*.js")):
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    src = fh.read()
+                if "Se instanceof Il" in src:
+                    logger.info(f"gradio HLS 复用 patch 已应用（跳过）: {os.path.basename(f)}")
+                    return True
+                if old1 in src and old2 in src:
+                    with open(f, "w", encoding="utf-8") as fh:
+                        fh.write(src.replace(old1, new1).replace(old2, new2))
+                    logger.info(f"gradio HLS 复用 patch 已应用: {os.path.basename(f)}")
+                    return True
+                logger.warning(f"gradio HLS 复用 patch 未匹配（版本可能变化）: {os.path.basename(f)}")
+            except Exception as e:
+                logger.warning(f"gradio HLS 复用 patch 失败 {os.path.basename(f)}: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"gradio HLS 复用 patch 不可用: {e}")
+        return False
+
 
 
 def ensure_ffmpeg() -> bool:

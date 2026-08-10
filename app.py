@@ -16,9 +16,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 语音功能（bug-121）：gradio 导入即触发 pydub 导入，pydub 在 import 时缓存
 # ffmpeg 查找结果，因此 HLS 流式音频输出所需的 ffmpeg 引导必须在 gradio 之前执行
-from src.audio_bootstrap import ensure_ffmpeg
+from src.audio_bootstrap import ensure_ffmpeg, patch_gradio_hls_reuse
 
 ensure_ffmpeg()
+
+# 必须在真实浏览器使用前应用：gradio 6.22 前端 bug——同一 Audio 组件多轮流式值
+# 只创建一次 hls（Se 标记不重置），第 2 轮起自动播报无声（bug-121 实测）
+patch_gradio_hls_reuse()
 
 import gradio as gr
 from loguru import logger
