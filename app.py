@@ -235,8 +235,14 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             asr.feed(new_pcm)
             state["sent_bytes"] += len(new_pcm)
             state["fed"] = True
+            # 等待讯飞 wpgs 部分结果返回（动态修正 apd 追加/rpl 替换），实现边说边出字
+            time.sleep(0.2)
         state["last_key"] = key
-        yield state, gr.update(), gr.update(value="识别中…")
+        # 实时显示当前最佳转写文本（可编辑，停止后填最终文本）
+        text = asr.correct(asr.current_text)
+        if text:
+            logger.info(f"ASR 实时文本: {text}")
+        yield state, gr.update(value=text) if text else gr.update(), gr.update(value="识别中…")
         return
     except Exception as e:
         logger.warning(f"ASR 音频处理失败: {e}")
@@ -592,7 +598,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                         sources=["microphone"],
                         streaming=True,
                         type="filepath",
-                        label="语音输入（点击开始说话，说完点击停止，自动识别填入）",
+                        label="语音输入（点击开始说话，实时转写，说完点击停止）",
                         scale=6,
                     )
                     voice_status = gr.Markdown("", scale=4)

@@ -43,7 +43,10 @@ class TestAsrStreamChunk:
         assert "未配置讯飞密钥" in status["value"]
 
     def test_new_block_feeds_incremental(self, monkeypatch, tmp_path):
-        """gradio 6.22 每 0.5s 发一个独立 wav 增量块（size 恒定）→ 每块独立转 PCM 追加、增量 feed。"""
+        """gradio 6.22 每 0.5s 发一个独立 wav 增量块（size 恒定）→ 每块独立转 PCM 追加、增量 feed。
+
+        用户要求边说边出字：每次 feed 后实时把 wpgs 部分结果填入输入框。
+        """
         from app import asr_stream_chunk
         from src.config import Settings
 
@@ -65,13 +68,15 @@ class TestAsrStreamChunk:
         assert state["finalized"] is False          # 录音中：不提前完成
         assert len(state["session"].fed) == 1
         assert "识别中" in status["value"]
+        assert "你好" in msg_update["value"]        # 实时部分结果填入输入框（边说边出字）
 
-        # 第二块（内容不同）→ 追加并增量 feed
+        # 第二块（内容不同）→ 追加并增量 feed，实时文本继续更新
         chunk.write_bytes(b"block-2")
         results2 = list(asr_stream_chunk(str(chunk), state, ""))
-        st2, _, _ = results2[0]
+        st2, msg_update2, _ = results2[0]
         assert len(st2["session"].fed) == 2
         assert st2["sent_bytes"] == len(b"block-1") + len(b"block-2")
+        assert "你好" in msg_update2["value"]
 
     def test_same_block_repeated_finalizes(self, monkeypatch, tmp_path):
         """相同块重复（录音已停止，value 稳定）→ finish 完成识别。"""
