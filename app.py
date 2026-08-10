@@ -213,9 +213,11 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
         return
     try:
         raw = Path(audio_filepath).read_bytes()
+        logger.info(f"ASR stream 回调: file={Path(audio_filepath).name} size={len(raw)} magic={raw[:4].hex()}")
         pcm = _to_pcm16k(raw, settings.asr_sample_rate)
         new_pcm = pcm[state["sent_bytes"]:]
         if new_pcm:
+            logger.info(f"ASR feed: +{len(new_pcm)} bytes (共 {len(pcm)})")
             asr.feed(new_pcm)
             state["sent_bytes"] += len(new_pcm)
     except Exception as e:
@@ -223,6 +225,8 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
         yield state, gr.update(), gr.update(value=f"识别出错: {e}")
         return
     text = asr.correct(asr.current_text)
+    if text:
+        logger.info(f"ASR 中间结果: {text}")
     if asr.is_final() or time.time() - state["started"] > settings.asr_max_duration:
         final = asr.finish()
         state["finalized"] = True
