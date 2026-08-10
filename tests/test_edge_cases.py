@@ -1466,7 +1466,9 @@ class TestVoiceConfigDefaults:
         s = Settings(_env_file=None)
         assert s.asr_language == "zh_cn"
         assert s.asr_accent == "mandarin"
-        assert s.asr_vad_eos == 1800
+        # bug-121: 边说边出字流程下 vad_eos 需调大（1.8s 停顿会触发服务端自动结束并断连），
+        # 改为 60s 兜底，以"用户点停止"为主结束方式
+        assert s.asr_vad_eos == 60000
         assert s.asr_max_duration == 30
         assert s.asr_sample_rate == 16000
 

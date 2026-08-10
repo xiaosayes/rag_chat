@@ -198,3 +198,62 @@ class TestTtsAfterAnswer:
         history = [{"role": "user", "content": "q"},
                    {"role": "assistant", "content": "正文内容\n\n---\n\n**[检索来源]**\n1. **x**"}]
         assert _extract_last_answer_text(history) == "正文内容"
+
+
+class _FakeASRFinal(_FakeASR):
+    """feed 后 is_final 为 True（模拟服务端 VAD 自动结束）。"""
+
+    def is_final(self):
+        return True
+
+
+class _FakeASRError(_FakeASR):
+    """feed 抛异常（模拟 Broken pipe / socket closed）。"""
+
+    def feed(self, pcm):
+        raise OSError("socket is already closed")
+
+
+class TestAsrErrorHandling:
+    def test_vad_auto_finalize(self, monkeypatch, tmp_path):
+        """feed 后服务端已自动结束（is_final）→ 立即 finish 填入，不再等停止。"""
+        from app import asr_stream_chunk
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.xfyun_app_id = "a"
+        s.xfyun_api_key = "k"
+        s.xfyun_api_secret = "s"
+        s.asr_dict_dir = tmp_path
+        monkeypatch.setattr("app.settings", s)
+        monkeypatch.setattr("app.IflytekASR", _FakeASRFinal)
+        monkeypatch.setattr("app._to_pcm16k", lambda b, r: b)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"data")
+
+        results = list(asr_stream_chunk(str(chunk), None, ""))
+        state, msg_update, status = results[0]
+        assert state["finalized"] is True
+        assert "已识别完成" in status["value"]
+        assert "你好" in msg_update["value"]
+
+    def test_error_clears_session(self, monkeypatch, tmp_path):
+        """feed 异常（连接断开）→ 清理 session 并重置 state，避免循环报错。"""
+        from app import asr_stream_chunk
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.xfyun_app_id = "a"
+        s.xfyun_api_key = "k"
+        s.xfyun_api_secret = "s"
+        s.asr_dict_dir = tmp_path
+        monkeypatch.setattr("app.settings", s)
+        monkeypatch.setattr("app.IflytekASR", _FakeASRError)
+        monkeypatch.setattr("app._to_pcm16k", lambda b, r: b)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"data")
+
+        results = list(asr_stream_chunk(str(chunk), None, ""))
+        state, _, status = results[0]
+        assert state is None                     # 会话已清理，下次录音重建
+        assert "识别出错" in status["value"]

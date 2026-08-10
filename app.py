@@ -238,6 +238,13 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             # 等待讯飞 wpgs 部分结果返回（动态修正 apd 追加/rpl 替换），实现边说边出字
             time.sleep(0.2)
         state["last_key"] = key
+        if asr.is_final():
+            # 服务端已自动结束（vad 兜底）→ 立即收尾，避免继续 feed 到已关闭连接（Broken pipe）
+            final = asr.finish()
+            state["finalized"] = True
+            logger.info(f"ASR 最终结果(vad): {final}")
+            yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+            return
         # 实时显示当前最佳转写文本（可编辑，停止后填最终文本）
         text = asr.correct(asr.current_text)
         if text:
@@ -246,6 +253,12 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
         return
     except Exception as e:
         logger.warning(f"ASR 音频处理失败: {e}")
+        # 清理坏会话（连接已断），重置 state，下次录音重建，避免循环报错
+        try:
+            asr.close()
+        except Exception:
+            pass
+        state = None
         yield state, gr.update(), gr.update(value=f"识别出错: {e}")
         return
 

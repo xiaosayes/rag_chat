@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     xfyun_api_secret: str = Field(default="", description="讯飞开放平台 API_SECRET")
     asr_language: str = Field(default="zh_cn", description="识别语言（zh_cn 普通话）")
     asr_accent: str = Field(default="mandarin", description="口音（mandarin 普通话）")
-    asr_vad_eos: int = Field(default=1800, ge=0, description="静音检测时长 ms（VAD 自动结束转写）")
+    asr_vad_eos: int = Field(default=60000, ge=0, description="静音检测时长 ms（边说边出字流程下仅作兜底，主结束方式为用户点停止）")
     asr_max_duration: int = Field(default=30, ge=1, description="最长录音秒数兜底（超时强制结束）")
     asr_sample_rate: int = Field(default=16000, description="IAT 采样率（16k PCM）")
     asr_dict_dir: Path = Field(default=Path("data/voice"), description="多音字/热词配置目录")
