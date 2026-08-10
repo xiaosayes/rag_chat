@@ -229,3 +229,41 @@ class TestPcmPreprocess:
         from src.asr import _to_pcm16k
         raw = b"\x00\x01" * 100
         assert _to_pcm16k(raw, 16000) == raw
+
+
+class TestToPcm16kContainers:
+    """bug-121 冒烟补强：浏览器录音容器格式（webm/ogg）必须正确转码，不能当裸 PCM。"""
+
+    def _make_container(self, container: str) -> bytes:
+        from static_ffmpeg import add_paths
+        add_paths()
+        import subprocess
+        out = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-c:a", "libopus", "-f", container, "pipe:1"],
+            capture_output=True, check=True)
+        return out.stdout
+
+    def test_webm_container_converted_to_pcm16k(self):
+        from src.asr import _to_pcm16k
+        webm = self._make_container("webm")
+        assert webm[:4] == b"\x1aE\xdf\xa3"  # EBML magic
+        pcm = _to_pcm16k(webm, 16000)
+        # 1s 音频 @16k 16bit mono ≈ 32000 bytes（容器头 + 编码误差 < 5%）
+        assert 30000 <= len(pcm) <= 34000
+
+    def test_ogg_container_converted_to_pcm16k(self):
+        from src.asr import _to_pcm16k
+        ogg = self._make_container("ogg")
+        assert ogg[:4] == b"OggS"
+        pcm = _to_pcm16k(ogg, 16000)
+        assert 30000 <= len(pcm) <= 34000
+
+    def test_invalid_container_raises(self):
+        from src.asr import _to_pcm16k
+        import pytest
+        # EBML magic + 垃圾字节 → ffmpeg 无法解析 → 明确报错而非静默垃圾
+        fake_webm = b"\x1aE\xdf\xa3" + b"\x00" * 500
+        with pytest.raises(ValueError):
+            _to_pcm16k(fake_webm, 16000)

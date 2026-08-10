@@ -230,13 +230,24 @@ def _to_pcm16k(audio_bytes: bytes, target_rate: int = 16000) -> bytes:
     """将 wav 容器或裸 PCM 归一化为 16kHz 单声道 16bit little-endian PCM。
 
     - wav 容器 → wave 模块剥离头部取 PCM
+    - 其他容器（webm/ogg/mp4/mp3，浏览器录音默认 webm/opus）→ ffmpeg 转 wav 再解析
     - 多声道 → 取平均合成单声道
     - 采样率 ≠ target → numpy 线性重采样
+    - 裸 PCM → 直通
     """
     import io
     import wave
 
     if audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+        with wave.open(io.BytesIO(audio_bytes), "rb") as w:
+            rate = w.getframerate()
+            channels = w.getnchannels()
+            width = w.getsampwidth()
+            pcm = w.readframes(w.getnframes())
+    elif _is_encoded_container(audio_bytes):
+        # bug-121：浏览器 MediaRecorder 默认输出 webm/opus（EBML magic 1a45dfa3），
+        # gradio Audio preprocess 不转换（format=None）→ 此前被当裸 PCM 导致识别失败。
+        audio_bytes = _ffmpeg_to_wav(audio_bytes)
         with wave.open(io.BytesIO(audio_bytes), "rb") as w:
             rate = w.getframerate()
             channels = w.getnchannels()
@@ -255,6 +266,37 @@ def _to_pcm16k(audio_bytes: bytes, target_rate: int = 16000) -> bytes:
         pcm = _resample_pcm(pcm, rate, target_rate)
 
     return pcm
+
+
+def _is_encoded_container(audio_bytes: bytes) -> bool:
+    """判断是否为编码音频容器（需 ffmpeg 转码），避免把容器字节当裸 PCM。"""
+    magics = (
+        b"\x1aE\xdf\xa3",  # EBML: webm/mkv（Chrome MediaRecorder 默认）
+        b"OggS",            # ogg/opus
+        b"ftyp",            # mp4/m4a（Safari MediaRecorder 默认）
+        b"ID3",             # mp3
+        b"\xff\xfb",       # mp3 无 ID3
+    )
+    return audio_bytes[:4] in magics
+
+
+def _ffmpeg_to_wav(audio_bytes: bytes) -> bytes:
+    """用 static-ffmpeg 提供的 ffmpeg 将任意编码音频转 wav。"""
+    import subprocess
+
+    from static_ffmpeg import add_paths
+
+    add_paths()
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-i", "pipe:0", "-f", "wav", "pipe:1"],
+        input=audio_bytes, capture_output=True, timeout=60,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise ValueError(
+            f"ffmpeg 转码失败（容器格式不支持或数据损坏）: {proc.stderr[:200].decode(errors='replace')}"
+        )
+    return proc.stdout
 
 
 def _downmix_to_mono(pcm: bytes, channels: int) -> bytes:
