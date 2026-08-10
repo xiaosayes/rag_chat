@@ -194,8 +194,8 @@ class TestTtsAfterAnswer:
         results = list(tts_after_answer(history, True))
         # 每句一个流式 yield + 最终重播 yield
         assert len(results) == 3
-        assert results[0][0]["value"] == b"fake-wav"  # 句子 1 流式
-        assert results[1][0]["value"] == b"fake-wav"  # 句子 2 流式
+        assert results[0][0] == b"fake-wav"  # 句子 1 流式（streaming 输出需直接 bytes 值）
+        assert results[1][0] == b"fake-wav"  # 句子 2 流式
         assert "已播报" in results[2][2]["value"]
         assert results[2][1]["value"] == str(tmp_path / "replay.wav")
 

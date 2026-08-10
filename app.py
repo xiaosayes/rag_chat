@@ -404,8 +404,10 @@ def tts_after_answer(chatbot_history, enabled):
             logger.info(f"TTS 合成句子: {sentence[:40]}")
             wav = tts.synthesize_sentence(sentence)
             chunks.append(wav)
-            # 句子级流式：每句合成完立即 yield（gradio HLS 无缝续播）
-            yield gr.update(value=wav), gr.update(), gr.update(value="播报中…")
+            # 句子级流式：每句合成完立即 yield。注意 streaming 输出必须 yield 直接值
+            # （bytes），不能包 gr.update()——gradio 对 prop update 跳过 streaming 处理
+            # （实测 KeyError/无 /stream/ 请求）
+            yield wav, gr.update(), gr.update(value="播报中…")
         replay_path = _write_replay_wav(chunks)
         yield gr.update(), gr.update(value=str(replay_path)), gr.update(value="已播报（可点击重播）")
     except Exception as e:
@@ -738,15 +740,22 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
 
         # ========== 事件绑定 ==========
 
-        def respond(message, chat_history, stream, project):
+        def respond(message, chat_history, stream, project, tts_enabled):
             if not message or not message.strip():
-                yield "", chat_history, "[]"
+                yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
                 return
             for result in answer_question(message, chat_history, stream, project):
-                yield "", result[0], result[1]
+                yield "", result[0], result[1], gr.update(), gr.update(), gr.update()
+            # 回答完成：语音播报并入同一事件流（gradio 6.22 的 then 链不支持 streaming 输出，
+            # 实测 HLS 流式仅对直接触发的事件生效；故此处直接调用 tts_after_answer）
+            if tts_enabled:
+                for audio_upd, replay_upd, status_upd in tts_after_answer(chat_history, True):
+                    yield gr.update(), gr.update(), gr.update(), audio_upd, replay_upd, status_upd
 
-        msg_submit = msg.submit(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
-        submit_click = submit_btn.click(respond, [msg, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
+        tts_outputs = [msg, chatbot, chunks_json, tts_audio, tts_replay, tts_status]
+        no_tts = gr.State(False)  # 示例按钮不触发播报（避免误播）
+        msg.submit(respond, [msg, chatbot, use_stream, project_dropdown, tts_enabled], tts_outputs)
+        submit_click = submit_btn.click(respond, [msg, chatbot, use_stream, project_dropdown, tts_enabled], tts_outputs)
         clear_btn.click(clear_history, None, [chatbot, chunks_json])
         status_btn.click(get_system_status, [project_dropdown], [status_text])
 
@@ -765,14 +774,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
         )
 
         for btn in example_btns:
-            btn.click(respond, [btn, chatbot, use_stream, project_dropdown], [msg, chatbot, chunks_json])
-
-        # 语音功能（bug-121）：回答完成后自动语音播报（句子级流式播放 + 重播）
-        # 示例按钮不触发播报（避免误播），用户可后续按需加入
-        for dep in (msg_submit, submit_click):
-            dep.then(tts_after_answer,
-                     inputs=[chatbot, tts_enabled],
-                     outputs=[tts_audio, tts_replay, tts_status])
+            btn.click(respond, [btn, chatbot, use_stream, project_dropdown, no_tts], tts_outputs)
 
         demo.load(get_system_status, [project_dropdown], [status_text])
 
