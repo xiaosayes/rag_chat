@@ -42,7 +42,8 @@ class TestAsrStreamChunk:
         state, msg_update, status = results[0]
         assert "未配置讯飞密钥" in status["value"]
 
-    def test_feeds_audio_and_updates_text(self, monkeypatch, tmp_path):
+    def test_new_audio_feeds_and_finalizes(self, monkeypatch, tmp_path):
+        """gradio 6.22 录音中 value 不更新，新音频只会在停止后到达 → 一次性 feed + 完成识别。"""
         from app import asr_stream_chunk
         from src.config import Settings
 
@@ -60,10 +61,12 @@ class TestAsrStreamChunk:
         results = list(asr_stream_chunk(str(chunk), None, ""))
         state, msg_update, status = results[0]
         assert state["session"] is not None
+        assert state["finalized"] is True
         assert "你好" in msg_update["value"]
-        assert "识别中" in status["value"]
+        assert "已识别完成" in status["value"]
 
-    def test_vad_finalize_marks_done(self, monkeypatch, tmp_path):
+    def test_stale_value_skipped(self, monkeypatch, tmp_path):
+        """相同文件重复回调（录音中/停止后的陈旧 value）→ 不重复 feed、不覆盖结果。"""
         from app import asr_stream_chunk
         from src.config import Settings
 
@@ -73,35 +76,49 @@ class TestAsrStreamChunk:
         s.xfyun_api_secret = "s"
         s.asr_dict_dir = tmp_path
         monkeypatch.setattr("app.settings", s)
-
-        class _VadASR(_FakeASR):
-            def is_final(self):
-                return True
-
-        monkeypatch.setattr("app.IflytekASR", _VadASR)
+        monkeypatch.setattr("app.IflytekASR", _FakeASR)
         monkeypatch.setattr("app._to_pcm16k", lambda b, r: b)
         chunk = tmp_path / "chunk.wav"
-        chunk.write_bytes(b"data")
+        chunk.write_bytes(b"same-data")
 
-        results = list(asr_stream_chunk(str(chunk), None, ""))
-        _, msg_update, status = results[0]
-        assert "已识别完成" in status["value"]
-        assert "你好" in msg_update["value"]
+        first = list(asr_stream_chunk(str(chunk), None, ""))
+        st1 = first[0][0]
+        assert st1["finalized"] is True
+        fed_once = len(st1["session"].fed)
+
+        # 相同文件再次回调（陈旧 value）→ 不重复 feed，状态保持"已识别完成"
+        second = list(asr_stream_chunk(str(chunk), st1, ""))
+        st2, _, status2 = second[0]
+        assert len(st2["session"].fed) == fed_once
+        assert "已识别完成" in status2["value"]
 
 
 class TestAsrStreamStop:
-    def test_stop_finishes_session(self, monkeypatch, tmp_path):
+    def test_stop_finalized_clears_session(self, monkeypatch):
         from app import asr_stream_stop
         from src.config import Settings
 
         s = Settings(_env_file=None)
         monkeypatch.setattr("app.settings", s)
-        state = {"session": type("S", (), {"finish": lambda self: "最终文本"})(), "finalized": False}
+        state = {"session": type("S", (), {"finish": lambda self: "最终文本"})(), "finalized": True}
         results = list(asr_stream_stop(state, ""))
         new_state, msg_update, status = results[0]
         assert new_state is None
         assert "最终文本" in msg_update["value"]
         assert "已识别完成" in status["value"]
+
+    def test_stop_pending_keeps_session(self, monkeypatch):
+        """录音中/音频尚未到达时点停止 → 不 finish（避免空结果覆盖），保留会话等后续 stream 回调。"""
+        from app import asr_stream_stop
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        monkeypatch.setattr("app.settings", s)
+        state = {"session": type("S", (), {"finish": lambda self: "不应被调用"})(), "finalized": False}
+        results = list(asr_stream_stop(state, ""))
+        new_state, msg_update, status = results[0]
+        assert new_state is not None  # 保留会话
+        assert "识别中" in status["value"]
 
     def test_stop_without_session_noop(self):
         from app import asr_stream_stop

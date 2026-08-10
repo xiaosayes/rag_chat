@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import json
+import hashlib
 from contextlib import suppress
 from pathlib import Path
 from typing import Optional
@@ -205,14 +206,20 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             "sent_bytes": 0,
             "started": time.time(),
             "finalized": False,
+            "fed": False,
+            "last_key": None,
         }
     asr = state["session"]
-    if state["finalized"]:
-        # VAD 已结束转写：忽略后续音频块（等待用户停止录音）
-        yield state, gr.update(), gr.update(value="已识别完成，可修改后发送")
-        return
     try:
         raw = Path(audio_filepath).read_bytes()
+        key = hashlib.md5(raw).hexdigest()
+        if state["fed"] and key == state["last_key"]:
+            # gradio 6.22 录音中 value 不更新（MediaRecorder timeslice 未设置）：
+            # 相同文件 = 陈旧 value（录音中或已稳定），忽略避免重复 feed
+            yield state, gr.update(), gr.update(
+                value="已识别完成，可修改后发送" if state["finalized"] else "识别中…"
+            )
+            return
         logger.info(f"ASR stream 回调: file={Path(audio_filepath).name} size={len(raw)} magic={raw[:4].hex()}")
         pcm = _to_pcm16k(raw, settings.asr_sample_rate)
         new_pcm = pcm[state["sent_bytes"]:]
@@ -220,27 +227,34 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             logger.info(f"ASR feed: +{len(new_pcm)} bytes (共 {len(pcm)})")
             asr.feed(new_pcm)
             state["sent_bytes"] += len(new_pcm)
+            state["fed"] = True
+        state["last_key"] = key
+        # gradio 6.22 只在录音停止后发送新音频 → 新 value 到达 = 录音已结束 → 完成识别
+        final = asr.finish()
+        state["finalized"] = True
+        logger.info(f"ASR 最终结果: {final}")
+        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+        return
     except Exception as e:
         logger.warning(f"ASR 音频处理失败: {e}")
         yield state, gr.update(), gr.update(value=f"识别出错: {e}")
         return
-    text = asr.correct(asr.current_text)
-    if text:
-        logger.info(f"ASR 中间结果: {text}")
-    if asr.is_final() or time.time() - state["started"] > settings.asr_max_duration:
-        final = asr.finish()
-        state["finalized"] = True
-        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
-        return
-    yield state, gr.update(value=text) if text else gr.update(), gr.update(value="识别中…")
 
 
 def asr_stream_stop(state, project_id: str = ""):
-    """Gradio Audio stop 事件：用户停止录音 → 结束 ASR 会话，返回最终文本。"""
+    """Gradio Audio stop 事件：用户停止录音。
+
+    gradio 6.22 录音中音频不实时到达，新音频在停止后的 stream 回调中处理：
+    - 已在 stream 回调中完成识别（finalized）→ finish（幂等）并清空会话；
+    - 尚未完成（音频可能还在路上）→ 不 finish（避免空结果覆盖输入框），保留会话。
+    """
     if state and state.get("session"):
-        final = state["session"].finish()
-        state = None
-        yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+        if state.get("finalized"):
+            final = state["session"].finish()
+            state = None
+            yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+        else:
+            yield state, gr.update(), gr.update(value="识别中…")
     else:
         yield state, gr.update(), gr.update(value="")
 
@@ -579,7 +593,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                         sources=["microphone"],
                         streaming=True,
                         type="filepath",
-                        label="语音输入（点击开始说话，说完静默约 2 秒自动转写）",
+                        label="语音输入（点击开始说话，说完点击停止，自动识别填入）",
                         scale=6,
                     )
                     voice_status = gr.Markdown("", scale=4)
