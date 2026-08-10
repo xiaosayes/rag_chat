@@ -516,16 +516,15 @@ class TestTTSAccumDoubleBuffer:
         # 空缓冲不播
         assert _maybe_play_batch([], True, 0.0, 0) is None
 
-    def test_maybe_play_batch_subsequent_waits_for_duration(self):
+    def test_maybe_play_batch_subsequent_plays_immediately(self):
+        """后续批次：合成完成即播（不再按时长等待——攒批等待会让播放器断流）。"""
         from app import _maybe_play_batch
 
-        # 上次批 1.0s，当前攒 0.6s → 不播
+        # 只要有合成块就播（不等时长）
         blocks = [self._make_wav(0.3), self._make_wav(0.3)]
-        assert _maybe_play_batch(blocks, False, 1.0, 99) is None
-        # 攒到 1.2s ≥ 1.0s → 播
-        blocks.append(self._make_wav(0.6))
-        batch = _maybe_play_batch(blocks, False, 1.0, 99)
+        batch = _maybe_play_batch(blocks, False, 10.0, 99)
         assert batch is not None
+        assert batch[:4] == b"RIFF"
 
     def test_merge_wavs_removes_duplicate_headers(self):
         import io

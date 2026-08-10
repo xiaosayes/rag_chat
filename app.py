@@ -459,13 +459,14 @@ def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: floa
     """语音播报双缓冲区策略：决定本次是否合并播报最新攒到的音频块。
 
     bug-121：首次攒满 tts_first_batch_blocks(5) 个 **LLM 流式输出 chunk**（每块约
-    10-15 字）后合并播报；后续每次播报（后端无法感知前端播放结束）以"攒到的音频
-    时长 ≥ 上一批播报时长"近似上次播报结束，将攒到的块统一合并播报，循环直至回答结束。
+    10-15 字）后合并播报。后续不再按"攒到时长 ≥ 上一批"等待——实测攒批等待会让
+    播放器在首播批播完后断流（结尾 join 一次性等剩余合成，中间停顿最长 1 分钟），
+    改为**合成完成即播**（后端合成 1-2s/段，段音频 2-4s，播放速度慢于合成即无缝）。
 
     Args:
         audio_blocks: 已合成待播的音频块；
         first_play: 是否首次播报（由 LLM chunk 数决定）；
-        last_batch_dur: 上一批播报音频时长（秒）；
+        last_batch_dur: 上一批播报音频时长（秒，仅记录不再用于判断）；
         llm_chunk_count: 已输出的 LLM 流式 chunk 数（仅首播判断使用）。
 
     Returns:
@@ -477,9 +478,6 @@ def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: floa
         if llm_chunk_count < settings.tts_first_batch_blocks:
             return None
         return _merge_wavs(audio_blocks)
-    cur_dur = sum(_wav_duration(b) for b in audio_blocks)
-    if cur_dur < last_batch_dur:
-        return None
     return _merge_wavs(audio_blocks)
 
 
@@ -775,7 +773,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
                 last_batch_dur = _wav_duration(batch)
                 yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
                     gr.update(value="播报中…")
-        # 回答结束：提交剩余文本 + 失败段重试 → 等待后台合成完成 → 播剩余 + 重播
+        # 回答结束：提交剩余文本 + 失败段重试 → 循环收集合成完成即播
+        # （不一次性 join 等全部——实测会让播放器断流最长 1 分钟，改为逐批 yield）
         if tts is not None:
             if tts_text_buf.strip():
                 seg_clean = clean_text_for_tts(tts_text_buf.strip())
@@ -788,18 +787,22 @@ def respond(message, chat_history, stream, project, tts_enabled):
                 tasks.put((next_seq, retry_text))
                 seg_by_seq[next_seq] = retry_text
                 next_seq += 1
-            tasks.put(None)  # 停止后台线程
-            synth_thread.join()
-            while True:
+            tasks.put(None)  # 无更多合成任务
+            while synth_thread.is_alive() or not results_q.empty():
                 try:
-                    seq, err, wav = results_q.get_nowait()
+                    seq, err, wav = results_q.get(timeout=0.5)
                 except Exception:
-                    break
+                    continue
                 if err:
                     logger.warning(f"TTS 重试仍失败（该段无法播报）: {err}")
                 else:
                     audio_blocks.append(wav)
                     replay_blocks.append(wav)
+                    if audio_blocks:
+                        batch = _merge_wavs(audio_blocks)
+                        audio_blocks = []
+                        yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
+                            gr.update(value="播报中…")
             if audio_blocks:
                 batch = _merge_wavs(audio_blocks)
                 yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
