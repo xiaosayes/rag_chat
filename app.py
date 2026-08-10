@@ -667,7 +667,8 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
             [asr_state, msg, voice_status],
             stream_every=0.5,
         )
-        voice_audio.stop(
+        # 注意：gradio 6 的 stop 事件是"播放停止按钮"；录音停止必须用 stop_recording
+        voice_audio.stop_recording(
             asr_stream_stop,
             [asr_state, project_dropdown],
             [asr_state, msg, voice_status],
