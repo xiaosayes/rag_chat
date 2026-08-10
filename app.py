@@ -225,8 +225,9 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             "pcm_buffer": b"",
         }
     if state["finalized"]:
-        # 已识别完成：忽略所有后续块；且 msg/voice_status 不再更新（避免覆盖用户编辑/发送后的内容及 TTS 播报提示）
-        yield state, gr.update(), gr.update()
+        # 已识别完成：忽略所有后续块；msg 不更新，voice_status 置空（避免空 update 到 Markdown
+        # 导致前端 f.message.trim 报错，且不覆盖 TTS 播报提示）
+        yield state, gr.update(), gr.update(value="")
         return
     asr = state["session"]
     try:
@@ -248,8 +249,8 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
                 logger.info(f"ASR 最终结果: {final}")
                 yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
             else:
-                # 已 finalized：不再更新 msg/voice_status（避免覆盖用户编辑与 TTS 提示）
-                yield state, gr.update(), gr.update()
+                # 已 finalized：msg 不更新，voice_status 置空（避免空 update 到 Markdown 报错）
+                yield state, gr.update(), gr.update(value="")
             return
         logger.info(f"ASR stream 回调: file={Path(audio_filepath).name} size={len(raw)} magic={raw[:4].hex()}")
         # 新块（录音中增量）：每块独立转 PCM16k → 追加累积 → 增量 feed（只发新增部分）

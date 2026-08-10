@@ -106,11 +106,11 @@ class TestAsrStreamChunk:
         assert len(st2["session"].fed) == fed_once
         assert "你好" in msg_update["value"]
 
-        # 已 finalized 后再回调：msg/voice_status 不再更新（避免覆盖用户编辑与 TTS 提示）
+        # 已 finalized 后再回调：msg 不更新，voice_status 置空（避免空 update 到 Markdown 报错）
         third = list(asr_stream_chunk(str(chunk), st2, ""))
         _, msg3, status3 = third[0]
         assert "value" not in msg3
-        assert "value" not in status3
+        assert status3.get("value") == ""
 
 
 class TestAsrStreamStop:
@@ -288,12 +288,12 @@ class TestAsrGuards:
         assert st["finalized"] is True
         fed = len(st["session"].fed)
 
-        # finalized 后发新块（内容不同）→ 忽略，不 feed，且不再更新 msg/voice_status
+        # finalized 后发新块（内容不同）→ 忽略，不 feed；voice_status 置空
         chunk.write_bytes(b"other-content")
         st2, msg2, status = list(asr_stream_chunk(str(chunk), st, ""))[0]
         assert len(st2["session"].fed) == fed
         assert "value" not in msg2
-        assert "value" not in status
+        assert status.get("value") == ""
 
     def test_timeout_auto_finalize(self, monkeypatch, tmp_path):
         """超过最长录音时长（asr_max_duration）→ 自动 finish 收尾（不依赖 stop 事件）。"""
