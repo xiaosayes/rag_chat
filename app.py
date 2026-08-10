@@ -210,8 +210,19 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             "last_key": None,
             "pcm_buffer": b"",
         }
+    if state["finalized"]:
+        # 已识别完成：忽略所有后续块；且 msg/voice_status 不再更新（避免覆盖用户编辑/发送后的内容及 TTS 播报提示）
+        yield state, gr.update(), gr.update()
+        return
     asr = state["session"]
     try:
+        if time.time() - state["started"] > settings.asr_max_duration:
+            # 超时兜底：超过最长录音时长自动收尾（不依赖 stop 事件，防止录音未停导致无限识别）
+            final = asr.finish()
+            state["finalized"] = True
+            logger.info(f"ASR 最终结果(超时): {final}")
+            yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+            return
         raw = Path(audio_filepath).read_bytes()
         key = hashlib.md5(raw).hexdigest()
         if state["fed"] and key == state["last_key"]:
@@ -223,7 +234,8 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
                 logger.info(f"ASR 最终结果: {final}")
                 yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
             else:
-                yield state, gr.update(), gr.update(value="已识别完成，可修改后发送")
+                # 已 finalized：不再更新 msg/voice_status（避免覆盖用户编辑与 TTS 提示）
+                yield state, gr.update(), gr.update()
             return
         logger.info(f"ASR stream 回调: file={Path(audio_filepath).name} size={len(raw)} magic={raw[:4].hex()}")
         # 新块（录音中增量）：每块独立转 PCM16k → 追加累积 → 增量 feed（只发新增部分）
@@ -311,6 +323,7 @@ def _write_replay_wav(chunks):
 
 def tts_after_answer(chatbot_history, enabled):
     """respond 完成后触发：句子级流式播报 + 完整重播副本（生成器）。"""
+    logger.info(f"TTS 播报触发: enabled={enabled}, key={'OK' if settings.dashscope_api_key else '缺失'}, voice={settings.tts_voice!r}")
     if not enabled:
         yield gr.update(), gr.update(), gr.update(value="")
         return
@@ -323,14 +336,17 @@ def tts_after_answer(chatbot_history, enabled):
         return
     text = _extract_last_answer_text(chatbot_history)
     if not text:
+        logger.info("TTS 播报跳过: 未提取到回答文本")
         yield gr.update(), gr.update(), gr.update(value="")
         return
+    logger.info(f"TTS 播报文本: {text[:60]}")
     text = clean_text_for_tts(text)
     tts = CosyVoiceTTS(model=settings.tts_model, voice=settings.tts_voice,
                        chunk_chars=settings.tts_chunk_chars)
     chunks = []
     try:
         for sentence in tts.split_sentences(text, settings.tts_chunk_chars):
+            logger.info(f"TTS 合成句子: {sentence[:40]}")
             wav = tts.synthesize_sentence(sentence)
             chunks.append(wav)
             # 句子级流式：每句合成完立即 yield（gradio HLS 无缝续播）

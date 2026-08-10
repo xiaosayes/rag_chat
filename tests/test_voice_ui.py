@@ -104,8 +104,13 @@ class TestAsrStreamChunk:
         st2, msg_update, status2 = second[0]
         assert st2["finalized"] is True
         assert len(st2["session"].fed) == fed_once
-        assert "已识别完成" in status2["value"]
         assert "你好" in msg_update["value"]
+
+        # 已 finalized 后再回调：msg/voice_status 不再更新（避免覆盖用户编辑与 TTS 提示）
+        third = list(asr_stream_chunk(str(chunk), st2, ""))
+        _, msg3, status3 = third[0]
+        assert "value" not in msg3
+        assert "value" not in status3
 
 
 class TestAsrStreamStop:
@@ -257,3 +262,60 @@ class TestAsrErrorHandling:
         state, _, status = results[0]
         assert state is None                     # 会话已清理，下次录音重建
         assert "识别出错" in status["value"]
+
+
+class TestAsrGuards:
+    def test_finalized_ignores_new_blocks(self, monkeypatch, tmp_path):
+        """已识别完成后，即使前端继续发新块也不再 feed（防麦克风未停导致无限识别）。"""
+        from app import asr_stream_chunk
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.xfyun_app_id = "a"
+        s.xfyun_api_key = "k"
+        s.xfyun_api_secret = "s"
+        s.asr_dict_dir = tmp_path
+        monkeypatch.setattr("app.settings", s)
+        monkeypatch.setattr("app.IflytekASR", _FakeASR)
+        monkeypatch.setattr("app._to_pcm16k", lambda b, r: b)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"first")
+        st = list(asr_stream_chunk(str(chunk), None, ""))[0][0]
+        assert st["finalized"] is False  # 新块：feed 中
+        # 相同块重复 → 完成识别
+        st = list(asr_stream_chunk(str(chunk), st, ""))[0][0]
+        assert st["finalized"] is True
+        fed = len(st["session"].fed)
+
+        # finalized 后发新块（内容不同）→ 忽略，不 feed，且不再更新 msg/voice_status
+        chunk.write_bytes(b"other-content")
+        st2, msg2, status = list(asr_stream_chunk(str(chunk), st, ""))[0]
+        assert len(st2["session"].fed) == fed
+        assert "value" not in msg2
+        assert "value" not in status
+
+    def test_timeout_auto_finalize(self, monkeypatch, tmp_path):
+        """超过最长录音时长（asr_max_duration）→ 自动 finish 收尾（不依赖 stop 事件）。"""
+        from app import asr_stream_chunk
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.xfyun_app_id = "a"
+        s.xfyun_api_key = "k"
+        s.xfyun_api_secret = "s"
+        s.asr_dict_dir = tmp_path
+        s.asr_max_duration = 0  # 立即超时
+        monkeypatch.setattr("app.settings", s)
+
+        class _S:
+            def finish(self):
+                return "超时文本"
+
+        st = {"session": _S(), "started": 0, "finalized": False}
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"data")
+        results = list(asr_stream_chunk(str(chunk), st, ""))
+        new_state, msg_update, status = results[0]
+        assert new_state["finalized"] is True
+        assert "超时文本" in msg_update["value"]
+        assert "已识别完成" in status["value"]
