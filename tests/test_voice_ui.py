@@ -657,3 +657,81 @@ class TestTTSAccumDoubleBuffer:
         batches = [r[3] for r in results if isinstance(r[3], bytes)]
         # 首播批（第 5 chunk 时）+ 结尾批
         assert len(batches) >= 2, f"应有首播批+结尾批，实际 {len(batches)} 批"
+
+    def test_take_sentence_splits_on_comma_and_period(self):
+        from app import _take_sentence
+
+        # 前 20 字内有逗号（15 字处）→ 逗号处切，段含逗号
+        t = "这是前面前面前面前面前面的内容，然后这里是后半句更多内容"
+        seg, rest = _take_sentence(t, 20)
+        assert seg.endswith("，")
+        assert "后半句" in rest
+        # 前 20 字无标点 → 向后找到逗号
+        t2 = "没有标点的一段长文本内容一直没有标点直到这里，出现逗号了后面继续"
+        seg2, rest2 = _take_sentence(t2, 20)
+        assert seg2.endswith("，")
+        assert "出现逗号" in rest2
+        # 句号切分
+        t3 = "第一句话的内容结束。第二句话的内容开始更多"
+        seg3, rest3 = _take_sentence(t3, 20)
+        assert seg3.endswith("。")
+        assert "第二句" in rest3
+
+    def test_take_sentence_hard_cut_swallows_trailing_punct(self):
+        """硬切时切点后的标点被吞掉，剩余不以孤立标点开头（避免下次合成失败丢字）。"""
+        from app import _take_sentence
+
+        t = "啊" * 22 + "，这里开头的逗号应该被吞掉"
+        seg, rest = _take_sentence(t, 20)
+        assert rest and rest[0] != "，"
+        assert "，这里" not in rest
+
+    def test_respond_retries_failed_synthesis(self, monkeypatch, tmp_path):
+        """合成失败的文本结尾合并重试成功（不丢字，播报批仍正常）。"""
+        import app as app_mod
+        from src.config import Settings
+
+        s = Settings(_env_file=None)
+        s.project_root = tmp_path
+        monkeypatch.setattr(app_mod, "settings", s)
+
+        class FakeTTS:
+            def __init__(self):
+                self.fail_once = True
+
+            def synthesize_sentence(self, text):
+                if self.fail_once:  # 首次合成失败（模拟孤立标点/硬切异常）
+                    self.fail_once = False
+                    raise RuntimeError("临时失败")
+                return self.make_wav(0.2)
+
+            def split_sentences(self, text, n):
+                return [text]
+
+            @staticmethod
+            def make_wav(seconds):
+                import io
+                import wave
+
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+                    w.writeframes(b"\x00\x00" * int(16000 * seconds))
+                return buf.getvalue()
+
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
+
+        base = "这是回答内容的流式片段。"
+        def fake_answer(q, h, stream, project):
+            for i in range(1, 7):
+                yield h + [{"role": "user", "content": q},
+                           {"role": "assistant", "content": base * i}], "[]"
+
+        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
+
+        results = list(app_mod.respond("q", [], True, "museum", True))
+        batches = [r[3] for r in results if isinstance(r[3], bytes)]
+        assert batches, "失败的段结尾重试成功后应仍有播报批"
+        # 回答输出不因合成失败中断
+        chatbot_updates = [r[1] for r in results if isinstance(r[1], list)]
+        assert chatbot_updates

@@ -373,38 +373,44 @@ def _write_replay_wav(chunks):
     return path
 
 
-_SENTENCE_END = "。！？…；"
+_SENTENCE_END = "，。！？…；、："  # 逗号/句号等（用户要求按标点划分，避免句中切导致卡壳）
 
 
 def _take_sentence(text: str, chunk_chars: int):
-    """从攒字缓冲区开头取一段待合成文本（优先在句尾标点处切分）。
+    """从攒字缓冲区开头取一段待合成文本（按标点逗号/句号等切分）。
 
-    bug-121：攒字缓冲区攒够 chunk_chars 字后，若在句中间硬切会切出孤立标点
-    （CosyVoice invalid text），此处优先找句尾标点；无标点则硬切（中文无标点
-   短句 CosyVoice 可正常合成）。
+    bug-121：攒够 chunk_chars 字后优先在标点处切分（避免句中划分导致 CosyVoice
+    卡壳/孤立标点 invalid text 丢字）：① 前 chunk_chars 字内最后一个标点 → 切到标点后
+    （含标点）；② 前段无标点 → 向后找第一个标点（最多 chunk_chars*2）；③ 仍无标点
+    → 硬切，并吞掉切点后的标点（避免剩余段以孤立标点开头导致下次合成失败丢字）。
 
     Returns:
-        (seg, rest)：seg 为本次合成文本，rest 为剩余待攒文本。
+        (seg, rest)：seg 为本次合成文本（以文字或标点结尾），rest 为剩余待攒文本。
     """
     text = text.strip()
     if not text:
         return "", ""
     if len(text) <= chunk_chars:
         return text, ""
+    # ① 前 chunk_chars 字内最后一个标点（在标点后切，含标点）
     head = text[:chunk_chars]
     cut = -1
     for i in range(len(head) - 1, -1, -1):
         if head[i] in _SENTENCE_END:
             cut = i + 1
             break
+    # ② 前段无标点 → 往后找第一个标点
     if cut < 0:
         probe = text[: chunk_chars * 2]
-        for i in range(len(probe) - 1, chunk_chars - 1, -1):
+        for i in range(chunk_chars, len(probe)):
             if probe[i] in _SENTENCE_END:
                 cut = i + 1
                 break
+    # ③ 仍无标点 → 硬切，吞掉切点后的标点（避免剩余以孤立标点开头）
     if cut < 0:
         cut = chunk_chars
+        while cut < len(text) and text[cut] in _SENTENCE_END:
+            cut += 1
     return text[:cut], text[cut:].strip()
 
 
@@ -683,6 +689,7 @@ def respond(message, chat_history, stream, project, tts_enabled):
     tts_text_buf = ""   # 攒字缓冲区（待合成的文本）
     audio_blocks = []   # 播报双缓冲 A：合成完成待播的音频块
     replay_blocks = []  # 全部已合成音频块（结尾合并写重播文件）
+    failed_texts = []   # 合成失败的文本段（结尾合并重试，避免播报缺字）
     first_play = True   # 是否首次播报（攒满 tts_first_batch_blocks 个 LLM chunk 才首播）
     last_batch_dur = 0.0
     prev_text = ""
@@ -709,7 +716,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
                     replay_blocks.append(wav)
                     logger.info(f"TTS 合成块({len(replay_blocks)}): {seg[:30]}")
                 except Exception as e:
-                    logger.warning(f"TTS 合成失败: {e}")
+                    logger.warning(f"TTS 合成失败，待结尾重试: {e}")
+                    failed_texts.append(seg)
             # b. 双缓冲播报（首次攒满 5 个 LLM chunk / 后续按时长）
             batch = _maybe_play_batch(audio_blocks, first_play, last_batch_dur, llm_chunk_count)
             if batch is not None:
@@ -727,6 +735,18 @@ def respond(message, chat_history, stream, project, tts_enabled):
                     replay_blocks.append(wav)
                 except Exception as e:
                     logger.warning(f"TTS 合成失败: {e}")
+                    failed_texts.append(tts_text_buf.strip())
+            # 合成失败的文本结尾合并重试（按原文顺序，避免播报缺字）
+            if failed_texts:
+                retry_text = "".join(failed_texts).strip()
+                if retry_text:
+                    try:
+                        wav = tts.synthesize_sentence(retry_text)
+                        audio_blocks.append(wav)
+                        replay_blocks.append(wav)
+                        logger.info(f"TTS 失败段重试成功({len(retry_text)} 字): {retry_text[:30]}")
+                    except Exception as e:
+                        logger.warning(f"TTS 失败段重试仍失败（该段无法播报）: {e}")
             if audio_blocks:
                 batch = _merge_wavs(audio_blocks)
                 yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
