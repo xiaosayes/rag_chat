@@ -669,13 +669,13 @@ class TestAnswerQuestionEmpty:
         """空问题应返回提示而非崩溃。"""
         from app import answer_question
         gen = answer_question("   ", [], use_stream=True)
-        history, chunks = next(gen)
+        history, chunks, *_ = next(gen)
         assert "请输入问题" in self._last_assistant_content(history)
 
     def test_whitespace_question(self):
         from app import answer_question
         gen = answer_question("\t\n", [], use_stream=False)
-        history, chunks = next(gen)
+        history, chunks, *_ = next(gen)
         assert "请输入问题" in self._last_assistant_content(history)
 
 

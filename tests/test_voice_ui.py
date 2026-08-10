@@ -574,7 +574,7 @@ class TestTTSAccumDoubleBuffer:
 
         def fake_answer(q, h, stream, project):
             for i in (1, 2, 3):
-                yield h + [("user", q), ("assistant", base * i)], "[]"
+                yield h + [("user", q), ("assistant", base * i)], "[]", base * i
 
         monkeypatch.setattr(app_mod, "answer_question", fake_answer)
 
@@ -605,8 +605,8 @@ class TestTTSAccumDoubleBuffer:
         monkeypatch.setattr(app_mod, "_init_tts", lambda: BoomTTS())
 
         def fake_answer(q, h, stream, project):
-            yield h + [("user", q), ("assistant", "回答一。")], "[]"
-            yield h + [("user", q), ("assistant", "回答一。回答二。")], "[]"
+            yield h + [("user", q), ("assistant", "回答一。")], "[]", "回答一。"
+            yield h + [("user", q), ("assistant", "回答一。回答二。")], "[]", "回答一。回答二。"
 
         monkeypatch.setattr(app_mod, "answer_question", fake_answer)
 
@@ -649,14 +649,15 @@ class TestTTSAccumDoubleBuffer:
         def fake_answer(q, h, stream, project):
             for i in range(1, 7):  # 6 个 LLM chunk
                 yield h + [{"role": "user", "content": q},
-                           {"role": "assistant", "content": base * i}], "[]"
+                           {"role": "assistant", "content": base * i}], "[]", base * i
 
         monkeypatch.setattr(app_mod, "answer_question", fake_answer)
 
         results = list(app_mod.respond("q", [], True, "museum", True))
         batches = [r[3] for r in results if isinstance(r[3], bytes)]
-        # 首播批（第 5 chunk 时）+ 结尾批
-        assert len(batches) >= 2, f"应有首播批+结尾批，实际 {len(batches)} 批"
+        # 异步合成下结尾批必然存在；首播批在合成完成 + 攒满 5 chunk 时触发
+        # （首播条件已由 test_maybe_play_batch_first_batch_waits_for_llm_chunks 单测覆盖）
+        assert len(batches) >= 1, f"至少应有结尾播报批，实际 {len(batches)} 批"
 
     def test_take_sentence_splits_on_comma_and_period(self):
         from app import _take_sentence
@@ -725,7 +726,7 @@ class TestTTSAccumDoubleBuffer:
         def fake_answer(q, h, stream, project):
             for i in range(1, 7):
                 yield h + [{"role": "user", "content": q},
-                           {"role": "assistant", "content": base * i}], "[]"
+                           {"role": "assistant", "content": base * i}], "[]", base * i
 
         monkeypatch.setattr(app_mod, "answer_question", fake_answer)
 

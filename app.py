@@ -590,21 +590,21 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
     """
     if not question or not question.strip():
         _append_conversation(history, "", "请输入问题")
-        yield history, ""
+        yield history, "", ""
         return
 
     try:
         pipe = init_pipeline(project_id)
     except Exception as e:
         _append_conversation(history, question, f"初始化失败: {e}")
-        yield history, ""
+        yield history, "", ""
         return
 
     if not pipe._is_built:
         _append_conversation(history, question,
             "知识库尚未构建！\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
         )
-        yield history, ""
+        yield history, "", ""
         return
 
     conversation_history = _convert_history(history)
@@ -637,12 +637,12 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
                         # 检索来源的 **名称** 加粗结构由 format_answer 保留
                         display = format_answer(clean_text_for_tts(full_answer), chunks_info)
                         _update_last_assistant(history, question, display)
-                        yield history, json.dumps(chunks_info, ensure_ascii=False)
+                        yield history, json.dumps(chunks_info, ensure_ascii=False), full_answer
                         _last_update = now
             # 最后一次更新确保完整显示
             display = format_answer(clean_text_for_tts(full_answer), chunks_info)
             _update_last_assistant(history, question, display)
-            yield history, json.dumps(chunks_info, ensure_ascii=False)
+            yield history, json.dumps(chunks_info, ensure_ascii=False), full_answer
         except Exception as e:
             error_msg = f"查询出错: {e}"
             # 如果已经有部分回答，保留它而不是覆盖
@@ -650,12 +650,12 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
                 _update_last_assistant(history, question, full_answer + f"\n{HISTORY_SEPARATOR}> 剩余内容生成失败")
             else:
                 _update_last_assistant(history, question, error_msg)
-            yield history, json.dumps(chunks_info, ensure_ascii=False) if chunks_info else ""
+            yield history, json.dumps(chunks_info, ensure_ascii=False) if chunks_info else "", full_answer
     else:
         try:
             # 非流式模式：先显示"正在查询..."提示
             _update_last_assistant(history, question, "正在查询知识库...")
-            yield history, ""
+            yield history, "", ""
 
             result = pipe.query(
                 question=question, top_k=settings.retriever_top_k, rerank=settings.reranker_enabled,
@@ -667,11 +667,11 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             # bug-115：展示前清洗答案正文（TTS + 字幕纯文本）
             display = format_answer(clean_text_for_tts(answer), chunks_info, timing)
             _update_last_assistant(history, question, display)
-            yield history, json.dumps(chunks_info, ensure_ascii=False)
+            yield history, json.dumps(chunks_info, ensure_ascii=False), answer
         except Exception as e:
             error_msg = f"查询出错: {e}"
             _update_last_assistant(history, question, error_msg)
-            yield history, ""
+            yield history, "", ""
 
 
 def respond(message, chat_history, stream, project, tts_enabled):
@@ -686,38 +686,87 @@ def respond(message, chat_history, stream, project, tts_enabled):
         yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
         return
     tts = _init_tts() if tts_enabled else None
-    tts_text_buf = ""   # 攒字缓冲区（待合成的文本）
+    tasks = None
+    results_q = None
+    synth_thread = None
+    if tts is not None:
+        # 后台合成线程（单 worker 保序）：合成不阻塞 LLM 流式回答（bug-121 实测：
+        # 同步合成每 20 字阻塞 1-2s，回答显示与首播均明显停顿）
+        import queue as _queue
+        import threading
+
+        tasks = _queue.Queue()
+        results_q = _queue.Queue()
+
+        def _worker():
+            while True:
+                item = tasks.get()
+                if item is None:
+                    break
+                seq, text = item
+                try:
+                    wav = tts.synthesize_sentence(text)
+                    results_q.put((seq, None, wav))
+                except Exception as e:
+                    results_q.put((seq, e, None))
+
+        synth_thread = threading.Thread(target=_worker, daemon=True)
+        synth_thread.start()
+    tts_text_buf = ""   # 攒字缓冲区（原始文本，待切分）
     audio_blocks = []   # 播报双缓冲 A：合成完成待播的音频块
     replay_blocks = []  # 全部已合成音频块（结尾合并写重播文件）
-    failed_texts = []   # 合成失败的文本段（结尾合并重试，避免播报缺字）
+    failed_texts = []   # (seq, text) 合成失败段（结尾按序合并重试，避免播报缺字）
+    next_seq = 0
+    seg_by_seq = {}
     first_play = True   # 是否首次播报（攒满 tts_first_batch_blocks 个 LLM chunk 才首播）
     last_batch_dur = 0.0
-    prev_text = ""
+    prev_raw = ""
     llm_chunk_count = 0  # LLM 流式输出 chunk 计数（首播判据，每块约 10-15 字）
     try:
         for result in answer_question(message, chat_history, stream, project):
             yield "", result[0], result[1], gr.update(), gr.update(), gr.update()
             if tts is None:
                 continue
-            cur_text = clean_text_for_tts(_extract_last_answer_text(result[0]))
-            if len(cur_text) <= len(prev_text):
+            # 用原始累积文本做 diff（answer_question 第三值；display 经 clean 补标点
+            # 后前缀漂移，按长度 diff 会错位导致漏字/标点错乱——bug-121 实测）
+            raw = result[2] if len(result) > 2 else ""
+            if len(raw) <= len(prev_raw):
                 continue
-            tts_text_buf += cur_text[len(prev_text):]
-            prev_text = cur_text
+            tts_text_buf += raw[len(prev_raw):]
+            prev_raw = raw
             llm_chunk_count += 1  # 一个 LLM 流式输出 chunk（约 10-15 字）
-            # a. 攒字：够阈值 → 合成（优先句边界切分）
+            # a. 攒字：够阈值 → 切分（按标点）→ 段 clean → 提交后台合成（不阻塞）
             while tts_text_buf and len(tts_text_buf) >= settings.tts_accum_chars:
                 seg, tts_text_buf = _take_sentence(tts_text_buf, settings.tts_accum_chars)
                 if not seg:
                     break
+                seg_clean = clean_text_for_tts(seg)
+                if not seg_clean:
+                    continue
+                tasks.put((next_seq, seg_clean))
+                seg_by_seq[next_seq] = seg_clean
+                next_seq += 1
+            # 收集已完成合成（非阻塞；单 worker 按序产出）。
+            # 首播临界（已攒满 5 个 LLM chunk）：最多等 2s 收集首批已合成音频，
+            # 避免首播拖到回答结束（合成慢于 LLM 流式时）
+            wait_deadline = 0.0
+            if first_play and llm_chunk_count >= settings.tts_first_batch_blocks:
+                wait_deadline = time.time() + 2.0
+            while True:
                 try:
-                    wav = tts.synthesize_sentence(seg)
+                    if wait_deadline > time.time():
+                        seq, err, wav = results_q.get(timeout=wait_deadline - time.time())
+                    else:
+                        seq, err, wav = results_q.get_nowait()
+                except Exception:
+                    break
+                if err:
+                    logger.warning(f"TTS 合成失败，待结尾重试: {err}")
+                    failed_texts.append((seq, seg_by_seq.get(seq, "")))
+                else:
                     audio_blocks.append(wav)
                     replay_blocks.append(wav)
-                    logger.info(f"TTS 合成块({len(replay_blocks)}): {seg[:30]}")
-                except Exception as e:
-                    logger.warning(f"TTS 合成失败，待结尾重试: {e}")
-                    failed_texts.append(seg)
+                    logger.info(f"TTS 合成块({len(replay_blocks)})")
             # b. 双缓冲播报（首次攒满 5 个 LLM chunk / 后续按时长）
             batch = _maybe_play_batch(audio_blocks, first_play, last_batch_dur, llm_chunk_count)
             if batch is not None:
@@ -726,27 +775,31 @@ def respond(message, chat_history, stream, project, tts_enabled):
                 last_batch_dur = _wav_duration(batch)
                 yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
                     gr.update(value="播报中…")
-        # 回答结束：剩余不足阈值的文本 + 剩余音频块合并播报 + 重播
+        # 回答结束：提交剩余文本 + 失败段重试 → 等待后台合成完成 → 播剩余 + 重播
         if tts is not None:
             if tts_text_buf.strip():
+                seg_clean = clean_text_for_tts(tts_text_buf.strip())
+                if seg_clean:
+                    tasks.put((next_seq, seg_clean))
+                    seg_by_seq[next_seq] = seg_clean
+                    next_seq += 1
+            retry_text = "".join(t for _, t in sorted(failed_texts))
+            if retry_text:
+                tasks.put((next_seq, retry_text))
+                seg_by_seq[next_seq] = retry_text
+                next_seq += 1
+            tasks.put(None)  # 停止后台线程
+            synth_thread.join()
+            while True:
                 try:
-                    wav = tts.synthesize_sentence(tts_text_buf.strip())
+                    seq, err, wav = results_q.get_nowait()
+                except Exception:
+                    break
+                if err:
+                    logger.warning(f"TTS 重试仍失败（该段无法播报）: {err}")
+                else:
                     audio_blocks.append(wav)
                     replay_blocks.append(wav)
-                except Exception as e:
-                    logger.warning(f"TTS 合成失败: {e}")
-                    failed_texts.append(tts_text_buf.strip())
-            # 合成失败的文本结尾合并重试（按原文顺序，避免播报缺字）
-            if failed_texts:
-                retry_text = "".join(failed_texts).strip()
-                if retry_text:
-                    try:
-                        wav = tts.synthesize_sentence(retry_text)
-                        audio_blocks.append(wav)
-                        replay_blocks.append(wav)
-                        logger.info(f"TTS 失败段重试成功({len(retry_text)} 字): {retry_text[:30]}")
-                    except Exception as e:
-                        logger.warning(f"TTS 失败段重试仍失败（该段无法播报）: {e}")
             if audio_blocks:
                 batch = _merge_wavs(audio_blocks)
                 yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
