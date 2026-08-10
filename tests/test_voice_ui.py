@@ -175,8 +175,8 @@ class TestTtsAfterAnswer:
                                          {"role": "assistant", "content": "答"}], True))
         assert "未配置 TTS 音色" in results[0][2]["value"]
 
-    def test_single_wav_output(self, monkeypatch, tmp_path):
-        """gradio 6.22 HLS 流式播放不可靠（Error 25/fragLoopLoadingError）→ 完整 wav 一次性输出。"""
+    def test_streams_sentences_and_replay(self, monkeypatch, tmp_path):
+        """句子级流式：每句合成完立即 yield（gradio HLS 流式播放）。"""
         from app import tts_after_answer
         from src.config import Settings
 
@@ -192,12 +192,12 @@ class TestTtsAfterAnswer:
         history = [{"role": "user", "content": "q"},
                    {"role": "assistant", "content": "第一句。第二句！\n\n---\n\n**[检索来源]**\n1. **司母戊鼎**"}]
         results = list(tts_after_answer(history, True))
-        # 单次 yield：完整 wav 文件路径（播报 + 重播同一文件）
-        assert len(results) == 1
-        audio, replay, status = results[0]
-        assert audio["value"] == str(tmp_path / "replay.wav")
-        assert replay["value"] == str(tmp_path / "replay.wav")
-        assert "已播报" in status["value"]
+        # 每句一个流式 yield + 最终重播 yield
+        assert len(results) == 3
+        assert results[0][0]["value"] == b"fake-wav"  # 句子 1 流式
+        assert results[1][0]["value"] == b"fake-wav"  # 句子 2 流式
+        assert "已播报" in results[2][2]["value"]
+        assert results[2][1]["value"] == str(tmp_path / "replay.wav")
 
     def test_extract_last_answer_strips_sources(self):
         from app import _extract_last_answer_text

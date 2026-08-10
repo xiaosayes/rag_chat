@@ -403,10 +403,10 @@ def tts_after_answer(chatbot_history, enabled):
             logger.info(f"TTS 合成句子: {sentence[:40]}")
             wav = tts.synthesize_sentence(sentence)
             chunks.append(wav)
+            # 句子级流式：每句合成完立即 yield（gradio HLS 无缝续播）
+            yield gr.update(value=wav), gr.update(), gr.update(value="播报中…")
         replay_path = _write_replay_wav(chunks)
-        # gradio 6.22 的 HLS 流式播放（stream_output）在隧道/反代环境不可靠
-        # （Error 25 / fragLoopLoadingError，实测），改完整 wav 一次性输出（与重播同机制）
-        yield gr.update(value=str(replay_path)), gr.update(value=str(replay_path)), gr.update(value="已播报（可点击重听）")
+        yield gr.update(), gr.update(value=str(replay_path)), gr.update(value="已播报（可点击重播）")
     except Exception as e:
         logger.warning(f"TTS 播报失败: {e}")
         yield gr.update(), gr.update(), gr.update(value=f"语音播报失败: {e}")
@@ -709,9 +709,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                 )
 
                 gr.Markdown("### 语音播报")
-                # gradio 6.22 HLS 流式（streaming=True）播放不可靠（Error 25），
-                # 改普通 Audio 输出完整 wav（autoplay 自动播放 + 可点击重听）
-                tts_audio = gr.Audio(autoplay=True, label="语音播报（自动播放，可点击重听）", visible=True)
+                tts_audio = gr.Audio(streaming=True, autoplay=True, label="播报（自动播放）", visible=True)
                 tts_replay = gr.Audio(label="重播", visible=True)
                 tts_enabled = gr.Checkbox(label="语音播报", value=True)
                 tts_status = gr.Markdown("")
