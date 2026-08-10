@@ -30,7 +30,7 @@
 
 ## 更新日志
 
-### v1.3.5-pre (开发中) — 新增功能与修复（第九/十/十一轮）
+### v1.3.5-pre (开发中) — 新增功能与修复（第九/十/十一/十二轮）
 
 #### 新增功能
 - **语音输入与播报（bug-121）**：Web UI 新增语音功能——
@@ -60,9 +60,25 @@
 - **Web UI 项目下拉框误切换（bug-111，P0）**：下拉框 choices/value 硬编码导致 `--project jiabohui` 启动后页面加载把全局 pipeline 误切换成 museum；改为 choices 动态来自 ProjectManager、value 跟随 `--project` 参数
 - **推荐类回答混入不相关项（bug-112，P1）**：recommend prompt 增加相关性优先 + 品类匹配指令（"不相关的项不要推荐，宁缺毋滥"）；根因更正：服务器重排实际用 qwen3-rerank API（生效），非 TF-IDF 降级
 
-**全量测试**：`pytest tests/ -q` → **308 passed**（0 失败 0 错误）
+#### 全面代码审查 + 修复（第十二轮，audit-F1~F27，P0×5 + P1×7 + P2×11）
 
-### v1.3.4 (2024-08) — 当前版本
+> 测试工程师视角从零审查（不假设任何代码正确），疑点先最小复现再固化为测试，
+> 完整报告见 `code_review_report_v3.md`（最新有效审查文档）。
+
+- **P0 Excel 首行空行整表静默丢失（audit-F1）**：`_load_xlsx` 表头识别改 None 标志位 + 跳过前导空行
+- **P0 ASR 编码容器魔数 3 处错误（audit-F2）**：`ftyp` 实际在偏移 4、`ID3`(3字节)/`\xff\xfb`(2字节)与 4 字节切片比较永不命中 → Safari 录音(mp4/m4a)/mp3 被当裸 PCM 识别乱码；按魔数实际位置/长度比较
+- **P0 ASR 异常帧杀死接收线程（audit-F3）**：`w["cw"][0]["w"]` 遇空 cw 抛 IndexError 静默杀线程；逐词防御解析 + 接收循环异常保护，`ls` 终帧独立判断
+- **P0 检索瞬时故障结果被缓存 5 分钟（audit-F4）**：任一侧检索失败不写 `retrieval_cache`
+- **P0 rerank 单候选 RRF 分被当 0~1 相关性分（audit-F5）**：相关性闸门（阈值 0.45）必误判；单候选也走 API 拿真实相关性分
+- **P1 鲁棒性防御（audit-F6/F7/F8/F17）**：单点 `metadata_json` 损坏不再杀死整个语义检索；`VectorStore.close()` 后访问 client 抛清晰 RuntimeError（原静默 None）；`batch_size<1` 钳制；本地重排空词表崩溃不再穿透降级保护
+- **P1 文档控制字符清洗落地（audit-F9）**：`load_file` 统一清洗 C0 控制字符（保留 \n\t\r），bug-117b 长期失败的 2 个测试转绿（并修正了其中自相矛盾的断言）
+- **P1 展示/映射（audit-F10/F11/F12）**：RRF 量纲阈值收紧至 0.02（理论上限 1/61≈0.0164），重排低分不再误标[高]；`_select_prompt` 补 CHITCHAT 映射；TTS 重播文件按请求唯一命名（多用户不再互相覆写）
+- **P2 一批**：`to_text` 非字符串 tags、货币$与LaTeX$配对错乱、"谢谢你"判闲聊、`.env` 键名拼写 `EMBEDDING_MOD_NAME`→`EMBEDDING_MODEL_NAME`、`.ppt` 友好降级、外部项目 id 启动校验（防路径穿越）、`show_error` 仅 DEBUG、LLM 意图否定表述不误判、问候词边界匹配（"存在吗"不误伤）、缓存原子写
+- **评估后维持原决策（2 项）**：否定句命中模式缓存（bug-006 既定决策）、ASR finalized 后忽略后续块（TestAsrGuards 防无限识别既定防护），代码注释记录依据
+
+**全量测试**：`pytest tests/ -q` → **505 passed**（0 失败 0 错误）
+
+### v1.3.4 (2024-08)
 
 #### Bug 修复（第八轮生产环境修复，P0×3 + P1×1 + P2×1 + 环境×2）
 

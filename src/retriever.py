@@ -170,6 +170,9 @@ class HybridRetriever:
         # 并行执行：语义检索 + BM25 关键词检索
         semantic_results = []
         bm25_results = []
+        # audit-F4：任一侧检索失败时不写缓存，避免瞬时故障（限流/网络抖动）的
+        # 不完整结果被缓存 TTL 固化（故障后 5 分钟内持续返回降级/空结果）
+        retrieval_failed = False
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             # 提交语义检索任务
@@ -188,11 +191,13 @@ class HybridRetriever:
                         semantic_results = future.result()
                     except Exception as e:
                         logger.error(f"语义检索失败: {e}")
+                        retrieval_failed = True
                 elif future == future_bm25:
                     try:
                         bm25_results = future.result()
                     except Exception as e:
                         logger.error(f"BM25 检索失败: {e}")
+                        retrieval_failed = True
 
         # 3. RRF 融合排序
         rrf_scores: Dict[str, float] = {}
@@ -237,9 +242,11 @@ class HybridRetriever:
             f"({elapsed*1000:.0f}ms)"
         )
 
-        # 写入缓存
-        if use_cache:
+        # 写入缓存（audit-F4：检索故障的结果不缓存，下次查询重试）
+        if use_cache and not retrieval_failed:
             retrieval_cache.set(cache_key, results)
+        elif retrieval_failed:
+            logger.debug("检索存在故障，结果不写入缓存")
 
         return results
 

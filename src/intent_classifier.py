@@ -369,6 +369,11 @@ def classify_with_llm(llm, question: str) -> Optional[str]:
         return None
     # 取第一行并小写，容忍额外标点/前后缀（如 "comparison。" / "Intent: factual"）
     first_line = answer.strip().splitlines()[0].strip().lower()
+    # audit-F23 修复：子串匹配忽略否定——"not chitchat" 会误命中 "chitchat"。
+    # 否定表述不可信，返回 None 由规则层兜底
+    if any(first_line.startswith(neg) for neg in ("not ", "no ", "non", "非", "不是")):
+        logger.warning(f"LLM 意图分类输出为否定表述，无法解析: {answer[:50]!r}")
+        return None
     for key in ("recommendation", "factual", "comparison", "open_ended", "chitchat"):
         if key in first_line:
             return key

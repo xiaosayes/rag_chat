@@ -203,6 +203,15 @@ class ProjectManager:
                     with open(json_file, "r", encoding="utf-8") as f:
                         cfg = json.load(f)
                     pid = cfg.get("id", json_file.stem)
+                    # audit-F21 修复：与 add_project 一致校验项目 ID 格式，
+                    # 防止 JSON 中 id 含 ../ 等导致 data_dir/processed_dir 路径穿越
+                    import re
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", pid):
+                        logger.warning(
+                            f"跳过项目配置 {json_file.name}: 非法项目 ID {pid!r}"
+                            f"（只能包含字母、数字、下划线、中划线）"
+                        )
+                        continue
                     if pid not in self._projects:
                         self._projects[pid] = ProjectConfig(pid, cfg)
                         logger.info(f"加载外部项目: {pid} - {cfg.get('name', pid)}")

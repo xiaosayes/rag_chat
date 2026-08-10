@@ -59,9 +59,21 @@ class VectorStore:
 
     @property
     def client(self) -> QdrantClient:
-        if self._client is None and not self._closed:
+        # audit-F7 修复：close() 后旧实现静默返回 None，下游 search/upsert/get_stats
+        # 报晦涩的 'NoneType' object has no attribute ...；改为抛出语义清晰的错误
+        if self._client is None:
+            if self._closed:
+                raise RuntimeError(
+                    "VectorStore 已关闭（close() 后不可复用；项目切换请新建实例"
+                    "或调用 reset_connection()）"
+                )
             with self._connect_lock:
-                if self._client is None and not self._closed:
+                if self._client is None:
+                    if self._closed:
+                        raise RuntimeError(
+                            "VectorStore 已关闭（close() 后不可复用；项目切换请新建实例"
+                            "或调用 reset_connection()）"
+                        )
                     self._connect()
         return self._client
 
@@ -260,7 +272,16 @@ class VectorStore:
         for hit in hits:
             # bug-042 修复：Qdrant 可能返回无 payload 的 hit，降级为空 dict 避免崩溃
             payload = hit.payload or {}
-            metadata = json.loads(payload.get("metadata_json", "{}"))
+            # audit-F6 修复：单条点 payload 损坏（metadata_json 为 null/坏串）只跳过该点；
+            # 旧实现 json.loads(None) 抛 TypeError 使整条 search 失败，
+            # 上游 retriever 捕获后语义检索静默为空（一条坏数据杀死整个语义检索）
+            try:
+                metadata = json.loads(payload.get("metadata_json") or "{}")
+                if not isinstance(metadata, dict):
+                    metadata = {}
+            except (TypeError, ValueError) as e:
+                logger.warning(f"跳过损坏的检索结果点（metadata_json 解析失败）: {e}")
+                continue
             chunk = Chunk(
                 id=payload.get("chunk_id", ""),
                 artifact_id=payload.get("artifact_id", ""),
@@ -339,4 +360,6 @@ class VectorStore:
         （否则 create_collection/upsert 会继续写入旧项目的 Qdrant 目录）。
         """
         self.close()
-        self._closed = False
+        # audit-F7 修复：_closed 复位放入锁内，避免与并发 client 访问的竞态窗口
+        with self._connect_lock:
+            self._closed = False

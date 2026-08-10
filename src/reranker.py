@@ -54,15 +54,23 @@ class BailianReranker:
         if not candidates:
             return []
 
-        if len(candidates) <= 1:
-            return candidates
+        # audit-F5 修复：单候选不再原样提前返回。pipeline 对时效性问题强制重排，
+        # 依赖 0~1 相关性分（_has_relevant_results 的 RELEVANCE_THRESHOLD=0.45）；
+        # 提前返回把 RRF 融合分（~0.008）当相关性分 → 相关性闸门必误判为不相关
+        # （LLM 确认关闭时直接拒答）。单候选同样走 API 拿真实相关性分。
 
         # 尝试使用百炼 Qwen3-Reranker API
         try:
             return self._rerank_with_api(query, candidates)
         except Exception as e:
             logger.warning(f"Qwen3-Reranker API 调用失败，使用本地重排序: {e}")
-            return self._rerank_local(query, candidates)
+            try:
+                return self._rerank_local(query, candidates)
+            except Exception as e2:
+                # audit-F17 修复：本地降级自身也可能失败（如全空文本 TF-IDF 空词表），
+                # 不能再穿透 rerank() 向 pipeline 抛异常，按原顺序降级返回
+                logger.warning(f"本地重排序失败，按原顺序返回: {e2}")
+                return candidates[:self.top_k]
 
     def _rerank_with_api(
         self,
@@ -158,6 +166,12 @@ class BailianReranker:
 
         texts = [chunk.text for chunk, _ in candidates]
         all_texts = [query] + texts
+
+        # audit-F17 修复：全空文本（含 query）时 TF-IDF 空词表抛 ValueError，
+        # 提前按原顺序返回，不向调用方抛异常
+        if not any(t.strip() for t in all_texts):
+            logger.warning("本地重排序输入全为空文本，按原顺序返回")
+            return candidates[:self.top_k]
 
         # TF-IDF 向量化
         vectorizer = TfidfVectorizer(

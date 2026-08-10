@@ -273,7 +273,9 @@ def clean_text_for_tts(text: Optional[str]) -> str:
     result = re.sub(r"</?([a-zA-Z][a-zA-Z0-9]*)(?:\s[^>]*)?/?>", _html_repl, result)
 
     # 3. 删除 LaTeX 公式
-    result = re.sub(r"\$([^$\n]+?)\$", _replace_latex_dollar, result)
+    # audit-F14 修复：起始 $ 后负向断言排除货币（$5），避免"价格 $5 元，公式 $x^2$"
+    # 中货币$与公式$被错误配对——旧正则会吞掉两者间文本、公式残留裸 "x^2$"
+    result = re.sub(r"\$(?!\d)([^$\n]+?)\$", _replace_latex_dollar, result)
     result = re.sub(r"\\\(([^\\\n]+?)\\\)", _replace_latex_paren, result)
 
     # 4. Markdown 链接/图片语法 → 保留文字

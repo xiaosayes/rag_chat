@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
@@ -14,6 +15,10 @@ from loguru import logger
 
 from src.data_loader import Artifact, DataLoader
 from src.utils import generate_id
+
+# bug-117b：文档加载统一清洗 C0/DEL 控制字符（PDF/Office 提取常带 \x00-\x1f 杂字符，
+# 会污染切片与检索）。保留有含义的 \n \t \r。
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 # ========== 支持的文档类型 ==========
@@ -215,6 +220,31 @@ class PptxParser(DocumentParser):
     extensions = [".pptx", ".ppt"]
 
     def parse(self, path: Path) -> Document:
+        # audit-F20 修复：.ppt 为旧版二进制格式，python-pptx 不支持（此前声称支持
+        # 但必然抛错）。与 DocxParser 对 .doc 的处理一致：告警 + 纯文本兜底。
+        if path.suffix.lower() == ".ppt":
+            logger.warning(
+                f"{path.name} 是旧版 .ppt 格式，python-pptx 不支持。"
+                f"建议用 PowerPoint 另存为 .pptx 格式。将尝试按纯文本读取。"
+            )
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                return Document(
+                    path=path,
+                    content=content,
+                    title=path.stem,
+                    format=".ppt",
+                    metadata={"size": len(content), "warning": "旧版 .ppt 格式，内容可能不完整"},
+                )
+            except Exception:
+                return Document(
+                    path=path,
+                    content=f"[无法解析 .ppt 格式: {path.name}]",
+                    title=path.stem,
+                    format=".ppt",
+                    metadata={"error": "python-pptx 不支持旧版 .ppt 格式"},
+                )
         try:
             from pptx import Presentation
         except ImportError:
@@ -406,7 +436,9 @@ class DocumentLoader:
 
     def load_file(self, path: Path) -> Document:
         """加载单个文件"""
-        # bug-023 修复：解析真实路径，防止路径遍历攻击
+        # bug-023 修复：解析真实路径（规范化符号链接/相对路径）
+        # 注意：本方法仅做路径规范化与存在性检查，不做目录归属校验；
+        # 若未来暴露给外部输入（如 Web 上传路径），需追加 containment 校验（audit-F26）
         try:
             resolved = path.resolve()
         except (OSError, RuntimeError) as e:
@@ -424,6 +456,10 @@ class DocumentLoader:
         parser = self.extension_map[ext]
         logger.info(f"正在解析: {path.name} (格式: {ext})")
         doc = parser.parse(path)
+        # bug-117b：统一清洗控制字符（对所有解析器生效，含 PDF/Office 提取的杂字符）
+        doc.content = _CONTROL_CHAR_RE.sub("", doc.content)
+        if doc.pages:
+            doc.pages = [_CONTROL_CHAR_RE.sub("", p) for p in doc.pages]
         logger.info(f"解析完成: {path.name} → {len(doc.content)} 字符")
         return doc
 

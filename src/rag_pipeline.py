@@ -146,7 +146,9 @@ class RAGPipeline:
     CHITCHAT_SUFFIXES = ("怎么样", "怎样", "如何")
 
     # 闲聊判定中允许出现的语气词（bug-057 补充"呢"；bug-093 补充"啦/喽/哟"）
-    CHITCHAT_PARTICLES = "，。！？,。!? ～~啊呀哦嗯吧呗吗呢啦喽哟"
+    # audit-F15 补充"你/您"：剥离闲聊关键词后仅剩人称代词也应判闲聊
+    # （如"谢谢你"剥离"谢谢"后剩"你"，此前漏判走完整 RAG 检索）
+    CHITCHAT_PARTICLES = "，。！？,。!? ～~啊呀哦嗯吧呗吗呢啦喽哟你您"
 
     # 按长度降序排列的闲聊关键词（bug-093：长关键词优先剥离，
     # 避免"今天天气怎么样"先被"天气"拆散成"今天怎么样"导致残渣误判）
@@ -923,11 +925,13 @@ class RAGPipeline:
         """
         if self.project_cfg:
             # 使用项目自定义 Prompt
+            # audit-F11 修复：补充 CHITCHAT 映射（此前缺失，一旦传入即 KeyError）
             prompt_type_map = {
                 QueryType.RECOMMENDATION: "recommend",
                 QueryType.FACTUAL: "factual",
                 QueryType.COMPARISON: "default",
                 QueryType.OPEN_ENDED: "default",
+                QueryType.CHITCHAT: "default",
                 QueryType.UNKNOWN: "default",
             }
             ptype = prompt_type_map[query_type]
@@ -939,6 +943,7 @@ class RAGPipeline:
             QueryType.FACTUAL: SYSTEM_PROMPT_FACTUAL,
             QueryType.COMPARISON: SYSTEM_PROMPT_DEFAULT,
             QueryType.OPEN_ENDED: SYSTEM_PROMPT_DEFAULT,
+            QueryType.CHITCHAT: SYSTEM_PROMPT_DEFAULT,
             QueryType.UNKNOWN: SYSTEM_PROMPT_DEFAULT,
         }
         return system_prompt_map[query_type].format(context=context)
@@ -1100,6 +1105,28 @@ class RAGPipeline:
     GREETING_WORDS = ("你好", "您好", "嗨", "hello", "hi", "谢谢", "感谢",
                       "再见", "拜拜", "在吗", "哈喽")
 
+    # audit-F24：问候词后允许紧跟的标点/语气字符（用于边界匹配）
+    _GREETING_TRAILERS = "，。！？,.!? ~～啊呀哦嗯吧呗吗呢啦喽哟"
+
+    def _is_greeting(self, question: str) -> bool:
+        """判断 UNKNOWN 类问题是否为纯问候（audit-F24 修复子串误伤）
+
+        旧实现 `w in question` 为任意子串匹配："这件文物现在还存在吗" 含子串
+        "在吗" → 误判为问候而禁联网。改为：问题整体等于问候词，或以问候词开头
+        且紧随其后的是标点/语气字符。
+        """
+        q = (question or "").strip()
+        if not q:
+            return False
+        q_lower = q.lower()
+        for w in self.GREETING_WORDS:
+            wl = w.lower()
+            if q_lower == wl:
+                return True
+            if q_lower.startswith(wl) and q_lower[len(wl)] in self._GREETING_TRAILERS:
+                return True
+        return False
+
     def _should_enable_search(self, query_type: QueryType, question: str) -> bool:
         """按需联网搜索判断（bug-106，bug-116 补8 升级为语义+关键词双通道）
 
@@ -1114,7 +1141,7 @@ class RAGPipeline:
         if query_type == QueryType.OPEN_ENDED:
             return True
         if query_type == QueryType.UNKNOWN:
-            return not any(w in question for w in self.GREETING_WORDS)
+            return not self._is_greeting(question)
         if any(kw in question for kw in self.TEMPORAL_KEYWORDS):
             return True
         # 语义层：关键词未命中但语义上依赖时效信息（措辞无关）

@@ -96,7 +96,9 @@ class Artifact:
         if self.cultural_value:
             parts.append(f"文化价值：{self.cultural_value}")
         if self.tags:
-            parts.append(f"标签：{'、'.join(self.tags)}")
+            # audit-F13 修复：tags 可能含非字符串元素（JSON 数字列表），统一转 str，
+            # 避免 join 抛 TypeError（与 chunking.py bug-090 修复一致）
+            parts.append(f"标签：{'、'.join(str(t) for t in self.tags)}")
         return "\n".join(parts)
 
 
@@ -148,8 +150,8 @@ class DataLoader:
         加载 Excel (.xlsx) 格式（bug-109）
 
         规则：
-          - 遍历所有 sheet（多 sheet 支持），每个 sheet 第一行为表头，后续行每行一条记录
-          - 名称列识别：列名命中候选集 → 否则取第一个非空列 → 兜底 "{sheet名}第N行"
+          - 遍历所有 sheet（多 sheet 支持），每个 sheet 第一个非空行为表头，后续行每行一条记录
+          - 名称列识别：列名命中候选集 → 否则取第一个非空列
           - 任意未识别列以 "列名：值" 拼入 description，保证任何列内容可被全文检索命中
           - 空行 / 空列跳过
         """
@@ -167,15 +169,18 @@ class DataLoader:
         try:
             for ws in wb.worksheets:
                 rows = ws.iter_rows(values_only=True)
-                header: List[str] = []
-                row_idx = 0
+                header: Optional[List[str]] = None
                 for row in rows:
-                    if not header:
-                        header = [
-                            _cell_to_str(c) for c in row
-                        ]
+                    if header is None:
+                        # audit-F1 修复：首行全空时 ["","",...] 为非空列表，旧判断
+                        # `if not header` 会把它误认为有效表头 → 真正的表头行被当数据、
+                        # 列名全空被跳过 → 整个 sheet 静默丢失 0 条记录。
+                        # 改为 None 标志位 + 跳过前导空行（真实 Excel 常见标题/空行）。
+                        candidate = [_cell_to_str(c) for c in row]
+                        if not any(candidate):
+                            continue
+                        header = candidate
                         continue
-                    row_idx += 1
                     # 空行跳过
                     if all(_cell_to_str(c) == "" for c in row):
                         continue

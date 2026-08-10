@@ -3,6 +3,7 @@ LRU 缓存模块 v2
 支持高频问题 Embedding 预计算、语义相似匹配、持久化存储
 """
 
+import os
 import time
 import json
 import hashlib
@@ -209,13 +210,19 @@ class EmbeddingCache:
         """持久化缓存到磁盘（全部使用 JSON 格式）
 
         bug-008 修复：加锁保护，避免并发写入时数据不一致。
+        audit-F25 修复：tmp 文件 + os.replace 原子写，避免进程崩溃/中断时
+        覆写半截文件损坏整个缓存（虽加载端有兜底，但缓存会全丢）。
         """
         with self._lock:
             try:
-                with open(self._cache_file, "w", encoding="utf-8") as f:
-                    json.dump(self._exact_cache, f, ensure_ascii=False)
-                with open(self._pattern_file, "w", encoding="utf-8") as f:
-                    json.dump(self._pattern_cache, f, ensure_ascii=False)
+                for target, data in (
+                    (self._cache_file, self._exact_cache),
+                    (self._pattern_file, self._pattern_cache),
+                ):
+                    tmp = target.with_suffix(target.suffix + ".tmp")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False)
+                    os.replace(tmp, target)
                 logger.info(
                     f"保存 Embedding 缓存: {len(self._exact_cache)} 精确 + "
                     f"{len(self._pattern_cache)} 模式"
@@ -256,6 +263,11 @@ class EmbeddingCache:
         1. 精确匹配缓存 → 直接返回
         2. 模式匹配（高频问题模板，基于完整短语匹配）→ 返回模板的 Embedding
         3. 未命中 → 返回 None，由调用方计算并缓存
+
+        注意（audit-F19 评估后维持原决策）：含否定词的问题（如"我不推荐…"）可能
+        命中模式缓存返回他句向量——bug-006 已明确此为可接受的近似（缓存是优化手段，
+        近似 embedding 优于缓存未命中；下游还有重排与 LLM 相关性闸门），
+        见 tests/test_edge_cases.py::TestEmbeddingCacheBoundaryBug。
         """
         question = question.strip()
 

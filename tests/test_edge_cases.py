@@ -1448,7 +1448,9 @@ class TestDocumentControlCharCleaning:
         assert len(docs) == 2
         for doc in docs:
             assert "\x01" not in doc.content
-            assert "杂字符" not in doc.content  # 控件字符被移除，前后文本合并
+            # audit 修正：原断言 "杂字符" not in content 自相矛盾——清洗控制字符
+            # 不应删除正常文字；正确期望是控制字符移除后前后文本合并保留
+            assert "杂字符" in doc.content
 
 
 class TestVoiceConfigDefaults:

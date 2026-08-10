@@ -151,12 +151,17 @@ class TestFormatAnswerNoEmoji:
         assert "响应时间: 1234ms" in result
 
     def test_format_answer_rrf_scale_no_emoji(self):
-        """RRF 融合分（0~0.1 量级）路径同样无 emoji（[高]/[中]/[低] 全覆盖）"""
+        """RRF 融合分路径同样无 emoji（[高]/[中]/[低] 全覆盖）
+
+        audit-F10 修正夹具：RRF 理论上限 = (w_sem+w_bm25)/(rrf_k+1) = 1/61 ≈ 0.0164
+        （rrf_k=60，权重和为 1），原夹具的 0.03/0.02 不可能是 RRF 分；改为真实
+        RRF 分布（均 < 0.0164），量纲判定阈值同步收紧为 0.02。
+        """
         from app import format_answer
         chunks = [
-            {"artifact_name": "A", "score": 0.03, "chunk_type": "summary"},
-            {"artifact_name": "B", "score": 0.02, "chunk_type": "detail"},
-            {"artifact_name": "C", "score": 0.01, "chunk_type": "detail"},
+            {"artifact_name": "A", "score": 0.015, "chunk_type": "summary"},
+            {"artifact_name": "B", "score": 0.012, "chunk_type": "detail"},
+            {"artifact_name": "C", "score": 0.010, "chunk_type": "detail"},
             {"artifact_name": "D", "score": 0.005, "chunk_type": "detail"},
         ]
         result = format_answer("回答", chunks)

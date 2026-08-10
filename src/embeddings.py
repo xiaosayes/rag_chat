@@ -53,6 +53,13 @@ class BailianEmbedding:
                 f"{self.MAX_BATCH_SIZE}，已钳制为 {self.MAX_BATCH_SIZE}"
             )
             batch_size = self.MAX_BATCH_SIZE
+        elif batch_size < 1:
+            # audit-F8 修复：batch_size<=0 未防御——0 使 embed_batch 内 range(step=0)
+            # 抛 ValueError，负数使分批为空导致全部向量缺失报 RuntimeError
+            logger.warning(
+                f"embedding_batch_size={batch_size} 非法（必须 >= 1），使用默认 {self.MAX_BATCH_SIZE}"
+            )
+            batch_size = self.MAX_BATCH_SIZE
         self.batch_size = batch_size
         self.max_retries = max_retries
 

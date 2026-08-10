@@ -112,19 +112,32 @@ class IflytekASR:
             logger.warning(f"讯飞 IAT 返回错误: {self.error}")
             return
         result = (msg.get("data") or {}).get("result") or {}
-        ws = result.get("ws", [])
-        if not ws:
-            return
-        sentence = "".join(w["cw"][0]["w"] for w in ws)
-        pgs = result.get("pgs", "apd")
-        if pgs == "rpl":
-            if self._partial_sentences:
-                self._partial_sentences[-1] = sentence
+        ws = result.get("ws") or []
+        # audit-F3 修复：逐词防御性解析。旧实现 w["cw"][0]["w"] 遇空 cw/缺键帧
+        # 抛 IndexError/KeyError，在 _recv_loop 线程中未捕获 → 接收线程静默死亡，
+        # 后续识别结果全部丢失（finish 空等 10s 超时）。坏帧跳过，不杀线程。
+        words = []
+        for w in ws:
+            if not isinstance(w, dict):
+                continue
+            cw = w.get("cw") or []
+            if not cw or not isinstance(cw[0], dict):
+                continue
+            word = cw[0].get("w") or ""
+            if word:
+                words.append(word)
+        if words:
+            sentence = "".join(words)
+            pgs = result.get("pgs", "apd")
+            if pgs == "rpl":
+                if self._partial_sentences:
+                    self._partial_sentences[-1] = sentence
+                else:
+                    self._partial_sentences.append(sentence)
             else:
                 self._partial_sentences.append(sentence)
-        else:
-            self._partial_sentences.append(sentence)
-        self._current_text = "".join(self._partial_sentences)
+            self._current_text = "".join(self._partial_sentences)
+        # ls 终帧可能不带 ws（空结果结束），独立判断，避免 finish() 空等超时
         if result.get("ls"):
             self._final_text = self._current_text
             self._is_final = True
@@ -166,7 +179,11 @@ class IflytekASR:
                 break  # 连接关闭/异常
             if data is None:
                 continue
-            self._handle_message(data)
+            try:
+                self._handle_message(data)
+            except Exception as e:
+                # audit-F3 修复：单帧解析异常不应杀死接收线程
+                logger.warning(f"ASR 响应帧解析失败（已跳过）: {e}")
 
     def feed(self, pcm: bytes) -> str:
         """发送一帧 16k PCM 音频，返回当前累积识别文本（含部分结果）。"""
@@ -277,15 +294,22 @@ def _to_pcm16k(audio_bytes: bytes, target_rate: int = 16000) -> bytes:
 
 
 def _is_encoded_container(audio_bytes: bytes) -> bool:
-    """判断是否为编码音频容器（需 ffmpeg 转码），避免把容器字节当裸 PCM。"""
-    magics = (
-        b"\x1aE\xdf\xa3",  # EBML: webm/mkv（Chrome MediaRecorder 默认）
-        b"OggS",            # ogg/opus
-        b"ftyp",            # mp4/m4a（Safari MediaRecorder 默认）
-        b"ID3",             # mp3
-        b"\xff\xfb",       # mp3 无 ID3
-    )
-    return audio_bytes[:4] in magics
+    """判断是否为编码音频容器（需 ffmpeg 转码），避免把容器字节当裸 PCM。
+
+    audit-F2 修复：旧实现 `audio_bytes[:4] in magics` 存在 3 处魔数比较错误——
+      1. mp4/m4a 的 "ftyp" 位于偏移 4（前 4 字节是 box size），偏移 0 永不命中；
+      2. "ID3" 仅 3 字节、"\xff\xfb" 仅 2 字节，与 4 字节切片比较永不命中。
+    导致 Safari 录音（mp4/m4a）与 mp3 全部被当裸 PCM 送讯飞，识别输出乱码。
+    """
+    if audio_bytes[:4] in (b"\x1aE\xdf\xa3", b"OggS"):
+        return True  # webm/mkv（Chrome）、ogg/opus
+    if audio_bytes[4:8] == b"ftyp":
+        return True  # mp4/m4a（Safari MediaRecorder 默认）：ISO-BMFF box type 在偏移 4
+    if audio_bytes[:3] == b"ID3":
+        return True  # mp3 带 ID3 标签
+    if audio_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return True  # mp3 帧同步（无 ID3）
+    return False
 
 
 def _ffmpeg_to_wav(audio_bytes: bytes) -> bytes:

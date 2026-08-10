@@ -230,7 +230,11 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
         }
     if state["finalized"]:
         # 已识别完成：忽略所有后续块；msg 不更新，voice_status 置空（避免空 update 到 Markdown
-        # 导致前端 f.message.trim 报错，且不覆盖 TTS 播报提示）
+        # 导致前端 f.message.trim 报错，且不覆盖 TTS 播报提示）。
+        # 注（audit-F27 评估后维持原决策）：若 stop_recording 事件未到达，state 残留期间
+        # 新录音首块可能被忽略，该场景依赖 gradio 事件时序、概率低；而 finalized 后
+        # 继续 feed 可能反复重建会话导致无限识别（test_voice_ui.TestAsrGuards 明确防护），
+        # 两害相权维持“忽略后续块”。
         yield state, gr.update(), gr.update(value="")
         return
     asr = state["session"]
@@ -353,7 +357,10 @@ def _write_replay_wav(chunks):
 
     cache_dir = settings.project_root / "data" / "processed" / "tts_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / "last_answer.wav"
+    # audit-F12 修复：全局单文件 last_answer.wav 在多用户/多会话并发时互相覆写
+    # （用户 A 的点重播会播放用户 B 的答案）。改为按请求唯一命名 + 保留最近 5 个。
+    import uuid
+    path = cache_dir / f"last_answer_{uuid.uuid4().hex[:8]}.wav"
     if not chunks:
         path.write_bytes(b"")
         return path
@@ -370,6 +377,14 @@ def _write_replay_wav(chunks):
         w.setframerate(rate)
         w.writeframes(b"".join(pcm_parts))
     path.write_bytes(buf.getvalue())
+    # audit-F12：清理过期重播文件，仅保留最近 5 个，避免磁盘无限增长
+    try:
+        replays = sorted(cache_dir.glob("last_answer_*.wav"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in replays[5:]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        pass
     return path
 
 
@@ -497,7 +512,12 @@ def _init_tts():
 
 
 def tts_after_answer(chatbot_history, enabled):
-    """respond 完成后触发：句子级流式播报 + 完整重播副本（生成器）。"""
+    """respond 完成后触发：句子级流式播报 + 完整重播副本（生成器）。
+
+    注意（audit-F18）：当前 UI 未将此函数绑定到任何事件（播报已内联进 respond），
+    保留是因为 tests/test_voice_ui.py 与外部脚本仍在使用；如需启用“回答后播报”
+    交互，可将其绑定到 chatbot.change 事件。
+    """
     logger.info(f"TTS 播报触发: enabled={enabled}, key={'OK' if settings.dashscope_api_key else '缺失'}, voice={settings.tts_voice!r}")
     if not enabled:
         yield gr.update(), gr.update(), gr.update(value="")
@@ -832,9 +852,11 @@ def format_answer(answer: str, chunks: list, timing: dict = None) -> str:
         # RRF 场景下所有结果恒为灰色，无法区分相关度
         scores = [(c.get("score") or 0) for c in chunks[:5]]
         max_score = max(scores) if scores else 0
-        # RRF 融合分无绝对意义（量级约 0.001~0.01），按显示排名标记：
-        # 第1名 [高]，第2-3名 [中]，其余 [低]
-        rrf_scale = 0 < max_score < 0.1
+        # RRF 融合分无绝对意义，按显示排名标记：第1名 [高]，第2-3名 [中]，其余 [低]
+        # audit-F10 修复：RRF 理论上限 = (w_sem + w_bm25)/(rrf_k+1) = 1/61 ≈ 0.0164
+        # （rrf_k=60）；旧阈值 0.1 会把重排量纲的合法低分（如 0.05）误判为 RRF，
+        # 导致低相关结果被按排名误标 [高]。阈值收紧到 0.02（留有余量）。
+        rrf_scale = 0 < max_score < 0.02
         for i, c in enumerate(chunks[:5], 1):
             # bug-041 修复：字段缺失/为 None 时使用默认值，避免 score 比较崩溃
             name = c.get("artifact_name") or "未知"
@@ -1072,7 +1094,9 @@ def main():
         "server_name": args.host,
         "server_port": args.port,
         "share": args.share,
-        "show_error": True,
+        # audit-F22 修复：show_error=True 会向前端用户展示完整后端堆栈（信息泄漏），
+        # 仅在 DEBUG 日志级别下开启（开发排障），生产环境（INFO+）关闭
+        "show_error": settings.log_level.upper() == "DEBUG",
     }
     if _GRADIO_MAJOR >= 6:
         # bug-098：Gradio 6.0 将 theme/css 移到 launch()
