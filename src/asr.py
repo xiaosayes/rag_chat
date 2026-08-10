@@ -178,10 +178,18 @@ class IflytekASR:
         return self._current_text
 
     def finish(self) -> str:
-        """发送尾帧并等待最终结果，关闭连接。幂等。"""
+        """发送尾帧并等待最终结果，关闭连接。幂等。
+
+        bug-121：服务端 VAD 自动结束后连接可能已关闭，尾帧发送失败时静默忽略
+        （避免 Broken pipe），用已收到的最终/当前文本。
+        """
         if self._ws is None:
             return self._final_text or self._current_text
-        self._ws.send(self._build_frame(b"", 2))
+        try:
+            self._ws.send(self._build_frame(b"", 2))
+        except Exception:
+            # 服务端可能已关闭连接（vad 触发）→ 尾帧失败不阻断，用已收文本
+            pass
         deadline = time.time() + 10
         while not self._is_final and time.time() < deadline:
             time.sleep(0.05)

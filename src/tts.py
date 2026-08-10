@@ -11,6 +11,25 @@ from typing import Callable, List, Optional, Union
 from src.audio_bootstrap import ensure_ffmpeg
 
 
+def _ensure_dashscope_key() -> None:
+    """确保 dashscope SDK 能拿到 API Key。
+
+    SpeechSynthesizer 无 api_key 参数，只读 dashscope.api_key 全局或环境变量
+    DASHSCOPE_API_KEY；而项目密钥走 pydantic .env（不进 os.environ），
+    服务器上因此报 "apikey is required"（bug-121 实测）。此处从 settings 注入。
+    """
+    import os
+
+    from src.config import settings
+
+    key = settings.dashscope_api_key or ""
+    if key:
+        os.environ.setdefault("DASHSCOPE_API_KEY", key)
+        import dashscope
+
+        dashscope.api_key = key
+
+
 class _ChunkCollector:
     """收集流式合成音频块（dashscope ResultCallback 适配）。"""
 
@@ -52,6 +71,7 @@ class CosyVoiceTTS:
     ):
         from dashscope.audio.tts_v2 import AudioFormat
 
+        _ensure_dashscope_key()  # 注入 dashscope.api_key（服务器 .env 不进 os.environ）
         self.model = model
         self.voice = voice
         # 真实 API 冒烟（Task 9）发现：SpeechSynthesizer 的 format 需 AudioFormat 枚举而非字符串

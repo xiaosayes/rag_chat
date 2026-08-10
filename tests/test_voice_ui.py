@@ -319,3 +319,66 @@ class TestAsrGuards:
         assert new_state["finalized"] is True
         assert "超时文本" in msg_update["value"]
         assert "已识别完成" in status["value"]
+
+
+class TestAsrSilenceAutoStop:
+    """静音自动结束：连续静音块 → 自动 finish（讯飞 vad 不主动结束，实测）。"""
+
+    def _settings(self, monkeypatch, tmp_path):
+        from src.config import Settings
+        s = Settings(_env_file=None)
+        s.xfyun_app_id = "a"
+        s.xfyun_api_key = "k"
+        s.xfyun_api_secret = "s"
+        s.asr_dict_dir = tmp_path
+        s.asr_silence_threshold = 500
+        s.asr_silence_blocks = 2  # 2 块静音即结束（测试用短值）
+        monkeypatch.setattr("app.settings", s)
+        return s
+
+    def test_silence_blocks_auto_finalize(self, monkeypatch, tmp_path):
+        from app import asr_stream_chunk
+        self._settings(monkeypatch, tmp_path)
+        monkeypatch.setattr("app.IflytekASR", _FakeASR)
+
+        def fake_to_pcm16k(b, r):
+            return b"\x00\x00" * 100  # 全零 = 静音
+
+        monkeypatch.setattr("app._to_pcm16k", fake_to_pcm16k)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"silence")
+
+        # 第一块静音：计数 1，仍识别中
+        st = list(asr_stream_chunk(str(chunk), None, ""))[0][0]
+        assert st["finalized"] is False
+        assert st["silent_blocks"] == 1
+        # 第二块静音（不同内容也可，仍静音）：计数 2 ≥ 2 → 自动结束
+        chunk.write_bytes(b"silence2")
+        st2, msg_update, status = list(asr_stream_chunk(str(chunk), st, ""))[0]
+        assert st2["finalized"] is True
+        assert "已识别完成" in status["value"]
+        assert "你好" in msg_update["value"]
+
+    def test_speech_resets_silence_counter(self, monkeypatch, tmp_path):
+        from app import asr_stream_chunk
+        self._settings(monkeypatch, tmp_path)
+        monkeypatch.setattr("app.IflytekASR", _FakeASR)
+
+        def fake_to_pcm16k(b, r):
+            return b"\x00\x00" * 100  # 静音
+
+        monkeypatch.setattr("app._to_pcm16k", fake_to_pcm16k)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"silence1")
+        st = list(asr_stream_chunk(str(chunk), None, ""))[0][0]
+        assert st["silent_blocks"] == 1
+
+        # 非静音块（小端 0x4000 = 16384，RMS 远超阈值）→ 计数清零
+        def speech_pcm(b, r):
+            return bytes([0x00, 0x40]) * 100
+
+        monkeypatch.setattr("app._to_pcm16k", speech_pcm)
+        chunk.write_bytes(b"speech")
+        st2, _, _ = list(asr_stream_chunk(str(chunk), st, ""))[0]
+        assert st2["silent_blocks"] == 0
+        assert st2["finalized"] is False

@@ -182,6 +182,20 @@ def init_pipeline(project_id: str = ""):
 
 # ========== 语音功能（bug-121）：ASR 语音输入 ==========
 
+def _pcm_rms(pcm: bytes) -> float:
+    """计算 16bit PCM 的 RMS 音量（静音检测用，0-32768 量级）。"""
+    import array
+    import math
+
+    if len(pcm) % 2:
+        pcm = pcm[: len(pcm) - 1]  # 奇数长度截断（测试数据/异常流）
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+
 def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
     """Gradio Audio stream 事件：音频块送达 → 送入讯飞 ASR → 实时更新输入框。
 
@@ -249,6 +263,17 @@ def asr_stream_chunk(audio_filepath, state, project_id: str = ""):
             state["fed"] = True
             # 等待讯飞 wpgs 部分结果返回（动态修正 apd 追加/rpl 替换），实现边说边出字
             time.sleep(0.2)
+            # 客户端静音检测：连续静音块（0.5s/块）→ 自动结束（信飞 vad 不主动结束，实测）
+            if _pcm_rms(pcm_block) < settings.asr_silence_threshold:
+                state["silent_blocks"] = state.get("silent_blocks", 0) + 1
+            else:
+                state["silent_blocks"] = 0
+            if state["silent_blocks"] >= settings.asr_silence_blocks:
+                final = asr.finish()
+                state["finalized"] = True
+                logger.info(f"ASR 最终结果(静音自动结束): {final}")
+                yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
+                return
         state["last_key"] = key
         if asr.is_final():
             # 服务端已自动结束（vad 兜底）→ 立即收尾，避免继续 feed 到已关闭连接（Broken pipe）
