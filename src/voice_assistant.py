@@ -51,6 +51,7 @@ class VoiceAssistant:
     def __init__(self, vad, asr_factory: Callable, *, wake_words: List[str],
                  correct_fn: Callable[[str], str] = None,
                  initial_wait_s: float = 8.0, extend_wait_s: float = 2.0,
+                 greeting: str = "",
                  clock: Callable[[], float] = time.monotonic):
         self._vad = vad
         self._asr_factory = asr_factory
@@ -64,6 +65,9 @@ class VoiceAssistant:
         self._question = ""            # listen 态累积的已落定问题文本
         self._deadline: Optional[float] = None
         self._await_since: float = 0.0
+        self._wake_display = (wake_words or [""])[0]  # 状态行展示用
+        self._greeting = greeting                      # 应答语文本（await 状态行展示）
+        self._last_line = ""           # 上次已上屏的常驻状态行（不变不重复刷）
 
     # ---------- 只读状态（测试/观测用） ----------
 
@@ -80,12 +84,15 @@ class VoiceAssistant:
             self._close_asr()
             self._deadline = None
             self._mode = "broadcast"
-            return [VoiceAction("status", "🔊 播报中…（说话可打断）")]
+            self._last_line = ""  # 下次 process_chunk 重发常驻行
+            return [VoiceAction("status", "🔊 播报中｜说话可随时打断")]
         if not active and self._mode == "broadcast":
             # 播报结束 → 8s 初始窗口（需求3：语音播报后开始识别录音，8秒）
             self._mode = "listen"
             self._deadline = self._clock() + self._initial_wait
-            return [VoiceAction("status", f"🎙 请提问（{int(self._initial_wait)} 秒内开口）")]
+            self._last_line = ""
+            return [VoiceAction("status",
+                                f"👂 倾听中｜{int(self._initial_wait)}s 内可开口提问")]
         return []
 
     # ---------- 主循环 ----------
@@ -143,10 +150,23 @@ class VoiceAssistant:
                         self._mode = "await_broadcast"
                         self._await_since = now
                         actions.append(VoiceAction("greet"))
-                        actions.append(VoiceAction("status", "✅ 已唤醒"))
+                        actions.append(VoiceAction(
+                            "status", f"✅ 已唤醒｜{self._greeting}" if self._greeting else "✅ 已唤醒"))
                     else:
                         actions.append(VoiceAction("status", "未听到唤醒词，请说「你好小虎」"))
                 elif self._mode == "listen":
+                    norm = self._correct(_normalize(text))
+                    if norm and any(norm == w for w in self._wake_norm):
+                        # 倾听态整句即唤醒词 → 重新唤醒应答（用户复测实证：
+                        # 8s 窗内说唤醒词被当问题提交走 LLM，与预期不符）
+                        self._question = ""
+                        self._deadline = None
+                        self._mode = "await_broadcast"
+                        self._await_since = now
+                        actions.append(VoiceAction("greet"))
+                        actions.append(VoiceAction("status", "✅ 已唤醒"))
+                        return self._with_status_line(actions, now)
+                    text = self._strip_wake_prefix(text)  # “你好小虎，xxx” → 前缀剥离
                     if text:
                         self._question += text
                     self._deadline = now + self._extend_wait  # 段结束 → +2s 循环延长
@@ -161,7 +181,51 @@ class VoiceAssistant:
             partial = self._correct(self._asr.current_text or "")
             if self._mode == "listen" and partial:
                 actions.append(VoiceAction("msg", self._question + partial))
+        return self._with_status_line(actions, now)
+
+    # ---------- 常驻状态行（修复轮2：用户对状态无感知） ----------
+
+    def _status_line(self, now: float) -> str:
+        if self._mode == "standby":
+            return f"🎙 待机中｜说「{self._wake_display}」唤醒"
+        if self._mode == "await_broadcast":
+            # 应答语全文上屏（用户复测“唤醒后无默认回答”——音频之外文本可见）
+            return f"🔊 应答中｜{self._greeting}" if self._greeting else "⏳ 正在准备应答…"
+        if self._mode == "broadcast":
+            return "🔊 播报中｜说话可随时打断"
+        # listen
+        if self._vad.in_speech:
+            return "👂 正在倾听…（说完自动提交）"
+        if self._deadline is not None:
+            remain = max(0.0, self._deadline - now)
+            return f"👂 倾听中｜{remain:.0f}s 内可开口提问"
+        return "👂 倾听中"
+
+    def _with_status_line(self, actions: List[VoiceAction], now: float) -> List[VoiceAction]:
+        """每块收尾挂常驻状态行：本块已有瞬时提示（✅/⚡/📨）则让位，下块补常驻行。"""
+        if any(a.kind == "status" for a in actions):
+            self._last_line = ""  # 瞬时提示上屏后，下块重发常驻行
+        else:
+            line = self._status_line(now)
+            if line != self._last_line:
+                self._last_line = line
+                actions.append(VoiceAction("status", line))
         return actions
+
+    def _strip_wake_prefix(self, text: str) -> str:
+        """剥离唤醒词前缀（"你好小虎，司母戊鼎" → "司母戊鼎"）；非前缀原样返回。"""
+        norm = self._correct(_normalize(text))
+        for w in self._wake_norm:
+            if norm.startswith(w) and len(norm) > len(w):
+                cnt, i = 0, 0
+                while i < len(text) and cnt < len(w):
+                    if not _NORM_RE.match(text[i]):  # 只数非标点字符
+                        cnt += 1
+                    i += 1
+                rest = text[i:].lstrip("，。！？、,.!? ")
+                if rest:
+                    return rest
+        return text
 
     # ---------- ASR 会话管理 ----------
 

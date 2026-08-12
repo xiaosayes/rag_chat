@@ -145,6 +145,47 @@ def patch_gradio_mic_aec() -> bool:
         return False
 
 
+def patch_gradio_stream_endstream_guard() -> bool:
+    """修复 gradio 6.22 流式输出收尾 KeyError（audit-ASR 实证）。
+
+    现象：带 streaming Audio 输出的生成器事件结束时，末趟 final pass 所有输出值为
+    None；`handle_streaming_outputs` 对未打开过流的输出执行 `stream_run[output_id]
+    .end_stream()` → KeyError（E2E 实录：fn=auto_respond，out[3] id=28 Audio data=None）。
+    触发条件：该轮从未 yield 音频（TTS 关闭/合成失败/被打断跳过收尾）。后果：事件
+    收尾中断，最后一批输出（状态/重播更新）丢失。
+    修复：final 趟预检——流式输出若无已打开的流且值为 None，降级为空 update（跳过）。
+    """
+    try:
+        from gradio import components, utils
+        from gradio.blocks import Blocks
+
+        if getattr(Blocks.handle_streaming_outputs, "_asr_guarded", False):
+            return True
+        _orig = Blocks.handle_streaming_outputs
+
+        async def _guarded(self, block_fn, data, session_hash=None, run=None,
+                           root_path=None, final=False):
+            if final and session_hash is not None and run is not None:
+                streams = self.pending_streams.get(session_hash, {}).get(run)
+                for i, block in enumerate(block_fn.outputs):
+                    if (isinstance(block, components.StreamingOutput)
+                            and block.streaming
+                            and not utils.is_prop_update(data[i])
+                            and (streams is None or block._id not in streams)
+                            and data[i] is None):
+                        data[i] = {"__type__": "update"}  # 从未开流 → 末趟跳过
+            return await _orig(self, block_fn, data, session_hash=session_hash,
+                               run=run, root_path=root_path, final=final)
+
+        _guarded._asr_guarded = True
+        Blocks.handle_streaming_outputs = _guarded
+        logger.info("gradio 流式输出收尾 KeyError guard patch 已应用")
+        return True
+    except Exception as e:
+        logger.warning(f"gradio 流式收尾 guard patch 不可用: {e}")
+        return False
+
+
 def verify_frontend_patches() -> bool:
     """启动自检：复读磁盘上的 StaticAudio-*.js / record.esm-*.js，确认 patch 标记真实落盘。
 

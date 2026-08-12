@@ -36,6 +36,7 @@ def main() -> int:
         head=app_mod._TTS_STALL_PROBE_HEAD + app_mod._voice_assist_head(),
     )
     t0 = time.time()
+    t_launch = t0
     while time.time() - t0 < 120:
         try:
             if httpx.get(f"http://127.0.0.1:{port}", timeout=2).status_code == 200:
@@ -60,25 +61,20 @@ def main() -> int:
         ])
         ctx = browser.new_context(locale="zh-CN")  # 复现用户的中文本地化 DOM
         page = ctx.new_page()
-        page.on("console", lambda m: console_hits.append(m.text))
+        page.on("console", lambda m: (console_hits.append(m.text),
+                                      print(f"[console] {m.text[:120]}")))
+        print(f"[E2E] goto 完成 @ {time.time() - t_launch:.1f}s")
         page.goto(f"http://127.0.0.1:{port}")
 
+        # 可靠判据：控制台出现 stream-ok（WS 上行帧计数增长，UI 录音态会假阳性）
         ok = False
-        deadline = time.time() + 30
+        deadline = time.time() + 75  # app 初始化 ~10s + 首次点击 t5 + 观测 6s，留足裕量
+        _i = 0
         while time.time() < deadline:
-            # 录音中标志：#voice_audio 内出现「停止」语义的按钮
-            found = page.evaluate(
-                """(() => {
-                    const root = document.getElementById('voice_audio');
-                    if (!root) return 'no-root';
-                    for (const b of root.querySelectorAll('button')) {
-                        const s = ((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||''));
-                        if (/停止|stop/i.test(s)) return 'recording';
-                    }
-                    return 'not-recording';
-                })()"""
-            )
-            if found == "recording":
+            _i += 1
+            # playwright 同步 API 只在调用时泵事件循环——sleep 空转收不到 console 事件（实证）
+            page.evaluate("1")
+            if any("__voiceAssistAutoRecord stream-ok" in t for t in console_hits):
                 ok = True
                 break
             time.sleep(1)
@@ -86,7 +82,7 @@ def main() -> int:
 
     clicked = any("__voiceAssistAutoRecord clicked" in t for t in console_hits)
     print(f"控制台标记 __voiceAssistAutoRecord clicked: {'有' if clicked else '无'}")
-    print(f"录音自动启动（出现停止按钮）: {'是' if ok else '否'}")
+    print(f"流式上行确认（stream-ok）: {'是' if ok else '否'}")
     if ok and clicked:
         print("✅ 自动点录音 E2E 通过（zh-CN 本地化 DOM）")
         return 0

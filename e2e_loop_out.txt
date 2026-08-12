@@ -1,0 +1,68 @@
+[32m2026-08-12 21:35:05.444[0m | [1mINFO    [0m | [36msrc.audio_bootstrap[0m:[36mpatch_gradio_stream_endstream_guard[0m:[36m182[0m - [1mgradio Á÷Ê½Êä³öÊÕÎ² KeyError guard patch ÒÑÓ¦ÓÃ[0m
+[32m2026-08-12 21:35:05.449[0m | [1mINFO    [0m | [36msrc.audio_bootstrap[0m:[36mpatch_gradio_hls_reuse[0m:[36m88[0m - [1mgradio HLS ¸´ÓÃ patch ÒÑÓ¦ÓÃ£¨Ìø¹ı£©: StaticAudio-DLiZOKt2.js[0m
+[32m2026-08-12 21:35:05.452[0m | [1mINFO    [0m | [36msrc.audio_bootstrap[0m:[36mpatch_gradio_mic_aec[0m:[36m128[0m - [1mÂó¿Ë·ç AEC patch ÒÑÓ¦ÓÃ£¨Ìø¹ı£©: record.esm-Res0U6Io.js[0m
+[32m2026-08-12 21:35:05.460[0m | [1mINFO    [0m | [36msrc.audio_bootstrap[0m:[36mverify_frontend_patches[0m:[36m235[0m - [1mÇ°¶Ë patch ×Ô¼ìÍ¨¹ı: 3+1 ±ê¼ÇÔÚÎ»£¨StaticAudio-DLiZOKt2.js£©[0m
+[32m2026-08-12 21:35:05.461[0m | [1mINFO    [0m | [36msrc.audio_bootstrap[0m:[36mpatch_gradio_media_stream_targetduration[0m:[36m284[0m - [1mgradio MediaStream TD patch ÒÑÓ¦ÓÃ[0m
+[32m2026-08-12 21:35:05.461[0m | [1mINFO    [0m | [36msrc.audio_bootstrap[0m:[36mpatch_gradio_audio_transcode[0m:[36m379[0m - [1mgradio ÒôÆµ×ªÂë patch ÒÑÓ¦ÓÃ£¨µ¥ ffmpeg ½ø³Ì + EXTINF ÕæÊµÊ±³¤£©[0m
+[32m2026-08-12 21:35:05.703[0m | [1mINFO    [0m | [36msrc.cache[0m:[36m_load[0m:[36m179[0m - [1m¼ÓÔØ Embedding »º´æ: 0 Ìõ[0m
+[32m2026-08-12 21:35:05.710[0m | [1mINFO    [0m | [36msrc.cache[0m:[36m_load[0m:[36m204[0m - [1m¼ÓÔØÄ£Ê½»º´æ: 16 Ìõ[0m
+[32m2026-08-12 21:35:06.767[0m | [1mINFO    [0m | [36msrc.project[0m:[36m_load_projects[0m:[36m197[0m - [1m¼ÓÔØÄÚÖÃÏîÄ¿: museum - ²©Îï¹İÖªÊ¶¿â[0m
+[32m2026-08-12 21:35:06.767[0m | [1mINFO    [0m | [36msrc.project[0m:[36m_load_projects[0m:[36m197[0m - [1m¼ÓÔØÄÚÖÃÏîÄ¿: enterprise - ÆóÒµÖªÊ¶¿â[0m
+[32m2026-08-12 21:35:06.768[0m | [1mINFO    [0m | [36msrc.project[0m:[36m_load_projects[0m:[36m217[0m - [1m¼ÓÔØÍâ²¿ÏîÄ¿: jiabohui - ¼Ò²©»áÊı×ÖÈËĞ¡»¢[0m
+[32m2026-08-12 21:35:06.768[0m | [1mINFO    [0m | [36msrc.project[0m:[36m_load_projects[0m:[36m221[0m - [1mÏîÄ¿¼ÓÔØÍê³É: ¹² 3 ¸öÏîÄ¿[0m
+[32m2026-08-12 21:35:09.107[0m | [1mINFO    [0m | [36mapp[0m:[36minit_pipeline[0m:[36m190[0m - [1m³õÊ¼»¯ RAG Á÷Ë®Ïß - ÏîÄ¿: museum[0m
+[32m2026-08-12 21:35:09.107[0m | [1mINFO    [0m | [36msrc.project[0m:[36mswitch_to[0m:[36m241[0m - [1mÇĞ»»µ½ÏîÄ¿: museum - ²©Îï¹İÖªÊ¶¿â[0m
+[32m2026-08-12 21:35:09.107[0m | [1mINFO    [0m | [36msrc.rag_pipeline[0m:[36m__init__[0m:[36m205[0m - [1mÊ¹ÓÃÏîÄ¿: museum - ²©Îï¹İÖªÊ¶¿â[0m
+[32m2026-08-12 21:35:09.108[0m | [1mINFO    [0m | [36msrc.utils[0m:[36mload_json[0m:[36m62[0m - [1mÒÑ¼ÓÔØ 36 ÌõÊı¾İ from E:\project\agent_project\pi\test\data\processed\museum\chunks.json[0m
+[32m2026-08-12 21:35:09.109[0m | [1mINFO    [0m | [36msrc.retriever[0m:[36mbuild[0m:[36m52[0m - [1mBM25 Ë÷Òı¹¹½¨Íê³É: 36 ÌõÎÄµµ[0m
+[32m2026-08-12 21:35:09.109[0m | [1mINFO    [0m | [36msrc.rag_pipeline[0m:[36m_ensure_knowledge_base[0m:[36m879[0m - [1m´Ó»º´æ¼ÓÔØÖªÊ¶¿â: chunks.json (36 ¸öÇĞÆ¬)[0m
+[32m2026-08-12 21:35:09.109[0m | [1mINFO    [0m | [36msrc.rag_pipeline[0m:[36m_ensure_knowledge_base[0m:[36m885[0m - [1mÖªÊ¶¿âÍêÈ«¾ÍĞ÷£¨BM25 + Qdrant£©[0m
+[32m2026-08-12 21:35:09.109[0m | [1mINFO    [0m | [36msrc.rag_pipeline[0m:[36mwarmup[0m:[36m269[0m - [1mÔ¤ÈÈÖªÊ¶¿â...[0m
+[32m2026-08-12 21:35:09.689[0m | [1mINFO    [0m | [36msrc.embeddings[0m:[36membed_batch[0m:[36m153[0m - [1mEmbedding Íê³É: 37 Ìõ ¡ú 37 ÌõÏòÁ¿ (Î¬¶È: 1024)[0m
+[32m2026-08-12 21:35:09.689[0m | [1mINFO    [0m | [36msrc.intent_classifier[0m:[36m_get_prototype_vectors[0m:[36m285[0m - [1mÒâÍ¼Ô­ĞÍÏòÁ¿¾ÍĞ÷: 37 ¸öÔ­ĞÍ / 5 Àà[0m
+[32m2026-08-12 21:35:09.689[0m | [34m[1mDEBUG   [0m | [36msrc.cache[0m:[36mget[0m:[36m287[0m - [34m[1mEmbedding »º´æÃüÖĞ£¨Ä£Ê½£©: ½ñÌìÌìÆøÔõÃ´Ñù...[0m
+[32m2026-08-12 21:35:10.139[0m | [1mINFO    [0m | [36msrc.embeddings[0m:[36membed_batch[0m:[36m153[0m - [1mEmbedding Íê³É: 19 Ìõ ¡ú 19 ÌõÏòÁ¿ (Î¬¶È: 1024)[0m
+[32m2026-08-12 21:35:10.139[0m | [1mINFO    [0m | [36msrc.intent_classifier[0m:[36m_get_needs_search_vectors[0m:[36m200[0m - [1mĞèÁªÍøËÑË÷Ô­ĞÍÏòÁ¿¾ÍĞ÷: 20 ¸ö[0m
+[32m2026-08-12 21:35:10.139[0m | [1mINFO    [0m | [36msrc.rag_pipeline[0m:[36mwarmup[0m:[36m278[0m - [1mÖªÊ¶¿âÔ¤ÈÈÍê³É£¨BM25 Ë÷ÒıÒÑ¼ÓÔØµ½ÄÚ´æ£©[0m
+[32m2026-08-12 21:35:10.139[0m | [1mINFO    [0m | [36mapp[0m:[36minit_pipeline[0m:[36m212[0m - [1mRAG Á÷Ë®Ïß¾ÍĞ÷[0m
+[32m2026-08-12 21:35:10.155[0m | [1mINFO    [0m | [36msrc.vector_store[0m:[36m_connect[0m:[36m92[0m - [1mQdrant ±¾µØ³Ö¾ÃÄ£Ê½: E:\project\agent_project\pi\test\data\processed\museum\qdrant_db[0m
+[32m2026-08-12 21:35:21.972[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:35:23.463[0m | [1mINFO    [0m | [36mapp[0m:[36mauto_respond[0m:[36m543[0m - [1mÓïÒôÖúÊÖ×Ô¶¯Ìá½»ÎÊ´ğ: ÄãµÄ°®ºÃÊÇÊ²Ã´£¿[0m
+[32m2026-08-12 21:35:29.963[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:35:37.959[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:35:45.961[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:35:53.963[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:36:01.959[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:36:09.945[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+[32m2026-08-12 21:36:17.940[0m | [1mINFO    [0m | [36mapp[0m:[36m_assist_stream_chunk[0m:[36m482[0m - [1mÓïÒôÖúÊÖ»á»°ÒÑÆô¶¯£¨VAD ¼àÌı + »½ĞÑ´Ê¡¸ÄãºÃĞ¡»¢¡¹£©[0m
+* Running on local URL:  http://127.0.0.1:7872
+* To create a public link, set `share=True` in `launch()`.
+app å·²å¯åŠ¨ :7872
+[E2E] 12s æ—¶å½•éŸ³çŠ¶æ€: not-recording; stream äº‹ä»¶æ•°: 0; voice_status æ–‡æœ¬: '   0.0s       '
+[E2E console] __voiceAssistAutoRecord clicked(t5)
+[E2E console] __voiceAssistAutoRecord retry: no stream within 6s
+[E2E] éŸ³é¢‘ç›¸å…³ç½‘ç»œè¯·æ±‚ 9 æ¡:
+    GET /gradio_api/heartbeat/yv7vbbjyqna
+    RESP 200 /gradio_api/heartbeat/yv7vbbjyqna
+    POST /gradio_api/queue/join?
+    RESP 200 /gradio_api/queue/join?
+    GET /gradio_api/queue/data?session_hash=yv7vbbjyqna
+    RESP 200 /gradio_api/queue/data?session_hash=yv7vbbjyqna
+    POST /gradio_api/queue/join?
+    RESP 200 /gradio_api/queue/join?
+    GET /gradio_api/queue/data?session_hash=yv7vbbjyqna
+[E2E] auto_respond entered, pending={'anon': 'ä½ çš„çˆ±å¥½æ˜¯ä»€ä¹ˆï¼Ÿ'}
+âœ… è‡ªåŠ¨æäº¤ä¸Šå±: ä½ çš„çˆ±å¥½æ˜¯ä»€ä¹ˆï¼Ÿ
+[E2E] fake å‘å‡º greet åŠ¨ä½œ
+[E2E] play_greeting entered: trigger=2 pending={'anon'} req_hash=None
+âœ… å”¤é†’åº”ç­”çŠ¶æ€ä¸Šå±ï¼ˆå·²å”¤é†’/åº”ç­”ä¸­ï¼‰
+âœ… æ— ä¸²çº¿ä¹±ç ï¼ˆ[['add' / u200b å‡ä¸å­˜åœ¨ï¼‰
+[E2E] hits: stream=113 auto_respond=1 greet=1; pending_greet=set() fake.greeted=True
+
+âœ… è¯­éŸ³åŠ©æ‰‹é“¾è·¯ E2E å…¨éƒ¨é€šè¿‡
+Exception ignored in: <function QdrantClient.__del__ at 0x0000023ECB106290>
+Traceback (most recent call last):
+  File "C:\Users\xxiao\AppData\Local\Programs\Python\Python310\lib\site-packages\qdrant_client\qdrant_client.py", line 169, in __del__
+  File "C:\Users\xxiao\AppData\Local\Programs\Python\Python310\lib\site-packages\qdrant_client\qdrant_client.py", line 178, in close
+  File "C:\Users\xxiao\AppData\Local\Programs\Python\Python310\lib\site-packages\qdrant_client\local\qdrant_local.py", line 108, in close
+ImportError: sys.meta_path is None, Python is likely shutting down

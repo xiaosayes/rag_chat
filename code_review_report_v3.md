@@ -403,3 +403,31 @@ VAD 失败诊断（原因上屏/启动自检）。
 - VAD 初始化失败的部署侧误诊（用户复测实证：UI 只让"详见日志"，运维不知道修什么）
   → 修复：失败原因直接上屏（缺 onnxruntime / 缺模型文件一眼可辨）+ 启动自检
   `_voice_assist_startup_probe()`（assist 开启时先建 VAD 会话验证，失败即 ERROR 日志）。
+
+### 修复轮2（用户复测三问题，全部实证定位）
+
+1. **"说出唤醒词后走了 LLM"**：唤醒匹配原本只在待机态；用户在倾听态（8s 窗）说唤醒词
+   被当问题提交。修复：倾听态整句命中唤醒词→重新应答；唤醒词前缀自动剥离
+   （"你好小虎，司母戊鼎…"→问题"司母戊鼎…"）。
+2. **"不知道什么状态"**：状态提示原本只在切换瞬间闪现 → 常驻状态行（每块重算、
+   有变化才上屏）：待机中（唤醒词提示）/倾听中（剩余秒数）/播报中（可打断）等；
+   欢迎语全文经状态行展示（初版写对话框，与 respond 末趟在途更新互写丢失，E2E 实证
+   后移出——chatbot 共享可变状态跨事件写必然竞争）。
+3. **对话框乱码**：`[['add','[value]','问题\u200b#2']]` —— 隐藏 Textbox 组件值被
+   gradio 6.22 流式 diff 协议串线（更新指令当成值）。根修：文本一律走服务端
+   pending 存储（`_pending_questions`/`_pending_greet`，消费一次性），触发器改
+   gr.State（服务端值跟踪 + deep_hash 变更检测，前端不可达→免疫）。E2E 实证零乱码。
+4. **gradio 6.22 流式收尾 KeyError（新发现的 gradio 侧 bug）**：生成器事件末趟
+   final pass 输出全 None，流式输出若从未开流（TTS 关闭/被打断跳过收尾）则
+   `stream_run[output_id].end_stream()` KeyError → 事件收尾中断、末批输出丢失。
+   `patch_gradio_stream_endstream_guard()`：末趟预检降级为空 update。
+5. **onnxruntime DLL 初始化失败（用户"VAD 初始化失败"根因）**：裸进程各种顺序均
+   正常，但服务器进程工作线程里 lazy import 4/4 必现 → app import 期主线程预加载。
+6. **自动点录音**：①hydration 竞争——过早点击落在未就绪按钮上，UI 显示录音中但
+   零流事件；②判据三连坑——UI 录音态假阳性、WebSocket 挂钩（6.22 流块不走 WS）、
+   fetch 挂钩（不走逐块 POST）均不可观测 → 最终判据：voice_status 出现服务端文本
+   （排除"录音已停止"假阳性），6s 无流通则停止重录自愈；③playwright 同步 API 只在
+   调用时泵事件循环，sleep 空转收不到 console 事件（E2E 脚本层教训）。
+
+E2E：`scripts/e2e_assist_loop.py`（全链路：自动录音→自动提交干净气泡→唤醒应答）
++ `scripts/e2e_autorecord.py`（自动录音+流通确认）。**全量 628 passed**。

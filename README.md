@@ -75,7 +75,26 @@
 `src/assets/silero_vad.onnx`、`tests/test_voice_assist.py`（52 项，全离线）、
 `tests/fixtures/vad_*.wav`（TTS 预生成中文语音夹具）、`scripts/smoke_voice_assist.py`。
 **依赖**：新增 `onnxruntime>=1.16.0`（纯 CPU 足够，0.095ms/30ms 窗）。
-**全量测试：615 passed**（基线 563）。
+**修复轮2（同日深夜，用户复测三问题实证修复）**：
+- **唤醒词在倾听态被误提交走 LLM** → 倾听态整句命中唤醒词即重新应答；"你好小虎，xxx"
+  前缀自动剥离作问题（待机态子串匹配不变）。
+- **交互状态无感知** → 常驻状态行：待机中（唤醒词提示）/倾听中（倒计时）/播报中
+  （可打断）/已打断/已提交，有变化才刷；欢迎语全文经状态行展示（不写对话框——
+  chatbot 共享可变状态，与 respond 末趟在途更新互写丢消息，E2E 实证）。
+- **对话框乱码 `[['add','[value]','问题\u200b#2']`** → 根因：隐藏 Textbox 组件值被
+  gradio 6.22 流式 diff 串线。根修：问题文本走服务端 pending 存储，触发器改 gr.State
+  （服务端值跟踪，前端不可达），nonce 仅作变更信号。
+- **gradio 6.22 流式收尾 KeyError**（`end_stream` 于未打开的流：TTS 关闭/被打断时
+  事件末趟 None 触发，最后一批输出丢失）→ `patch_gradio_stream_endstream_guard()`。
+- **onnxruntime 工作线程 lazy import 必现 DLL 初始化失败**（服务器进程实证 4/4，
+  即用户"VAD 初始化失败"根因）→ app 启动主线程预加载。
+- **自动点录音过早落于 hydrate 前按钮**（UI 录音中但零流事件）→ 延迟首点 +
+  voice_status 有文本才算通的判据 + 失败自动停止重试（自愈）；选择器覆盖本地化
+  （zh-CN「录制」）。
+- E2E 实证：`scripts/e2e_assist_loop.py`（自动录音→提交→干净气泡→唤醒应答→零乱码）、
+  `scripts/e2e_autorecord.py`（zh-CN 自动录音+流确认）。
+
+**全量测试：628 passed**（基线 563）。
 
 ### v1.4.0 (2026-08-12) — TTS 播报架构重做（第十三轮 audit-TTS）
 

@@ -336,7 +336,9 @@ class TestWakeWord:
         va, sessions = _make_assistant(
             [[("confirmed_start", None)], [("segment", b"x")]], ["你好，小虎"])
         a1 = va.process_chunk(_PCM)
-        assert va.mode == "standby" and not _kinds(a1)  # 确认开始不产出动作
+        # 待机态确认开始：不产出 greet/submit（常驻状态行允许存在）
+        assert va.mode == "standby"
+        assert "greet" not in _kinds(a1) and "submit" not in _kinds(a1)
         a2 = va.process_chunk(_PCM)
         assert "greet" in _kinds(a2)
         assert va.mode == "await_broadcast"
@@ -394,7 +396,8 @@ class TestDualTimer:
         va, _ = _make_assistant([], [], clock=clock)
         self._enter_listen(va, clock)
         clock.advance(7.9)
-        assert not va.process_chunk(_PCM)
+        a = va.process_chunk(_PCM)
+        assert "submit" not in _kinds(a) and "greet" not in _kinds(a)
         assert va.mode == "listen"
 
     def test_question_submit_after_2s_silence(self):
@@ -587,11 +590,14 @@ class TestAssistDispatch:
 
         r = list(app_mod.voice_stream_dispatch(str(chunk), state, "", None))
         state = r[-1][0]
-        assert r[-1][3]["value"].startswith("司母戊鼎有多重​#")  # nonce 强制 change
+        # 修复轮2b：触发器改 gr.State（前端 diff 串线免疫）+ 问题文本走 pending 存储
+        assert r[-1][3] == 1  # State 原值输出（递增 nonce 触发 .change）
+        assert app_mod._pending_questions.get("anon") == "司母戊鼎有多重"
 
         r = list(app_mod.voice_stream_dispatch(str(chunk), state, "", None))
         state = r[-1][0]
-        assert r[-1][4]["value"].startswith("#")  # greet 触发
+        assert r[-1][4] == 2  # greet 触发（State nonce）
+        assert "anon" in app_mod._pending_greet
 
         # 注册一个播报 → 打断动作应取消它
         tok = app_mod._register_broadcast(None, "answer")
@@ -631,7 +637,8 @@ class TestBroadcastRegistry:
 
 
 class TestAutoRespond:
-    def test_strips_nonce_and_delegates(self, monkeypatch):
+    def test_pending_question_delegates_clean_text(self, monkeypatch):
+        """问题文本来自服务端 pending 存储（不经组件值）→ 永远干净、无 nonce。"""
         import app as app_mod
         seen = {}
 
@@ -640,13 +647,16 @@ class TestAutoRespond:
             yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
 
         monkeypatch.setattr(app_mod, "respond", fake_respond)
-        out = list(app_mod.auto_respond("司母戊鼎有多重​#3", [], True, "museum", True, None))
+        app_mod._pending_questions["anon"] = "司母戊鼎有多重"
+        out = list(app_mod.auto_respond("3", [], True, "museum", True, None))
         assert seen["message"] == "司母戊鼎有多重"
         assert out
+        assert "anon" not in app_mod._pending_questions  # 消费一次性
 
-    def test_empty_payload_noop(self, monkeypatch):
+    def test_no_pending_noop(self, monkeypatch):
         import app as app_mod
         monkeypatch.setattr(app_mod, "respond", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应调用")))
+        app_mod._pending_questions.pop("anon", None)
         out = list(app_mod.auto_respond("", [], True, "", True, None))
         assert len(out) == 1 and len(out[0]) == 6
 
@@ -766,6 +776,7 @@ class TestPlayGreeting:
         _assist_settings(monkeypatch, tmp_path)
         monkeypatch.setattr(app_mod, "_greeting_pcm",
                             lambda project: b"\x01\x00" * 24000)  # 1s 假 PCM
+        app_mod._pending_greet.add("anon")  # 门闩前提（修复轮2b）
         results = list(app_mod.play_greeting("#1", "museum", True, None))
         audio = [r[0] for r in results if isinstance(r[0], bytes)]
         assert audio, "欢迎语应发布音频段"
@@ -776,6 +787,7 @@ class TestPlayGreeting:
     def test_greeting_tts_off_still_completes(self, monkeypatch, tmp_path):
         import app as app_mod
         _assist_settings(monkeypatch, tmp_path)
+        app_mod._pending_greet.add("anon")
         results = list(app_mod.play_greeting("#1", "museum", False, None))
         assert app_mod._active_broadcast(None) is None
         assert results  # 至少有一次状态输出
@@ -876,3 +888,122 @@ class TestVadDiagnostics:
         assert app_mod._voice_assist_startup_probe() is False
         s.silero_vad_model_path = ""
         assert app_mod._voice_assist_startup_probe() is True
+
+
+
+# ============ 修复轮2：常驻状态行 + 倾听态唤醒 ============
+
+class TestPersistentStatus:
+    def test_standby_line_emitted_once(self):
+        """待机态常驻状态行：首块出现，内容不变不重复刷。"""
+        va, _ = _make_assistant([], [])
+        a1 = va.process_chunk(_PCM)
+        s1 = [a.text for a in a1 if a.kind == "status"]
+        assert s1 and "待机" in s1[0] and "你好小虎" in s1[0]
+        a2 = va.process_chunk(_PCM)
+        assert not [a for a in a2 if a.kind == "status"]  # 无变化不重复
+
+    def test_listen_countdown_updates(self):
+        clock = _FakeClock()
+        va, _ = _make_assistant([], [], clock=clock)
+        va.notify_broadcast(True)
+        va.notify_broadcast(False)          # 进 listen（8s）
+        clock.advance(1.0)
+        a = va.process_chunk(_PCM)
+        s = [a.text for a in a if a.kind == "status"]
+        assert s and "倾听" in s[0] and "7" in s[0]  # 剩余 ~7s
+
+    def test_broadcast_line_persistent(self):
+        va, _ = _make_assistant([], [])
+        a = va.notify_broadcast(True)
+        s = [x.text for x in a if x.kind == "status"]
+        assert s and "播报中" in s[0] and "打断" in s[0]
+
+
+class TestWakeInListen:
+    def test_wake_word_in_listen_triggers_greet_not_submit(self):
+        """倾听态整句即唤醒词 → 重新唤醒应答（不当问题提交）。"""
+        clock = _FakeClock()
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["你好，小虎"], clock=clock)
+        va.notify_broadcast(True); va.notify_broadcast(False)   # 进 listen
+        va.process_chunk(_PCM)
+        a = va.process_chunk(_PCM)
+        assert "greet" in _kinds(a) and "submit" not in _kinds(a)
+        assert va.mode == "await_broadcast"
+        assert va._question == ""
+
+    def test_wake_prefix_stripped_as_question(self):
+        """"你好小虎，司母戊鼎有多高" → 前缀剥离，余下作问题累积。"""
+        clock = _FakeClock()
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]],
+            ["你好小虎，司母戊鼎有多高"], clock=clock)
+        va.notify_broadcast(True); va.notify_broadcast(False)
+        va.process_chunk(_PCM)
+        a = va.process_chunk(_PCM)
+        assert "greet" not in _kinds(a)
+        assert va._question == "司母戊鼎有多高"
+        clock.advance(2.1)
+        a = va.process_chunk(_PCM)
+        assert [x.text for x in a if x.kind == "submit"] == ["司母戊鼎有多高"]
+
+    def test_standby_substring_match_unchanged(self):
+        """待机态保持子串匹配（回归）。"""
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["那个你好小虎"])
+        va.process_chunk(_PCM)
+        assert "greet" in _kinds(va.process_chunk(_PCM))
+
+
+
+# ============ 修复轮2b：流式收尾 KeyError guard + greet 伪触发门闩 ============
+
+class TestStreamEndstreamGuard:
+    def test_final_none_without_opened_stream_no_keyerror(self):
+        """流式输出从未开流 + 末趟 None → 不抛 KeyError，值降级为空 update。"""
+        import asyncio
+        import app as app_mod  # noqa: F401（import 即应用 patch）
+        import gradio as gr
+
+        demo = gr.Blocks()
+        audio = gr.Audio(streaming=True)
+
+        class _FN:
+            outputs = [audio]
+
+        data = [None]
+        # 未打 patch 的 gradio 6.22 此处必抛 KeyError（E2E 实证）
+        asyncio.run(Blocks_hso(demo, _FN(), data, session_hash="s1", run=999, final=True))
+        assert data[0] == {"__type__": "update"}
+
+    def test_patch_idempotent(self):
+        from src.audio_bootstrap import patch_gradio_stream_endstream_guard
+        assert patch_gradio_stream_endstream_guard() is True
+        assert patch_gradio_stream_endstream_guard() is True
+
+
+def Blocks_hso(demo, fn, data, session_hash, run, final):
+    from gradio.blocks import Blocks
+    return Blocks.handle_streaming_outputs(
+        demo, fn, data, session_hash=session_hash, run=run, final=final)
+
+
+class TestGreetGate:
+    def test_spurious_trigger_without_pending_discarded(self, monkeypatch, tmp_path):
+        """组件值串线（'[]' 等伪触发）→ 无 pending → no-op，不播欢迎语。"""
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        app_mod._pending_greet.discard("anon")
+        results = list(app_mod.play_greeting("[]", "museum", True, None))
+        assert len(results) == 1
+        assert all(not isinstance(r[0], bytes) for r in results)  # 无音频
+
+    def test_real_trigger_with_pending_plays(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: b"\x01\x00" * 24000)
+        app_mod._pending_greet.add("anon")
+        results = list(app_mod.play_greeting("#9", "museum", True, None))
+        assert any(isinstance(r[0], bytes) for r in results)
+        assert "anon" not in app_mod._pending_greet  # 消费一次性
