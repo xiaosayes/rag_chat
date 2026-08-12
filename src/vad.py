@@ -200,17 +200,32 @@ class StreamVAD:
             self.model.reset_states()
 
 
+def create_vad(*, model_path: str = "", threshold: float = 0.5,
+               min_speech_ms: int = 400, min_silence_ms: int = 800,
+               pad_ms: int = 200, max_speech_s: int = 15,
+               sample_rate: int = 16000) -> StreamVAD:
+    """创建 StreamVAD；失败抛异常（文本携带可操作原因：缺模型/缺 onnxruntime 等）。"""
+    try:
+        model = SileroVadOnnx(model_path, sample_rate)
+    except ImportError as e:
+        raise ImportError(
+            f"{e}（语音助手依赖：pip install onnxruntime）") from e
+    return StreamVAD(
+        model, threshold=threshold, min_speech_ms=min_speech_ms,
+        min_silence_ms=min_silence_ms, pad_ms=pad_ms,
+        max_speech_s=max_speech_s, sample_rate=sample_rate)
+
+
 def try_create_vad(*, model_path: str = "", threshold: float = 0.5,
                    min_speech_ms: int = 400, min_silence_ms: int = 800,
                    pad_ms: int = 200, max_speech_s: int = 15,
                    sample_rate: int = 16000) -> Optional[StreamVAD]:
     """创建 StreamVAD；模型缺失/onnxruntime 不可用 → None（调用方降级，不崩）。"""
     try:
-        return StreamVAD(
-            SileroVadOnnx(model_path, sample_rate),
-            threshold=threshold, min_speech_ms=min_speech_ms,
-            min_silence_ms=min_silence_ms, pad_ms=pad_ms,
-            max_speech_s=max_speech_s, sample_rate=sample_rate)
+        return create_vad(
+            model_path=model_path, threshold=threshold,
+            min_speech_ms=min_speech_ms, min_silence_ms=min_silence_ms,
+            pad_ms=pad_ms, max_speech_s=max_speech_s, sample_rate=sample_rate)
     except Exception as e:
         logger.warning(f"VAD 初始化失败（语音助手降级为手动模式）: {e}")
         return None

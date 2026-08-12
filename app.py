@@ -390,18 +390,26 @@ def _active_broadcast(request) -> Optional[_BroadcastToken]:
     return tok
 
 
+_assist_init_error = ""  # VAD 初始化失败原因（降级提示上屏：用户不用翻日志就知道修什么）
+
+
 def _create_voice_assistant(project_id: str = ""):
-    """构建 VoiceAssistant；VAD 模型不可用 → None（调用方降级提示，不崩）。"""
-    from src.vad import try_create_vad
+    """构建 VoiceAssistant；VAD 不可用 → None 且 _assist_init_error 记录原因（降级不崩）。"""
+    global _assist_init_error
+    from src.vad import create_vad
     from src.voice_assistant import VoiceAssistant, make_corrector
 
-    vad = try_create_vad(
-        model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
-        min_speech_ms=settings.vad_min_speech_ms, min_silence_ms=settings.vad_min_silence_ms,
-        pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
-        sample_rate=settings.asr_sample_rate)
-    if vad is None:
+    try:
+        vad = create_vad(
+            model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
+            min_speech_ms=settings.vad_min_speech_ms, min_silence_ms=settings.vad_min_silence_ms,
+            pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
+            sample_rate=settings.asr_sample_rate)
+    except Exception as e:
+        _assist_init_error = (str(e) or type(e).__name__)[:150]
+        logger.warning(f"VAD 初始化失败（语音助手不可用）: {e}")
         return None
+    _assist_init_error = ""
     cfg = load_dict(project_id, settings.asr_dict_dir)
     wake_words = cfg.get("wake_words") or [
         w.strip() for w in settings.asr_wake_words.split(",") if w.strip()]
@@ -446,7 +454,8 @@ def _assist_stream_chunk(audio_filepath, state, project_id, request):
         if assistant is None:
             state = {"assist_failed": True}
             yield state, no, gr.update(
-                value="VAD 初始化失败，语音助手不可用（详见日志；置 VOICE_ASSIST_ENABLED=false 回手动模式）"), no, no
+                value=f"VAD 初始化失败：{_assist_init_error or '未知原因'}"
+                      f"（置 VOICE_ASSIST_ENABLED=false 回手动模式）"), no, no
             return
         state = {"assistant": assistant, "nonce": 0}
         logger.info("语音助手会话已启动（VAD 监听 + 唤醒词「%s」）", settings.asr_wake_words)
@@ -1931,6 +1940,31 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
     return demo
 
 
+def _voice_assist_startup_probe() -> bool:
+    """启动自检（audit-ASR）：VOICE_ASSIST_ENABLED=true 时验证 VAD 可用。
+
+    不要等到用户开口才暴露环境问题（onnxruntime 未装 / 模型未拷贝）——启动即
+    ERROR 日志，部署验收一眼可见。assist 关闭 → 跳过（True）。
+    """
+    if not settings.voice_assist_enabled:
+        return True
+    from src.vad import create_vad
+
+    try:
+        create_vad(
+            model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
+            min_speech_ms=settings.vad_min_speech_ms, min_silence_ms=settings.vad_min_silence_ms,
+            pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
+            sample_rate=settings.asr_sample_rate)
+        logger.info("语音助手启动自检通过：VAD 可用（silero onnx）")
+        return True
+    except Exception as e:
+        logger.error(
+            f"语音助手已开启但 VAD 不可用: {e} —— 修复后重启进程；"
+            f"或置 VOICE_ASSIST_ENABLED=false 回手动模式")
+        return False
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="文物知识库 RAG Web UI v2")
@@ -1948,6 +1982,7 @@ def main():
 
     setup_logger(settings.log_level)
     logger.info("正在初始化 RAG 系统...")
+    _voice_assist_startup_probe()  # audit-ASR：assist 开启时先验 VAD，失败即 ERROR 日志
     try:
         init_pipeline(args.project)
     except Exception as e:

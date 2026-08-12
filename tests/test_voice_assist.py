@@ -837,3 +837,40 @@ class TestVoiceAssistHead:
         assert "__voiceAssistBargeIn" in head      # 打断强停
         assert "voice_audio" in head and "voice_status" in head
         assert "tts_audio" in head and "⚡" in head
+
+
+
+# ============ 修复轮：VAD 初始化失败诊断（原因上屏 + 启动自检） ============
+
+class TestVadDiagnostics:
+    def test_create_vad_raises_actionable_reason(self):
+        """create_vad 抛异常且原因可操作；try_create_vad 契约不变（None）。"""
+        from src.vad import create_vad, try_create_vad
+        with pytest.raises(FileNotFoundError) as ei:
+            create_vad(model_path="nope/missing.onnx")
+        assert "silero_vad" in str(ei.value)
+        assert try_create_vad(model_path="nope/missing.onnx") is None
+
+    def test_assist_status_shows_failure_reason(self, monkeypatch, tmp_path):
+        """降级提示必须带原因（用户不用翻日志就知道修什么）。"""
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        app_mod._assist_init_error = "No module named 'onnxruntime'"
+        monkeypatch.setattr(app_mod, "_create_voice_assistant", lambda pid: None)
+        monkeypatch.setattr(app_mod, "_to_pcm16k", lambda b, r: b)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"x")
+        r = list(app_mod.voice_stream_dispatch(str(chunk), None, "", None))
+        assert "onnxruntime" in r[-1][2]["value"]
+
+    def test_startup_probe(self, monkeypatch, tmp_path):
+        """启动自检：assist 关→跳过(True)；开但模型路径坏→False；开且正常→True。"""
+        import app as app_mod
+        s = _assist_settings(monkeypatch, tmp_path)
+        s.voice_assist_enabled = False
+        assert app_mod._voice_assist_startup_probe() is True
+        s.voice_assist_enabled = True
+        s.silero_vad_model_path = "nope/missing.onnx"
+        assert app_mod._voice_assist_startup_probe() is False
+        s.silero_vad_model_path = ""
+        assert app_mod._voice_assist_startup_probe() is True
