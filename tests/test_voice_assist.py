@@ -249,3 +249,251 @@ class TestSileroVadOnnxReal:
     def test_try_create_vad_graceful_on_missing_model(self):
         from src.vad import try_create_vad
         assert try_create_vad(model_path="nope/missing.onnx") is None
+
+
+# ============ T3: src/voice_assistant.py（语音助手状态机） ============
+
+class _ScriptedVAD:
+    """按脚本逐块吐事件的假 VAD（接口同 StreamVAD）。"""
+
+    def __init__(self, script):
+        self.script = [list(s) for s in script]
+        self.pending = b""
+        self.in_speech = False
+
+    def feed(self, pcm):
+        evs = self.script.pop(0) if self.script else []
+        for k, _ in evs:
+            if k == "confirmed_start":
+                self.in_speech = True
+                self.pending = pcm  # 段首缓冲（含 pad）供增量喂入
+            elif k == "segment":
+                self.in_speech = False
+                self.pending = b""
+        return evs
+
+    def take_pending(self):
+        b, self.pending = self.pending, b""
+        return b
+
+
+class _FakeASRSession:
+    def __init__(self, final):
+        self._final = final
+        self.fed = b""
+        self.closed = False
+
+    def feed(self, b):
+        self.fed += b
+
+    @property
+    def current_text(self):
+        return "部分识别"
+
+    def is_final(self):
+        return False
+
+    def finish(self):
+        return self._final
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, s):
+        self.t += s
+
+
+def _make_assistant(script, finals, clock=None, **kw):
+    """构造 VoiceAssistant：scripted VAD + 脚本化 ASR 会话工厂 + 假时钟。"""
+    from src.voice_assistant import VoiceAssistant
+    sessions = [_FakeASRSession(t) for t in finals]
+    it = iter(sessions)
+    args = dict(wake_words=["你好小虎"], correct_fn=lambda t: t,
+                initial_wait_s=8.0, extend_wait_s=2.0, clock=clock or _FakeClock())
+    args.update(kw)
+    va = VoiceAssistant(_ScriptedVAD(script), lambda: next(it), **args)
+    return va, sessions
+
+
+def _kinds(actions):
+    return [a.kind for a in actions]
+
+
+_PCM = b"\x00\x01" * 16000  # 0.5s 块（内容无关）
+
+
+class TestWakeWord:
+    def test_wake_word_triggers_greet(self):
+        va, sessions = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["你好，小虎"])
+        a1 = va.process_chunk(_PCM)
+        assert va.mode == "standby" and not _kinds(a1)  # 确认开始不产出动作
+        a2 = va.process_chunk(_PCM)
+        assert "greet" in _kinds(a2)
+        assert va.mode == "await_broadcast"
+        assert sessions[0].fed  # ASR 会话收到了段音频
+
+    def test_non_wake_speech_ignored(self):
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["今天天气怎么样"])
+        va.process_chunk(_PCM)
+        actions = va.process_chunk(_PCM)
+        assert "greet" not in _kinds(actions)
+        assert "submit" not in _kinds(actions)
+        assert va.mode == "standby"
+        assert any(a.kind == "status" and "唤醒" in a.text for a in actions)
+
+    def test_wake_match_normalizes_and_corrects(self):
+        """唤醒匹配：去标点空白 + 先纠错（"泥好小胡"→纠词典归一→命中）。"""
+        from src.voice_assistant import make_corrector
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["泥好，小胡！"],
+            correct_fn=make_corrector({"泥好小胡": "你好小虎"}))
+        va.process_chunk(_PCM)
+        actions = va.process_chunk(_PCM)
+        assert "greet" in _kinds(actions)
+
+    def test_wake_word_substring_in_sentence(self):
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["那个你好小虎在吗"])
+        va.process_chunk(_PCM)
+        assert "greet" in _kinds(va.process_chunk(_PCM))
+
+
+class TestDualTimer:
+    def _enter_listen(self, va, clock):
+        """驱动到 listen 态：broadcast 激活后立即结束 → listen(deadline=+8s)。"""
+        va.notify_broadcast(True)
+        assert va.mode == "broadcast"
+        actions = va.notify_broadcast(False)
+        assert va.mode == "listen"
+        assert va._deadline == clock() + 8.0
+        assert any(a.kind == "status" for a in actions)
+
+    def test_initial_8s_timeout_returns_standby(self):
+        clock = _FakeClock()
+        va, _ = _make_assistant([], [], clock=clock)
+        self._enter_listen(va, clock)
+        clock.advance(8.1)
+        actions = va.process_chunk(_PCM)
+        assert va.mode == "standby"
+        assert "submit" not in _kinds(actions)
+        assert any(a.kind == "status" and "待机" in a.text for a in actions)
+
+    def test_no_timeout_before_8s(self):
+        clock = _FakeClock()
+        va, _ = _make_assistant([], [], clock=clock)
+        self._enter_listen(va, clock)
+        clock.advance(7.9)
+        assert not va.process_chunk(_PCM)
+        assert va.mode == "listen"
+
+    def test_question_submit_after_2s_silence(self):
+        clock = _FakeClock()
+        va, sessions = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["司母戊鼎"], clock=clock)
+        self._enter_listen(va, clock)
+        clock.advance(3.0)
+        va.process_chunk(_PCM)            # confirmed_start：开口 → deadline 清 None
+        assert va._deadline is None
+        a = va.process_chunk(_PCM)        # segment：累积问题 + deadline=+2s
+        assert va._question == "司母戊鼎"
+        assert va._deadline == clock() + 2.0
+        assert any(aa.kind == "msg" and "司母戊鼎" in aa.text for aa in a)
+        clock.advance(2.1)
+        a = va.process_chunk(_PCM)        # 2s 无新语音 → 提交
+        submits = [aa for aa in a if aa.kind == "submit"]
+        assert submits and submits[0].text == "司母戊鼎"
+        assert va.mode == "await_broadcast"
+
+    def test_extend_timer_loops_on_continued_speech(self):
+        """2s 内再开口 → 续接为同一问题（循环延长）。"""
+        clock = _FakeClock()
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")],
+             [("confirmed_start", None)], [("segment", b"y")]],
+            ["司母戊鼎", "有多重"], clock=clock)
+        self._enter_listen(va, clock)
+        clock.advance(1.0)
+        va.process_chunk(_PCM); va.process_chunk(_PCM)   # 段1 → "司母戊鼎", +2s
+        clock.advance(1.5)                                # 1.5s < 2s 内
+        va.process_chunk(_PCM)                            # 段2 confirmed → deadline None
+        assert va._deadline is None
+        va.process_chunk(_PCM)                            # 段2 结束 → 问题接续
+        assert va._question == "司母戊鼎有多重"
+        clock.advance(2.1)
+        a = va.process_chunk(_PCM)
+        assert [aa.text for aa in a if aa.kind == "submit"] == ["司母戊鼎有多重"]
+
+    def test_partial_text_shown_during_speech(self):
+        clock = _FakeClock()
+        va, _ = _make_assistant([[("confirmed_start", None)], []], ["x"], clock=clock)
+        self._enter_listen(va, clock)
+        va.process_chunk(_PCM)
+        a = va.process_chunk(_PCM)        # 语音进行中：实时部分结果进输入框
+        assert any(aa.kind == "msg" and "部分识别" in aa.text for aa in a)
+
+
+class TestBargeIn:
+    def test_barge_in_during_broadcast(self):
+        clock = _FakeClock()
+        va, sessions = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["换个问题"], clock=clock)
+        va.notify_broadcast(True)
+        assert va.mode == "broadcast"
+        a = va.process_chunk(_PCM)        # 播报中确认语音 → 打断
+        assert "barge_in" in _kinds(a)
+        assert any(aa.kind == "status" and "⚡" in aa.text for aa in a)
+        assert va.mode == "listen" and va._deadline is None
+        assert sessions and sessions[0].fed  # 该段语音直接送 ASR（作新问题）
+        va.process_chunk(_PCM)            # 段结束 → 问题入累积
+        assert va._question == "换个问题"
+        clock.advance(2.1)
+        a = va.process_chunk(_PCM)
+        assert [aa.text for aa in a if aa.kind == "submit"] == ["换个问题"]
+
+    def test_broadcast_end_without_barge_enters_listen(self):
+        clock = _FakeClock()
+        va, _ = _make_assistant([], [], clock=clock)
+        va.notify_broadcast(True)
+        a = va.notify_broadcast(False)
+        assert va.mode == "listen"
+        assert any(aa.kind == "status" and "提问" in aa.text for aa in a)
+
+    def test_broadcast_end_after_barge_not_double_listen(self):
+        """打断后播报收尾的 notify(False) 不得覆盖 listen 态的计时。"""
+        clock = _FakeClock()
+        va, _ = _make_assistant([[("confirmed_start", None)], []], ["x"], clock=clock)
+        va.notify_broadcast(True)
+        va.process_chunk(_PCM)            # 打断 → listen（说话中，deadline None）
+        clock.advance(0.5)
+        a = va.notify_broadcast(False)    # 被打断的播报收尾到达
+        assert va.mode == "listen" and va._deadline is None and not a
+
+
+class TestAwaitBroadcast:
+    def test_await_timeout_falls_back_standby(self):
+        clock = _FakeClock()
+        va, _ = _make_assistant(
+            [[("confirmed_start", None)], [("segment", b"x")]], ["你好小虎"], clock=clock)
+        va.process_chunk(_PCM); va.process_chunk(_PCM)   # 唤醒 → await_broadcast
+        assert va.mode == "await_broadcast"
+        clock.advance(13.0)               # 播报迟迟未注册（异常）→ 回待机
+        a = va.process_chunk(_PCM)
+        assert va.mode == "standby"
+        assert any(aa.kind == "status" for aa in a)
+
+    def test_await_to_broadcast_on_notify(self):
+        va, _ = _make_assistant([], [])
+        va._mode = "await_broadcast"
+        va._await_since = 0.0
+        va.notify_broadcast(True)
+        assert va.mode == "broadcast"
