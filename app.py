@@ -1117,11 +1117,14 @@ def _voice_assist_head() -> str:
 <script>
 (function(){
   function findRecordBtn(){
+    // gradio 6 按浏览器语言本地化按钮（zh-CN=「录制/停止录制」，en=Record/Stop）
+    // → aria-label 与文本双语匹配，先排 stop 再匹 record（「停止录制」也含「录制」）
     var root=document.getElementById('voice_audio'); if(!root)return null;
     var btns=root.querySelectorAll('button');
     for(var i=0;i<btns.length;i++){
-      var a=(btns[i].getAttribute('aria-label')||'').toLowerCase();
-      if(a.indexOf('record')>=0&&a.indexOf('stop')<0)return btns[i];
+      var s=((btns[i].getAttribute('aria-label')||'')+' '+(btns[i].textContent||'')).toLowerCase();
+      if(/stop|停止/.test(s))continue;
+      if(/record|录制|录音/.test(s))return btns[i];
     }
     return null;
   }

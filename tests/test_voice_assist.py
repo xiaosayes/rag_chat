@@ -835,6 +835,8 @@ class TestVoiceAssistHead:
         head = app_mod._voice_assist_head()
         assert "__voiceAssistAutoRecord" in head   # 自动点录音
         assert "__voiceAssistBargeIn" in head      # 打断强停
+        # 按钮匹配须覆盖本地化（gradio 6 按浏览器语言渲染：zh-CN=「录制」）
+        assert "record" in head and "录制" in head
         assert "voice_audio" in head and "voice_status" in head
         assert "tts_audio" in head and "⚡" in head
 
