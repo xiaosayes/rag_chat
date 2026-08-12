@@ -93,6 +93,21 @@ class Settings(BaseSettings):
     asr_silence_blocks: int = Field(default=4, ge=1, description="连续静音块数（每块约 0.5s，4 块 ≈ 停顿 2s 自动结束）")
     asr_dict_dir: Path = Field(default=Path("data/voice"), description="多音字/热词配置目录")
 
+    # ========== 语音助手（audit-ASR）：唤醒 + VAD + 双计时 + 打断 ==========
+    # 默认关闭：关闭时保持 bug-121 手动点击录音语义（现有测试契约）；服务器 .env 置 true 开启
+    voice_assist_enabled: bool = Field(default=False, description="语音助手总开关（唤醒词/双计时/打断；关闭=手动点击录音）")
+    asr_wake_words: str = Field(default="你好小虎", description="唤醒词，逗号分隔多个；asr_dict.json 的 wake_words 可项目级覆盖")
+    asr_wake_greeting: str = Field(default="您好，我是小虎，请问有什么可以帮您？", description="唤醒应答语（合成一次缓存复用）")
+    asr_initial_wait_s: float = Field(default=8.0, gt=0, description="播报结束/唤醒后等待开口的初始窗口秒数（超时无语音→回待机）")
+    asr_extend_wait_s: float = Field(default=2.0, gt=0, description="每段语音结束后的提问静默判定秒数（期间再说话则续接为同一问题）")
+    # silero VAD 参数（audit-ASR 需求2，用户标定）
+    vad_threshold: float = Field(default=0.5, ge=0, le=1, description="语音概率阈值")
+    vad_min_speech_ms: int = Field(default=400, ge=0, description="最短有效语音 ms（过滤'嗯''啊'；达到即提前确认语音开始）")
+    vad_min_silence_ms: int = Field(default=800, ge=0, description="语音内连续静音多久判定为段结束 ms")
+    vad_speech_pad_ms: int = Field(default=200, ge=0, description="语音段前后补偿 ms")
+    vad_max_speech_s: int = Field(default=15, ge=1, description="单段语音最大秒数（强制切段，防卡死）")
+    silero_vad_model_path: str = Field(default="", description="silero_vad.onnx 路径覆盖（默认自动定位 silero_vad 包内置模型）")
+
     # ========== 语音合成 (TTS) ==========
     tts_enabled: bool = Field(default=True, description="语音播报总开关（默认开）")
     tts_model: str = Field(default="cosyvoice-v3-flash", description="TTS 模型（一期；二期真人音色用 cosyvoice-v3.5-flash）")
