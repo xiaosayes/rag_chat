@@ -339,6 +339,252 @@ def asr_stream_stop(state, project_id: str = ""):
         yield state, gr.update(), gr.update(value="")
 
 
+# ========== 语音助手（audit-ASR）：唤醒 + VAD + 双计时 + 打断 ==========
+
+class _BroadcastToken:
+    """一次播报（回答/欢迎语）的生命周期句柄：cancel=打断请求，done=收尾完成。"""
+
+    __slots__ = ("kind", "cancel", "done", "at")
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.cancel = threading.Event()
+        self.done = threading.Event()
+        self.at = time.time()
+
+
+_broadcast_tokens: dict = {}
+_broadcast_lock = threading.Lock()
+
+
+def _session_key(request) -> str:
+    try:
+        return (request.session_hash if request else None) or "anon"
+    except Exception:
+        return "anon"
+
+
+def _register_broadcast(request, kind: str) -> _BroadcastToken:
+    """注册新播报；同会话未完结的旧播报先取消（新提问打断旧回答的残留发布）。"""
+    token = _BroadcastToken(kind)
+    key = _session_key(request)
+    with _broadcast_lock:
+        old = _broadcast_tokens.get(key)
+        if old is not None and not old.done.is_set():
+            old.cancel.set()
+        _broadcast_tokens[key] = token
+    return token
+
+
+def _active_broadcast(request) -> Optional[_BroadcastToken]:
+    """当前活跃播报。cancel 中的视为非激活：打断后 respond 收尾（done）需 ~0.1s，
+    期间若按 active 上报，状态机会被抖回 broadcast 态、吞掉打断出的新问题。"""
+    with _broadcast_lock:
+        tok = _broadcast_tokens.get(_session_key(request))
+    if tok is None or tok.done.is_set() or tok.cancel.is_set():
+        return None
+    return tok
+
+
+def _create_voice_assistant(project_id: str = ""):
+    """构建 VoiceAssistant；VAD 模型不可用 → None（调用方降级提示，不崩）。"""
+    from src.vad import try_create_vad
+    from src.voice_assistant import VoiceAssistant, make_corrector
+
+    vad = try_create_vad(
+        model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
+        min_speech_ms=settings.vad_min_speech_ms, min_silence_ms=settings.vad_min_silence_ms,
+        pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
+        sample_rate=settings.asr_sample_rate)
+    if vad is None:
+        return None
+    cfg = load_dict(project_id, settings.asr_dict_dir)
+    wake_words = cfg.get("wake_words") or [
+        w.strip() for w in settings.asr_wake_words.split(",") if w.strip()]
+
+    def asr_factory():
+        # 纠错由 FSM 的 correct_fn 统一施加（先归一后纠错，唤醒匹配容错），实例不再重复配置
+        return IflytekASR(
+            settings.xfyun_app_id, settings.xfyun_api_key, settings.xfyun_api_secret,
+            language=settings.asr_language, accent=settings.asr_accent,
+            vad_eos_ms=settings.asr_vad_eos, hotwords=cfg["hotwords"])
+
+    return VoiceAssistant(
+        vad, asr_factory, wake_words=wake_words,
+        correct_fn=make_corrector(cfg["corrections"]),
+        initial_wait_s=settings.asr_initial_wait_s,
+        extend_wait_s=settings.asr_extend_wait_s)
+
+
+def voice_stream_dispatch(audio_filepath, state, project_id: str = "", request: gr.Request = None):
+    """语音流事件分发：VOICE_ASSIST_ENABLED 走语音助手，否则手动模式（bug-121 语义不变）。
+
+    输出恒为 5 元组 [asr_state, msg, voice_status, auto_q, greet_trig]（手动模式后两个 no-op）。
+    """
+    if settings.voice_assist_enabled:
+        yield from _assist_stream_chunk(audio_filepath, state, project_id, request)
+        return
+    for s, m, v in asr_stream_chunk(audio_filepath, state, project_id):
+        yield s, m, v, gr.update(), gr.update()
+
+
+def _assist_stream_chunk(audio_filepath, state, project_id, request):
+    """语音助手路径：常驻录音 → PCM16k → 播报状态同步 → FSM → 动作翻译为 gradio 输出。"""
+    no = gr.update()
+    if not (settings.xfyun_app_id and settings.xfyun_api_key and settings.xfyun_api_secret):
+        yield state, no, gr.update(value="未配置讯飞密钥（XFYUN_APP_ID/API_KEY/API_SECRET），请在 .env 补充"), no, no
+        return
+    if not audio_filepath:
+        yield state, no, no, no, no
+        return
+    if state is None:
+        assistant = _create_voice_assistant(project_id)
+        if assistant is None:
+            state = {"assist_failed": True}
+            yield state, no, gr.update(
+                value="VAD 初始化失败，语音助手不可用（详见日志；置 VOICE_ASSIST_ENABLED=false 回手动模式）"), no, no
+            return
+        state = {"assistant": assistant, "nonce": 0}
+        logger.info("语音助手会话已启动（VAD 监听 + 唤醒词「%s」）", settings.asr_wake_words)
+    if state.get("assist_failed"):
+        yield state, no, no, no, no
+        return
+    assistant = state["assistant"]
+    try:
+        raw = Path(audio_filepath).read_bytes()
+        pcm_block = _to_pcm16k(raw, settings.asr_sample_rate)
+        token = _active_broadcast(request)
+        actions = assistant.notify_broadcast(token is not None)
+        actions += assistant.process_chunk(pcm_block)
+    except Exception as e:
+        logger.warning(f"语音助手音频处理失败: {e}")
+        yield state, no, gr.update(value=f"语音助手异常: {e}"), no, no
+        return
+    msg_u, status_u, auto_u, greet_u = no, no, no, no
+    for a in actions:
+        if a.kind == "msg":
+            msg_u = gr.update(value=a.text)
+        elif a.kind == "status":
+            status_u = gr.update(value=a.text)
+            logger.info(f"语音助手状态: {a.text}")
+        elif a.kind == "submit":
+            state["nonce"] += 1
+            # zero-width-space + nonce：相同问题连续提交也能触发 .change
+            auto_u = gr.update(value=f"{a.text}\u200b#{state['nonce']}")
+        elif a.kind == "greet":
+            state["nonce"] += 1
+            greet_u = gr.update(value=f"#{state['nonce']}")
+        elif a.kind == "barge_in" and token is not None:
+            token.cancel.set()
+    yield state, msg_u, status_u, auto_u, greet_u
+
+
+def voice_stop_dispatch(state, project_id: str = ""):
+    """停止录音分发：assist 模式关闭状态机会话；手动模式照旧。输出恒 5 元组。"""
+    if settings.voice_assist_enabled:
+        if state and state.get("assistant"):
+            state["assistant"].close()
+        yield None, gr.update(), gr.update(value="录音已停止（刷新页面可重启语音助手）"), gr.update(), gr.update()
+        return
+    for s, m, v in asr_stream_stop(state, project_id):
+        yield s, m, v, gr.update(), gr.update()
+
+
+def auto_respond(payload, chat_history, stream, project, tts_enabled, request: gr.Request = None):
+    """语音助手自动提交（audit-ASR 需求3）：隐藏 Textbox .change 触发。
+
+    独立事件（concurrency_limit=1 约束：不得塞进 stream 事件，否则 respond 运行的
+    30s+ 内音频块排队、打断检测失效）；payload 尾部 zero-width-space+nonce 在此剥离。
+    """
+    question = (payload or "").split("\u200b#")[0].strip()
+    if not question:
+        yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
+        return
+    logger.info(f"语音助手自动提交问答: {question}")
+    yield from respond(question, chat_history, stream, project, tts_enabled, request)
+
+
+_greeting_mem: dict = {}  # 欢迎语 PCM 内存缓存：key → 24k mono PCM
+
+
+def _greeting_pcm(project: str = "") -> Optional[bytes]:
+    """欢迎语 PCM（24k mono 16bit）：首次合成，之后内存/磁盘缓存复用（零合成延迟）。
+
+    文本来源：asr_dict.json 的 wake_greeting（项目级覆盖）> settings.asr_wake_greeting。
+    """
+    import io
+    import wave
+
+    cfg = load_dict(project, settings.asr_dict_dir)
+    text = cfg.get("wake_greeting") or settings.asr_wake_greeting
+    key = hashlib.sha1(
+        f"{settings.tts_model}|{settings.tts_voice}|{settings.tts_speech_rate}|{text}".encode("utf-8")
+    ).hexdigest()[:12]
+    if key in _greeting_mem:
+        return _greeting_mem[key]
+    cache_dir = settings.project_root / "data" / "processed" / "tts_cache"
+    path = cache_dir / f"greeting_{key}.wav"
+    try:
+        if path.exists():
+            wav_bytes = path.read_bytes()
+        else:
+            tts = _init_tts()
+            if tts is None:
+                return None
+            wav_bytes = tts.synthesize_sentence(text)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(wav_bytes)
+            logger.info(f"欢迎语已合成并缓存: {path.name}（{text}）")
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            pcm = w.readframes(w.getnframes())  # CosyVoice 默认 WAV_24000HZ_MONO_16BIT
+        _greeting_mem[key] = pcm
+        return pcm
+    except Exception as e:
+        logger.warning(f"欢迎语合成/读取失败（降级无音频）: {e}")
+        return None
+
+
+def play_greeting(trigger, project: str = "", tts_enabled: bool = True, request: gr.Request = None):
+    """唤醒应答播报（audit-ASR 需求1）：缓存 PCM → _AdtsStreamer 持续编码发布。
+
+    注册 greeting token → 状态机经 notify_broadcast 进入播报态（可打断）；
+    收尾 done → 状态机进 LISTEN（8s 提问窗口）。
+    """
+    token = _register_broadcast(request, "greeting")
+    no = gr.update()
+    try:
+        if not trigger:
+            yield no, no, no
+            return
+        if not tts_enabled:
+            yield no, no, gr.update(value="✅ 已唤醒（语音播报已关闭），请提问")
+            return
+        pcm = _greeting_pcm(project)
+        if not pcm:
+            yield no, no, gr.update(value="✅ 已唤醒（欢迎语不可用），请提问")
+            return
+        streamer = _AdtsStreamer(rate=24000,
+                                 seg_seconds=settings.tts_batch_seconds,
+                                 first_seg_seconds=settings.tts_first_batch_seconds,
+                                 ramp_seconds=(0.6, 0.8))
+        try:
+            streamer.feed(pcm)
+            streamer.finish()
+            for seg in streamer.collect_all(timeout=10):
+                if token.cancel.is_set():
+                    break
+                yield seg, no, gr.update(value="🔊 应答中…")
+            if not token.cancel.is_set():
+                yield no, no, gr.update(value="✅ 已唤醒，请提问")
+        finally:
+            streamer.close()
+    except Exception as e:
+        logger.warning(f"欢迎语播报异常: {e}")
+        yield no, no, gr.update(value=f"欢迎语播报异常: {e}")
+    finally:
+        token.done.set()
+
+
 # ========== 语音功能（bug-121）：TTS 语音播报（句子级流式） ==========
 
 def _extract_last_answer_text(history) -> str:
@@ -1103,8 +1349,13 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
 
 
-def respond(message, chat_history, stream, project, tts_enabled):
+def respond(message, chat_history, stream, project, tts_enabled, request: gr.Request = None):
     """回答 + 语音播报（audit-TTS：单会话流式合成 —— 首句 ≤1s、全程无停顿）。
+
+    audit-ASR 需求4（打断）：入口注册播报 token（手动发送同样注册，任何播报都可被打断）；
+    主循环/收尾循环每拍检查 cancel —— 语音助手在播报中检出持续语音（VAD ≥400ms）即置位，
+    本生成器停喂停发、取消 TTS 会话、跳过收尾冲刷与重播写入，yield "已打断"状态。
+    客户端 HLS 缓冲（≤60s）由 head JS 观察 voice_status 的 ⚡ 标记强停 <video> 清除。
 
     旧链路（bug-121 分段独立合成）：等整段合成完成（~2s/段）才有音频，且首播
     攒批门（5 chunk + 2s 等待）→ 首播 ~3s；段间会话边界（WS 连接+首块 0.6s）
@@ -1121,6 +1372,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
     if not message or not message.strip():
         yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
         return
+    token = _register_broadcast(request, "answer")  # audit-ASR：打断靶向（request=None→"anon"）
+    cancelled = False
     tts = _init_tts() if tts_enabled else None
     # 单编码器持续 AAC 流（音质修复：逐批独立编码每段带 priming 静音坑）；
     # 无 ffmpeg 时 _init_tts 已返回 None，此处不会触发 RuntimeError
@@ -1230,6 +1483,9 @@ def respond(message, chat_history, stream, project, tts_enabled):
         threading.Thread(target=_answer_pump, daemon=True).start()
         ended = False
         while not ended:
+            if token.cancel.is_set():
+                cancelled = True
+                break
             try:
                 kind, payload = text_q.get(timeout=0.1)
             except queue.Empty:
@@ -1297,7 +1553,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
                             f"LLM 出文停顿正被听众感知。若频繁出现：查客户端 HLS patch "
                             f"是否生效（StaticAudio-*.js 应含 maxBufferLength:60）与网络 RTT")
         # 回答结束：喂尾文本 → finish（后台线程，阻塞型） → 排空（含看门狗重建）
-        if tts is not None and not tts_dead:
+        # audit-ASR：被打断则整段跳过（不 finish、不冲尾、不写重播）
+        if tts is not None and not tts_dead and not cancelled:
             tail = clean_text_for_tts(tts_text_buf.strip()) if tts_text_buf.strip() else ""
             if tail and not _feed(tail):
                 _restart()
@@ -1315,6 +1572,9 @@ def respond(message, chat_history, stream, project, tts_enabled):
                 threading.Thread(target=_finish_async, args=(handle,), daemon=True).start()
                 end_at = time.time() + 120  # 总兜底，防无限循环
                 while not tts_dead and time.time() < end_at:
+                    if token.cancel.is_set():
+                        cancelled = True
+                        break
                     for seg in _collect(wait=0.5):
                         played_any = True
                         replay_blocks.append(seg)
@@ -1328,22 +1588,26 @@ def respond(message, chat_history, stream, project, tts_enabled):
                             threading.Thread(target=_finish_async,
                                              args=(handle,), daemon=True).start()
                 # 全部 PCM 已喂完 → 压缩器残尾入管 → 关编码器 stdin 冲尾，排空残余段
-                tail_pcm = compressor.feed(b"") + compressor.flush()
-                if tail_pcm:
-                    streamer.feed(tail_pcm)
-                    replay_pcm.extend(tail_pcm)
-                streamer.finish()
-                for seg in streamer.collect_all(timeout=10):
-                    played_any = True
-                    replay_blocks.append(seg)
-                    yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
-                        gr.update(value="播报中…")
-                if handle is not None and handle.error:
-                    logger.warning(f"TTS 会话出错（部分音频可能缺失）: {handle.error}")
-                logger.info(f"TTS 播报收尾: 批次={len(replay_blocks)} "
-                            f"音频={len(replay_pcm) / 48000:.1f}s "
-                            f"耗时={time.time() - respond_t0:.1f}s 重建={restarts}")
-            if replay_pcm:
+                # audit-ASR：排空循环内被打断 → 跳过冲尾/审计（残余段已无听众）
+                if not cancelled:
+                    tail_pcm = compressor.feed(b"") + compressor.flush()
+                    if tail_pcm:
+                        streamer.feed(tail_pcm)
+                        replay_pcm.extend(tail_pcm)
+                    streamer.finish()
+                    for seg in streamer.collect_all(timeout=10):
+                        played_any = True
+                        replay_blocks.append(seg)
+                        yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
+                            gr.update(value="播报中…")
+                    if handle is not None and handle.error:
+                        logger.warning(f"TTS 会话出错（部分音频可能缺失）: {handle.error}")
+                    logger.info(f"TTS 播报收尾: 批次={len(replay_blocks)} "
+                                f"音频={len(replay_pcm) / 48000:.1f}s "
+                                f"耗时={time.time() - respond_t0:.1f}s 重建={restarts}")
+            if cancelled:
+                pass  # 打断：不写重播（部分内容无意义），由下方统一 yield 打断状态
+            elif replay_pcm:
                 # 重播走原始 PCM（与编码器健康解耦，质量无损）
                 replay_path = _write_replay_wav([_wrap_pcm(bytes(replay_pcm), 24000)])
                 # 静默审计（后台线程）：客户端零上报但用户听到停顿时给内容侧定性
@@ -1354,11 +1618,17 @@ def respond(message, chat_history, stream, project, tts_enabled):
             else:
                 yield gr.update(), gr.update(), gr.update(), gr.update(), \
                     gr.update(), gr.update(value="")
+        if cancelled:
+            # audit-ASR 需求4：打断收尾（客户端缓冲由 head JS 观察 ⚡ 标记强停 <video>）
+            logger.info("播报被打断（barge-in）：停止发布并取消合成")
+            yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), \
+                gr.update(value="⚡ 已打断，请继续提问")
     except Exception as e:
         logger.warning(f"语音播报异常（不影响回答）: {e}")
         yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), \
             gr.update(value=f"语音播报异常: {e}")
     finally:
+        token.done.set()  # audit-ASR：状态机经 notify_broadcast(False) 进 LISTEN
         if handle is not None:
             try:
                 handle.cancel()
@@ -1511,9 +1781,13 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                         type="filepath",
                         label="语音输入（点击开始说话，实时转写，说完点击停止）",
                         scale=6,
+                        elem_id="voice_audio",  # audit-ASR：自动点录音 JS 定位
                     )
-                    voice_status = gr.Markdown("", scale=4)
+                    voice_status = gr.Markdown("", scale=4, elem_id="voice_status")  # audit-ASR：打断观察
                     asr_state = gr.State(None)
+                    # audit-ASR：语音助手隐藏触发组件（独立事件载体，不阻塞流式收音）
+                    auto_q = gr.Textbox(visible=False, elem_id="auto_q")
+                    greet_trig = gr.Textbox(visible=False, elem_id="greet_trig")
 
                 with gr.Row():
                     use_stream = gr.Checkbox(label="流式输出", value=default_stream)
@@ -1537,7 +1811,8 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                 )
 
                 gr.Markdown("### 语音播报")
-                tts_audio = gr.Audio(streaming=True, autoplay=True, label="播报（自动播放）", visible=True)
+                tts_audio = gr.Audio(streaming=True, autoplay=True, label="播报（自动播放）", visible=True,
+                                     elem_id="tts_audio")  # audit-ASR：打断强停 <video> 定位
                 tts_replay = gr.Audio(label="重播", visible=True)
                 tts_enabled = gr.Checkbox(label="语音播报", value=True)
                 tts_status = gr.Markdown("")
@@ -1572,18 +1847,31 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
         clear_btn.click(clear_history, None, [chatbot, chunks_json])
         status_btn.click(get_system_status, [project_dropdown], [status_text])
 
-        # 语音功能（bug-121）：ASR 流式输入
+        # 语音功能（bug-121 手动 / audit-ASR 语音助手）：ASR 流式输入
+        # 分发器按 VOICE_ASSIST_ENABLED 分流；输出恒 5 元组（手动模式后两个 no-op）
         voice_audio.stream(
-            asr_stream_chunk,
+            voice_stream_dispatch,
             [voice_audio, asr_state, project_dropdown],
-            [asr_state, msg, voice_status],
+            [asr_state, msg, voice_status, auto_q, greet_trig],
             stream_every=0.5,
         )
         # 注意：gradio 6 的 stop 事件是"播放停止按钮"；录音停止必须用 stop_recording
         voice_audio.stop_recording(
-            asr_stream_stop,
+            voice_stop_dispatch,
             [asr_state, project_dropdown],
-            [asr_state, msg, voice_status],
+            [asr_state, msg, voice_status, auto_q, greet_trig],
+        )
+        # audit-ASR：语音助手自动提交（双计时到期）→ 独立事件走问答+播报，不阻塞收音
+        auto_q.change(
+            auto_respond,
+            [auto_q, chatbot, use_stream, project_dropdown, tts_enabled],
+            tts_outputs,
+        )
+        # audit-ASR：唤醒应答播报（缓存欢迎语，零合成延迟）
+        greet_trig.change(
+            play_greeting,
+            [greet_trig, project_dropdown, tts_enabled],
+            [tts_audio, tts_replay, tts_status],
         )
 
         for btn in example_btns:

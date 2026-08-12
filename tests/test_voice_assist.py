@@ -6,6 +6,7 @@ import json
 import math
 import struct
 
+import gradio as gr
 import pytest
 
 
@@ -497,3 +498,301 @@ class TestAwaitBroadcast:
         va._await_since = 0.0
         va.notify_broadcast(True)
         assert va.mode == "broadcast"
+
+
+
+def _make_wav_bytes(rate, seconds):
+    """合成正弦波 wav 字节（测试夹具用）。"""
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        n = int(rate * seconds)
+        w.writeframes(b"".join(
+            struct.pack("<h", int(2000 * math.sin(2 * math.pi * 220 * i / rate)))
+            for i in range(n)))
+    return buf.getvalue()
+
+
+# ============ T4: app.py 接线（assist 路径 / 注册表 / 自动提交 / 欢迎语） ============
+
+def _assist_settings(monkeypatch, tmp_path, **over):
+    import app as app_mod
+    from src.config import Settings
+    s = Settings(_env_file=None)
+    s.project_root = tmp_path
+    s.voice_assist_enabled = True
+    s.xfyun_app_id, s.xfyun_api_key, s.xfyun_api_secret = "a", "k", "s"
+    s.asr_dict_dir = tmp_path
+    for k, v in over.items():
+        setattr(s, k, v)
+    monkeypatch.setattr(app_mod, "settings", s)
+    return s
+
+
+class _FakeAssistant:
+    """记录调用、按脚本逐块吐 VoiceAction 的假状态机。"""
+
+    def __init__(self, script):
+        self.script = [list(x) for x in script]
+        self.notifies = []
+        self.closed = False
+
+    def notify_broadcast(self, active):
+        self.notifies.append(active)
+        return []
+
+    def process_chunk(self, pcm):
+        return self.script.pop(0) if self.script else []
+
+    def close(self):
+        self.closed = True
+
+
+class TestAssistDispatch:
+    def test_manual_mode_passthrough_arity5(self, monkeypatch):
+        """关闭开关 → 退回手动路径，输出补 2 个 no-op（事件输出元数恒为 5）。"""
+        import app as app_mod
+        from src.config import Settings
+        s = Settings(_env_file=None)  # 无讯飞密钥 → 手动路径直接提示
+        monkeypatch.setattr(app_mod, "settings", s)
+        results = list(app_mod.voice_stream_dispatch(None, None, "", None))
+        assert len(results[0]) == 5
+        assert "未配置讯飞密钥" in results[0][2]["value"]
+
+    def test_assist_action_translation(self, monkeypatch, tmp_path):
+        import app as app_mod
+        from src.voice_assistant import VoiceAction
+        _assist_settings(monkeypatch, tmp_path)
+        fake = _FakeAssistant([
+            [VoiceAction("msg", "司母戊鼎"), VoiceAction("status", "🎙 识别中…")],
+            [VoiceAction("submit", "司母戊鼎有多重")],
+            [VoiceAction("greet")],
+            [VoiceAction("barge_in"), VoiceAction("status", "⚡ 已打断播报")],
+        ])
+        monkeypatch.setattr(app_mod, "_create_voice_assistant", lambda pid: fake)
+        monkeypatch.setattr(app_mod, "_to_pcm16k", lambda b, r: b)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"pcm-block")
+
+        r = list(app_mod.voice_stream_dispatch(str(chunk), None, "", None))
+        state, msg, status, auto_q, greet = r[-1]
+        assert msg["value"] == "司母戊鼎"
+        assert "识别中" in status["value"]
+        assert "value" not in auto_q and "value" not in greet
+        assert fake.notifies == [False]  # 无播报 → notify(False)
+
+        r = list(app_mod.voice_stream_dispatch(str(chunk), state, "", None))
+        state = r[-1][0]
+        assert r[-1][3]["value"].startswith("司母戊鼎有多重​#")  # nonce 强制 change
+
+        r = list(app_mod.voice_stream_dispatch(str(chunk), state, "", None))
+        state = r[-1][0]
+        assert r[-1][4]["value"].startswith("#")  # greet 触发
+
+        # 注册一个播报 → 打断动作应取消它
+        tok = app_mod._register_broadcast(None, "answer")
+        r = list(app_mod.voice_stream_dispatch(str(chunk), state, "", None))
+        assert tok.cancel.is_set()
+        assert "⚡" in r[-1][2]["value"]
+
+    def test_assist_vad_failure_degrades(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_mod, "_create_voice_assistant", lambda pid: None)
+        monkeypatch.setattr(app_mod, "_to_pcm16k", lambda b, r: b)
+        chunk = tmp_path / "c.wav"
+        chunk.write_bytes(b"x")
+        r = list(app_mod.voice_stream_dispatch(str(chunk), None, "", None))
+        assert "VAD" in r[-1][2]["value"]
+        r2 = list(app_mod.voice_stream_dispatch(str(chunk), r[-1][0], "", None))
+        assert "value" not in r2[-1][2]  # 后续块不再重复刷错误
+
+
+class TestBroadcastRegistry:
+    def test_register_replaces_and_cancels_old(self):
+        import app as app_mod
+        t1 = app_mod._register_broadcast(None, "answer")
+        t2 = app_mod._register_broadcast(None, "answer")
+        assert t1.cancel.is_set() and not t2.cancel.is_set()
+
+    def test_active_view_skips_done_and_cancelled(self):
+        import app as app_mod
+        tok = app_mod._register_broadcast(None, "answer")
+        assert app_mod._active_broadcast(None) is tok
+        tok.cancel.set()
+        assert app_mod._active_broadcast(None) is None  # 打断中 → 视为非激活
+        tok2 = app_mod._register_broadcast(None, "answer")
+        tok2.done.set()
+        assert app_mod._active_broadcast(None) is None
+
+
+class TestAutoRespond:
+    def test_strips_nonce_and_delegates(self, monkeypatch):
+        import app as app_mod
+        seen = {}
+
+        def fake_respond(message, chat_history, stream, project, tts_enabled, request=None):
+            seen["message"] = message
+            yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
+
+        monkeypatch.setattr(app_mod, "respond", fake_respond)
+        out = list(app_mod.auto_respond("司母戊鼎有多重​#3", [], True, "museum", True, None))
+        assert seen["message"] == "司母戊鼎有多重"
+        assert out
+
+    def test_empty_payload_noop(self, monkeypatch):
+        import app as app_mod
+        monkeypatch.setattr(app_mod, "respond", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应调用")))
+        out = list(app_mod.auto_respond("", [], True, "", True, None))
+        assert len(out) == 1 and len(out[0]) == 6
+
+
+
+class TestRespondBargeIn:
+    """respond 播报打断（audit-ASR 需求4）：cancel → 停止发布/收尾标记/资源释放。"""
+
+    CHARS = ("司母戊鼎是商代晚期的青铜礼器，形制宏大。" * 6)
+
+    def _harness(self, monkeypatch, tmp_path, full):
+        import app as app_mod
+        import threading as _th
+        from src.config import Settings
+        s = Settings(_env_file=None)
+        s.project_root = tmp_path
+        monkeypatch.setattr(app_mod, "settings", s)
+
+        import time as _time
+
+        class FakeHandle:
+            def __init__(self, on_audio):
+                self.on_audio = on_audio
+                self.done = _th.Event()
+                self.error = None
+                self.cancelled = False
+                self.fed = []
+
+            def feed(self, text):
+                self.fed.append(text)
+                self.on_audio(b"\x00" * int(24000 * 0.2) * 2)  # 每喂 0.2s PCM
+
+            def finish(self):
+                self.done.set()
+
+            def cancel(self):
+                self.cancelled = True
+                self.done.set()
+
+        holder = {}
+
+        class FakeTTS:
+            def start_stream(self, on_audio):
+                h = FakeHandle(on_audio)
+                holder["handle"] = h
+                return h
+
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
+
+        def fake_answer(q, h, stream, project):
+            step = max(1, len(full) // 8)
+            for i in range(1, 9):
+                part = full[: step * i]
+                yield (h + [{"role": "user", "content": q},
+                            {"role": "assistant", "content": part}], "[]", part)
+
+        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
+        return holder
+
+    @staticmethod
+    def _cancel_after_first_feed(app_mod, holder):
+        """守望线程：等首个 TTS 片段真正喂入（会话已建）再置打断标记 —— 确定性时序。"""
+        import threading as _th
+        import time as _time
+
+        def _watch():
+            for _ in range(500):
+                h = holder.get("handle")
+                if h is not None and h.fed:
+                    tok = app_mod._active_broadcast(None)
+                    if tok is not None:
+                        tok.cancel.set()
+                        return
+                _time.sleep(0.01)
+
+        _th.Thread(target=_watch, daemon=True).start()
+
+    def test_cancel_stops_broadcast(self, monkeypatch, tmp_path):
+        import app as app_mod
+        holder = self._harness(monkeypatch, tmp_path, self.CHARS)
+        self._cancel_after_first_feed(app_mod, holder)
+        results = list(app_mod.respond("q", [], True, "", True, None))
+        # 打断后：有"已打断"状态；音频批远少于完整播放；句柄被 cancel；token done
+        statuses = [r[5].get("value", "") for r in results if isinstance(r[5], dict)]
+        assert any("已打断" in s for s in statuses), f"缺少打断状态: {statuses}"
+        audio_batches = [r for r in results if isinstance(r[3], bytes)]
+        assert len(audio_batches) <= 4, f"打断后仍发布大量音频: {len(audio_batches)}"
+        assert holder["handle"].cancelled is True
+        assert app_mod._active_broadcast(None) is None  # 已收尾（done）
+
+    def test_normal_run_registers_and_completes(self, monkeypatch, tmp_path):
+        """无打断正常播放：token 注册→完成置 done（回归：不影响既有播报）。"""
+        import app as app_mod
+        self._harness(monkeypatch, tmp_path, self.CHARS[:16])
+        captured = {}
+        orig_register = app_mod._register_broadcast
+
+        def spy(request, kind):
+            captured["tok"] = orig_register(request, kind)
+            return captured["tok"]
+
+        monkeypatch.setattr(app_mod, "_register_broadcast", spy)
+        # 不触发打断：fake_answer 里 tok.cancel 找不到（spy 包装后仍注册）——改为不打断
+        def fake_answer(q, h, stream, project):
+            yield (h + [{"role": "user", "content": q},
+                        {"role": "assistant", "content": self.CHARS[:16]}], "[]", self.CHARS[:16])
+
+        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
+        results = list(app_mod.respond("q", [], True, "", True, None))
+        assert captured["tok"].done.is_set()
+        assert any(isinstance(r[3], bytes) for r in results)  # 音频正常发布
+
+
+class TestPlayGreeting:
+    def test_greeting_publishes_cached_pcm(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_mod, "_greeting_pcm",
+                            lambda project: b"\x01\x00" * 24000)  # 1s 假 PCM
+        results = list(app_mod.play_greeting("#1", "museum", True, None))
+        audio = [r[0] for r in results if isinstance(r[0], bytes)]
+        assert audio, "欢迎语应发布音频段"
+        final_status = [r[2].get("value", "") for r in results if isinstance(r[2], dict)]
+        assert any("小虎" in s or "请提问" in s or "唤醒" in s for s in final_status)
+        assert app_mod._active_broadcast(None) is None  # token 已 done
+
+    def test_greeting_tts_off_still_completes(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        results = list(app_mod.play_greeting("#1", "museum", False, None))
+        assert app_mod._active_broadcast(None) is None
+        assert results  # 至少有一次状态输出
+
+    def test_greeting_pcm_synthesized_once_and_cached(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        calls = {"n": 0}
+
+        class FakeTTS:
+            def synthesize_sentence(self, text):
+                calls["n"] += 1
+                return _make_wav_bytes(24000, 0.5)
+
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
+        app_mod._greeting_pcm.cache_clear() if hasattr(app_mod._greeting_pcm, "cache_clear") else None
+        p1 = app_mod._greeting_pcm("museum")
+        p2 = app_mod._greeting_pcm("museum")
+        assert p1 and p1 == p2
+        assert calls["n"] == 1, "欢迎语应只合成一次（内存/磁盘缓存）"
