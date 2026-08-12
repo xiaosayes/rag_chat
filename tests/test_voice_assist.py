@@ -796,3 +796,44 @@ class TestPlayGreeting:
         p2 = app_mod._greeting_pcm("museum")
         assert p1 and p1 == p2
         assert calls["n"] == 1, "欢迎语应只合成一次（内存/磁盘缓存）"
+
+
+
+# ============ T6: 前端补丁（麦克风 AEC + 语音助手 head JS） ============
+
+class TestMicAecPatch:
+    def test_applies_and_idempotent(self):
+        """getUserMedia 约束补丁：audio:true → 强制 AEC/降噪/增益（一体机外放防回串）。"""
+        from src.audio_bootstrap import patch_gradio_mic_aec
+        assert patch_gradio_mic_aec() is True
+        assert patch_gradio_mic_aec() is True  # 幂等
+
+    def test_marker_on_disk(self):
+        import glob
+        import os
+        import gradio
+        from src.audio_bootstrap import patch_gradio_mic_aec
+        patch_gradio_mic_aec()
+        assets = os.path.join(os.path.dirname(os.path.abspath(gradio.__file__)),
+                              "templates", "frontend", "assets")
+        files = glob.glob(os.path.join(assets, "record.esm-*.js"))
+        assert files, "未找到 record.esm-*.js"
+        src = open(files[0], encoding="utf-8").read()
+        assert "echoCancellation:!0" in src
+        assert "noiseSuppression:!0" in src
+
+    def test_verify_covers_mic_patch(self):
+        """启动自检扩展到麦克风补丁标记。"""
+        from src.audio_bootstrap import patch_gradio_mic_aec, verify_frontend_patches
+        patch_gradio_mic_aec()
+        assert verify_frontend_patches() is True
+
+
+class TestVoiceAssistHead:
+    def test_head_markers(self):
+        import app as app_mod
+        head = app_mod._voice_assist_head()
+        assert "__voiceAssistAutoRecord" in head   # 自动点录音
+        assert "__voiceAssistBargeIn" in head      # 打断强停
+        assert "voice_audio" in head and "voice_status" in head
+        assert "tts_audio" in head and "⚡" in head

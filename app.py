@@ -23,6 +23,7 @@ from src.audio_bootstrap import (
     patch_gradio_audio_transcode,
     patch_gradio_hls_reuse,
     patch_gradio_media_stream_targetduration,
+    patch_gradio_mic_aec,
 )
 
 ensure_ffmpeg()
@@ -31,8 +32,11 @@ ensure_ffmpeg()
 # 只创建一次 hls（Se 标记不重置），第 2 轮起自动播报无声（bug-121 实测）；
 # audit-TTS 补充：原生 HLS 分支一次性赋值修复 + hls.js 缓冲 1s→60s（停顿放大器）
 patch_gradio_hls_reuse()
+# audit-ASR：getUserMedia 强制 AEC/降噪/增益——一体机外放下 TTS 播报被麦克风
+# 拾取会被 VAD 判为语音 → 自触发打断/唤醒死循环（浏览器 AEC 以本页输出为参考）
+patch_gradio_mic_aec()
 from src.audio_bootstrap import verify_frontend_patches  # noqa: E402
-verify_frontend_patches()  # 复读磁盘 JS 确认 3 标记落盘（写权限/版本漂移防御）
+verify_frontend_patches()  # 复读磁盘 JS 确认 3+1 标记落盘（写权限/版本漂移防御）
 # audit-TTS：修正服务端 MediaStream TARGETDURATION 每段 +1 蠕变（无更新时 hls.js
 # 按 TD/2 重载 playlist，长回答发布间断会被放大成数十秒停顿，仿真实证 22.5s）
 patch_gradio_media_stream_targetduration()
@@ -1091,6 +1095,51 @@ _TTS_STALL_PROBE_HEAD = """
 """
 
 
+def _voice_assist_head() -> str:
+    """语音助手前端辅助 JS（audit-ASR，仅 VOICE_ASSIST_ENABLED 时注入 launch(head=)）。
+
+    ① 自动点录音：页面加载后轮询点击 #voice_audio 的录音按钮（免提常驻收音；
+       getUserMedia 授权弹窗仅首次，一体机 Chrome 惯例 --use-fake-ui-for-media-stream）。
+    ② 打断强停：MutationObserver 观察 #voice_status 出现 ⚡ 标记 → 暂停 #tts_audio
+       的 <video>（客户端 HLS 缓冲最深 60s，服务端停发不足以停声，必须前端强停）。
+    __voiceAssistAutoRecord / __voiceAssistBargeIn 为控制台/测试标记。
+    """
+    return """
+<script>
+(function(){
+  function findRecordBtn(){
+    var root=document.getElementById('voice_audio'); if(!root)return null;
+    var btns=root.querySelectorAll('button');
+    for(var i=0;i<btns.length;i++){
+      var a=(btns[i].getAttribute('aria-label')||'').toLowerCase();
+      if(a.indexOf('record')>=0&&a.indexOf('stop')<0)return btns[i];
+    }
+    return null;
+  }
+  var tries=0;
+  var timer=setInterval(function(){
+    tries++; var b=findRecordBtn();
+    if(b){try{b.click();console.log('__voiceAssistAutoRecord clicked');}catch(e){}clearInterval(timer);}
+    else if(tries>40){clearInterval(timer);console.warn('__voiceAssistAutoRecord: record button not found');}
+  },500);
+  var lastBarge=0;
+  function check(){
+    var vs=document.getElementById('voice_status'); if(!vs)return;
+    var t=vs.textContent||'';
+    if(t.indexOf('⚡')<0)return;
+    var now=Date.now(); if(now-lastBarge<1000)return; lastBarge=now;
+    var root=document.getElementById('tts_audio');
+    var v=root?root.querySelector('video'):null;
+    if(v){try{v.pause();}catch(e){}}
+    console.log('__voiceAssistBargeIn playback paused');
+  }
+  new MutationObserver(check).observe(document.documentElement,
+    {childList:true,subtree:true,characterData:true});
+})();
+</script>
+"""
+
+
 class _TtsStallBeaconMiddleware:
     """接收客户端停顿遥测（audit-TTS）：/ __tts_stall 的 sendBeacon POST 直接应答 204
     并落日志；其余请求原样透传。ASGI 中间件实现，免注册路由。"""
@@ -1923,6 +1972,9 @@ def main():
         from starlette.middleware import Middleware
 
         launch_kwargs["head"] = _TTS_STALL_PROBE_HEAD  # 客户端停顿遥测探针
+        if settings.voice_assist_enabled:
+            # audit-ASR：自动点录音 + 打断强停（仅助手模式注入）
+            launch_kwargs["head"] += _voice_assist_head()
         launch_kwargs["app_kwargs"] = {
             "middleware": [Middleware(_NoCacheAssetsMiddleware),
                            Middleware(_TtsStallBeaconMiddleware)]
