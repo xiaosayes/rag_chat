@@ -1,9 +1,9 @@
 """silero VAD 流式封装（audit-ASR 需求2）：语音活动检测 + 流式分段状态机。
 
 自持 ONNX 推理：**不 import silero_vad 包**（其 utils_vad 顶层 import torchaudio——
-服务器 conda 环境无 torchaudio、本地 DLL 亦可能损坏，装了整个包也用不了），
-仅定位 pip 包内置的 silero_vad.onnx（MIT 许可，随 silero-vad 轮子分发）+
-onnxruntime 直接推理。实测 0.095ms/30ms 窗，纯 CPU 绰绰有余。
+服务器 conda 环境无 torchaudio，装了也 ImportError），模型用仓库内置的
+src/assets/silero_vad.onnx（silero-vad v6 16k 专用导出，MIT 许可）+ onnxruntime
+直接推理。实测 0.095ms/30ms 窗，纯 CPU 绰绰有余。
 
 StreamVAD 分段语义随 silero VADIterator（久经考验的闪烁容忍策略）：
   - 概率 >= threshold → 进入语音候选；候选起点回探 pad_ms 预缓冲
@@ -27,22 +27,27 @@ STATE_DIM = 128        # silero v6 onnx LSTM 状态维度（get_inputs 实证 [2
 
 
 def find_silero_model(model_path: str = "") -> Path:
-    """定位 silero_vad.onnx：显式路径 > silero_vad pip 包内置 data 目录。
+    """定位 silero_vad.onnx：显式路径 > 仓库内置 src/assets/ > silero_vad pip 包 data 目录。
 
-    find_spec 不执行模块（绕开 silero_vad/__init__ 的 torchaudio 导入）。
+    仓库内置的是 silero-vad v6 的 16k 专用导出（silero_vad_16k_op15.onnx，MIT 许可，
+    1.3MB；与全量版实测逐窗概率一致）——免装 silero-vad 包（其顶层 import torchaudio，
+    会拖入无关重依赖）。find_spec 不执行模块（绕开 silero_vad/__init__ 的 torchaudio 导入）。
     """
     if model_path:
         p = Path(model_path)
         if not p.exists():
             raise FileNotFoundError(f"silero_vad 模型路径不存在: {p}")
         return p
+    bundled = Path(__file__).resolve().parent / "assets" / "silero_vad.onnx"
+    if bundled.exists():
+        return bundled
     spec = importlib.util.find_spec("silero_vad")
     if spec and spec.submodule_search_locations:
         p = Path(list(spec.submodule_search_locations)[0]) / "data" / "silero_vad.onnx"
         if p.exists():
             return p
     raise FileNotFoundError(
-        "未找到 silero_vad.onnx：请 pip install silero-vad（模型随包内置，离线可用），"
+        "未找到 silero_vad.onnx：仓库应内置 src/assets/silero_vad.onnx；"
         "或在 .env 设置 SILERO_VAD_MODEL_PATH 指向模型文件")
 
 

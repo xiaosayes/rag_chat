@@ -5,6 +5,9 @@ dashscope>=1.20.0
 # 语音功能（bug-121）
 websocket-client>=1.7.0     # 讯飞 IAT WebSocket（ASR）
 static-ffmpeg>=1.5.0        # gradio 6 原生 HLS 流式音频输出所需（自带 ffmpeg/ffprobe 二进制，跨平台）
+# 语音助手（audit-ASR）：silero VAD 推理。模型已内置仓库 src/assets/silero_vad.onnx
+# （MIT 许可，silero-vad v6 16k 导出）——不要 pip install silero-vad（顶层依赖 torchaudio 重依赖）
+onnxruntime>=1.16.0         # silero VAD ONNX 推理（src/vad.py 自持调用，纯 CPU 足够）
 
 # 向量数据库
 qdrant-client>=1.9.0
