@@ -501,30 +501,8 @@ class TestTTSAccumDoubleBuffer:
         # 不足阈值 → 整段返回
         assert _take_sentence("短句。", 20) == ("短句。", "")
 
-    def test_maybe_play_batch_first_batch_waits_for_llm_chunks(self):
-        from app import _maybe_play_batch
-
-        blocks = [self._make_wav(0.3)] * 3
-        # 4 个 LLM chunk 不够 5 → 不播
-        assert _maybe_play_batch(blocks, True, 0.0, 4) is None
-        # 5 个 LLM chunk → 播
-        batch = _maybe_play_batch(blocks, True, 0.0, 5)
-        assert batch is not None
-        assert batch[:4] == b"RIFF"
-        # 无合成块，即使 chunk 数够也不播
-        assert _maybe_play_batch([], True, 0.0, 10) is None
-        # 空缓冲不播
-        assert _maybe_play_batch([], True, 0.0, 0) is None
-
-    def test_maybe_play_batch_subsequent_plays_immediately(self):
-        """后续批次：合成完成即播（不再按时长等待——攒批等待会让播放器断流）。"""
-        from app import _maybe_play_batch
-
-        # 只要有合成块就播（不等时长）
-        blocks = [self._make_wav(0.3), self._make_wav(0.3)]
-        batch = _maybe_play_batch(blocks, False, 10.0, 99)
-        assert batch is not None
-        assert batch[:4] == b"RIFF"
+    # audit-TTS：_maybe_play_batch（分段合成的攒批门）已随单会话流式改造移除，
+    # 首播/停顿语义由 tests/test_tts_broadcast.py 覆盖（首播批小、即产即播）。
 
     def test_merge_wavs_removes_duplicate_headers(self):
         import io
@@ -538,8 +516,10 @@ class TestTTSAccumDoubleBuffer:
             assert w.getnframes() == 16000  # 1.0s @16k
 
     def test_respond_accumulates_and_replays(self, monkeypatch, tmp_path):
-        """respond 集成：mock answer_question 流式输出 + mock TTS，
-        验证攒字触发合成、结尾合并播报、重播文件生成。"""
+        """respond 集成：mock answer_question 流式输出 + mock 流式 TTS 会话，
+        验证增量喂文本合成、音频批发布、重播文件生成（audit-TTS 流式契约）。"""
+        import threading
+
         import app as app_mod
         from src.config import Settings
 
@@ -551,23 +531,26 @@ class TestTTSAccumDoubleBuffer:
         calls = []
 
         class FakeTTS:
-            def synthesize_sentence(self, text):
-                calls.append(text)
-                return self.make_wav(0.2)
+            def start_stream(self, on_audio):
+                class H:
+                    def __init__(self):
+                        self.done = threading.Event()
+                        self.error = None
+                        self.first_audio_at = None
+                        self.cancelled = False
 
-            def split_sentences(self, text, n):
-                return [text]
+                    def feed(self, text):
+                        calls.append(text)
+                        on_audio(b"\x01\x00" * 4800)  # 0.1s PCM(24k)
 
-            @staticmethod
-            def make_wav(seconds):
-                import io
-                import wave
+                    def finish(self):
+                        self.done.set()
 
-                buf = io.BytesIO()
-                with wave.open(buf, "wb") as w:
-                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
-                    w.writeframes(b"\x00\x00" * int(16000 * seconds))
-                return buf.getvalue()
+                    def cancel(self):
+                        self.cancelled = True
+                        self.done.set()
+
+                return H()
 
         monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
 
@@ -578,7 +561,7 @@ class TestTTSAccumDoubleBuffer:
         monkeypatch.setattr(app_mod, "answer_question", fake_answer)
 
         results = list(app_mod.respond("q", [], True, "museum", True))
-        # 攒字触发合成（base 15 字，3 段增量 → 至少 2 次合成）
+        # 增量喂文本触发合成（base 15 字，3 段增量 → 至少 2 次喂入）
         assert len(calls) >= 2
         # 播报批输出（bytes）
         batches = [r[3] for r in results if isinstance(r[3], bytes)]
@@ -589,7 +572,9 @@ class TestTTSAccumDoubleBuffer:
         assert Path(replay[-1]["value"]).exists()
 
     def test_respond_tts_failure_does_not_break_answer(self, monkeypatch, tmp_path):
-        """TTS 合成抛异常时回答流不受影响（事件不中断）。"""
+        """TTS 流式会话持续异常（重建次数用尽）时回答流不受影响（事件不中断）。"""
+        import threading
+
         import app as app_mod
         from src.config import Settings
 
@@ -598,8 +583,23 @@ class TestTTSAccumDoubleBuffer:
         monkeypatch.setattr(app_mod, "settings", s)
 
         class BoomTTS:
-            def synthesize_sentence(self, text):
-                raise RuntimeError("合成失败")
+            def start_stream(self, on_audio):
+                class H:
+                    def __init__(self):
+                        self.done = threading.Event()
+                        self.error = None
+                        self.first_audio_at = None
+
+                    def feed(self, text):
+                        raise RuntimeError("合成失败")
+
+                    def finish(self):
+                        self.done.set()
+
+                    def cancel(self):
+                        self.done.set()
+
+                return H()
 
         monkeypatch.setattr(app_mod, "_init_tts", lambda: BoomTTS())
 
@@ -615,48 +615,8 @@ class TestTTSAccumDoubleBuffer:
         assert chatbot_updates
         assert "回答一" in chatbot_updates[-1][-1][1]
 
-    def test_respond_first_play_at_5_llm_chunks(self, monkeypatch, tmp_path):
-        """首播在攒满 5 个 LLM 流式输出 chunk 时触发（每 chunk 约 10-15 字）。"""
-        import app as app_mod
-        from src.config import Settings
-
-        s = Settings(_env_file=None)
-        s.project_root = tmp_path
-        monkeypatch.setattr(app_mod, "settings", s)
-
-        class FakeTTS:
-            def synthesize_sentence(self, text):
-                return self.make_wav(0.2)
-
-            def split_sentences(self, text, n):
-                return [text]
-
-            @staticmethod
-            def make_wav(seconds):
-                import io
-                import wave
-
-                buf = io.BytesIO()
-                with wave.open(buf, "wb") as w:
-                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
-                    w.writeframes(b"\x00\x00" * int(16000 * seconds))
-                return buf.getvalue()
-
-        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
-
-        base = "这是回答内容的流式片段。"  # 12 字/增量
-        def fake_answer(q, h, stream, project):
-            for i in range(1, 7):  # 6 个 LLM chunk
-                yield h + [{"role": "user", "content": q},
-                           {"role": "assistant", "content": base * i}], "[]", base * i
-
-        monkeypatch.setattr(app_mod, "answer_question", fake_answer)
-
-        results = list(app_mod.respond("q", [], True, "museum", True))
-        batches = [r[3] for r in results if isinstance(r[3], bytes)]
-        # 异步合成下结尾批必然存在；首播批在合成完成 + 攒满 5 chunk 时触发
-        # （首播条件已由 test_maybe_play_batch_first_batch_waits_for_llm_chunks 单测覆盖）
-        assert len(batches) >= 1, f"至少应有结尾播报批，实际 {len(batches)} 批"
+    # audit-TTS：原 test_respond_first_play_at_5_llm_chunks（5 chunk 首播门）随
+    # 单会话流式改造废弃；首播及时性由 test_tts_broadcast.py 覆盖（+E2E 验收 ≤1s）。
 
     def test_take_sentence_splits_on_comma_and_period(self):
         from app import _take_sentence
@@ -687,7 +647,10 @@ class TestTTSAccumDoubleBuffer:
         assert "，这里" not in rest
 
     def test_respond_retries_failed_synthesis(self, monkeypatch, tmp_path):
-        """合成失败的文本结尾合并重试成功（不丢字，播报批仍正常）。"""
+        """首个流式会话喂入即失败（临时异常）→ 自动重建会话恢复，播报批仍正常
+        （audit-TTS：原“分段失败结尾合并重试”语义由会话重建承接）。"""
+        import threading
+
         import app as app_mod
         from src.config import Settings
 
@@ -697,29 +660,33 @@ class TestTTSAccumDoubleBuffer:
 
         class FakeTTS:
             def __init__(self):
-                self.fail_once = True
+                self.n = 0
 
-            def synthesize_sentence(self, text):
-                if self.fail_once:  # 首次合成失败（模拟孤立标点/硬切异常）
-                    self.fail_once = False
-                    raise RuntimeError("临时失败")
-                return self.make_wav(0.2)
+            def start_stream(self, on_audio):
+                self.n += 1
+                fail = self.n == 1  # 首个会话喂入即抛（模拟临时故障）
 
-            def split_sentences(self, text, n):
-                return [text]
+                class H:
+                    def __init__(self):
+                        self.done = threading.Event()
+                        self.error = None
+                        self.first_audio_at = None
 
-            @staticmethod
-            def make_wav(seconds):
-                import io
-                import wave
+                    def feed(self, text):
+                        if fail:
+                            raise RuntimeError("临时失败")
+                        on_audio(b"\x01\x00" * 4800)  # 0.1s PCM(24k)
 
-                buf = io.BytesIO()
-                with wave.open(buf, "wb") as w:
-                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
-                    w.writeframes(b"\x00\x00" * int(16000 * seconds))
-                return buf.getvalue()
+                    def finish(self):
+                        self.done.set()
 
-        monkeypatch.setattr(app_mod, "_init_tts", lambda: FakeTTS())
+                    def cancel(self):
+                        self.done.set()
+
+                return H()
+
+        tts = FakeTTS()
+        monkeypatch.setattr(app_mod, "_init_tts", lambda: tts)
 
         base = "这是回答内容的流式片段。"
         def fake_answer(q, h, stream, project):
@@ -731,7 +698,8 @@ class TestTTSAccumDoubleBuffer:
 
         results = list(app_mod.respond("q", [], True, "museum", True))
         batches = [r[3] for r in results if isinstance(r[3], bytes)]
-        assert batches, "失败的段结尾重试成功后应仍有播报批"
+        assert tts.n >= 2, "临时失败后应重建会话"
+        assert batches, "重建会话后应仍有播报批"
         # 回答输出不因合成失败中断
         chatbot_updates = [r[1] for r in results if isinstance(r[1], list)]
         assert chatbot_updates

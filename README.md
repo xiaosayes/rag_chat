@@ -30,6 +30,100 @@
 
 ## 更新日志
 
+### v1.4.0 (2026-08-12) — TTS 播报架构重做（第十三轮 audit-TTS）
+
+> 语音播报架构重做——**单会话流式合成**。五项验收全过：首播 TTS 侧 ~1.0s（≤1s）、
+> 全程零断流、第 2 轮起正常播报、音质与整段合成一致（单编码器连续 AAC 流）、断句连贯
+> （句边界批量喂 + 静默压缩）。语速 1.1x（`TTS_SPEECH_RATE` 可调）。
+> 物理下限 ≈1.1s：API 首块 0.6s + 转码 0.23s + 客户端启动 ~0.4s。
+> 全程零停顿（真实浏览器两轮 E2E 实证）、第 2 轮起播报恢复。详见 `code_review_report_v3.md` 第九节。
+>
+> 诊断/复现脚本（`scripts/`）：`e2e_tts_browser.py`（真实浏览器双轮 E2E，--mock-llm 隔离
+> LLM 波动）、`tts_starve_probe.py`（断粮/分块烙停顿实验）、`verify_stall_beacon.py`
+> （客户端停顿遥测链路验证）、`measure_tts_*.py`、`tts_stall_sim.py`、`repro_hls_rounds.py`。
+> 生产观测日志：`TTS 首播/播报收尾`、`TTS 缓冲告急`、`播报静默审计`、`客户端停顿上报`。
+
+#### TTS 播报重做（首句延迟 + 中途停顿 + 多轮无声）
+
+**根因链（全部 E2E/源码实证，非推测）**：
+
+1. **首播 3s 的真相**：分段独立合成每段等整段完成（~2s）+ 首播攒批门（5 chunk + 2s 等待）。
+   实测 dashscope 流式**首音频块仅 ~0.6s 且与文本长度无关** → 改为每个回答**一个流式会话**，
+   LLM 文本增量喂入（首段 8 字即喂），PCM 音频边产边播（爬坡批次 0.4/0.6/0.8s→0.9s）。
+2. **中途停顿的真相（多层叠加）**：
+   - `streaming_complete()` **阻塞等全部合成完成**（实测 26s+）且完成后 close 连接——同步调用
+     冻结发布（E2E 实证 playlist 冻结 22s）→ 改后台线程（真凶之一）
+   - 音频收集耦联在 LLM yield 上，LLM 流停顿（高峰实测 40s+）即断流 → answer_question 改
+     后台泵线程，音频按 0.1s 节拍独立发布
+   - 前端 patch 只修第 2 轮无声，但**每个音频批 yield 都重建 hls 实例**（MediaSource 销毁重载，
+     E2E 实证）→ ke() 按 URL 去重：同流复用、新轮才重建
+   - `lowLatencyMode:true` 让播放器贴 live edge（前向缓冲恒 ~0.1s，实证）→ 关闭；
+     `maxBufferLength:1`→60s 深缓冲
+   - gradio 服务端 `MediaStream.max_duration` 每段 +1 蠕变 → TARGETDURATION 膨胀，hls.js 无更新
+     时按 TD/2 轮询（仿真 22.5s 停顿）→ 修正为 clamp(ceil(段时长),1,5)（≤1s 批次下 TD=1，规范内）
+   - 转码 pydub 双进程 0.7s/批（Windows）发布吞吐 0.7x 实时必断流（实测 146.7s 音频发布 269.7s）
+     → 单 ffmpeg 进程 0.23s/批；**EXTINF 改报真实解码时长**（AAC priming 2s→2.048s，原声明漂移
+     48ms/段致 MSE 空洞、播放器卡固定位置，实证）
+3. **第 2 轮起无声的真相**：服务端无误（多轮 playlist 正常）；前端 patch 未覆盖原生 HLS 分支
+   （Safari/无 MSE）+ **patch 原地改文件、哈希文件名不变，浏览器启发式缓存让客户端长期跑旧 JS**
+   → 原生分支按 URL 去重重赋值 + `/assets/*.js` no-cache 中间件强制 revalidate。
+
+**音质修复（同轮后续）**：逐批独立编码的每个 AAC 段带 ~43ms priming 头静音 + 拖尾
+（0.9s 段即每 0.9s 一个接口吞音，实测段开头 42.7ms 才有声、接口能量塌至 1/3）→
+改为**单 ffmpeg 进程持续编码**（PCM 实时写 stdin，stdout 是一条连续 AAC 流，按帧界切片，
+`_AdtsStreamer`），接口编码状态连续无缝（实测接口 RMS 与整体一致）；转码 patch 增加
+**ADTS 直通**（已是 AAC 的段原样透传，避免二次编码代际损失）；码率显式 `-b:a 96k`；
+编码器探针 `-probesize 32 -analyzeduration 0`（原始 PCM 无头可探，默认探针缓冲会攒
+~0.7s 才开工，首播回退的根因）；重播文件改走**原始 PCM**（与编码器健康解耦，质量无损）。
+
+**语速与中途停顿加固（第三轮）**：
+- **语速 +10%**：`speech_rate=1.1`（`TTS_SPEECH_RATE` 可配），流式/非流式路径均透传
+  （真实 API 实测时长比 0.909 = 精确 1/1.1）。
+- **中途停顿根因定论**：断粮烙停顿假设被实验**证伪**（`scripts/tts_starve_probe.py`：
+  整段喂 / 断粮 2.5s / 仅拆分三组音频逐字节一致）——2-3s 中途停顿是播放器缓冲被 LLM
+  出文停顿耗空的**断流**，音频内容无停顿。加固：标准段 0.9s→2.0s（高 RTT 客户端下
+  拉段请求频率减半；首播爬坡 0.4/0.6/0.8 不变，TD patch clamp 到 2）+ respond 新增
+  **缓冲告急诊断日志**（估算剩余缓冲 <1.5s 且 PCM 断流 >1s 时告警，复测时可据此定位）。
+- 若仍有中途停顿，优先确认客户端 HLS patch 生效（启动日志 4 行 + 浏览器硬刷）。
+- **客户端停顿遥测**（第四轮）：页面 head 注入探针（`launch(head=)`），自动播报的
+  video 元素每次 waiting→playing ≥0.4s 自动 sendBeacon `/__tts_stall`（ASGI 中间件
+  `_TtsStallBeaconMiddleware` 直接应答 204 并落 WARNING 日志：停顿时长/播放位置/
+  **前向缓冲**——ahead≈0 = 发布/网络追不平；ahead>3 = 播放器侧问题）。配套
+  `verify_frontend_patches()` 启动自检：复读磁盘 StaticAudio-*.js 确认三标记落盘。
+- **中途停顿根因定论与根治（第五轮）**：遥测零上报 + patch 自检通过 → 停顿不在播放
+  侧。真实 API 复现实验定论：**喂入式合成在每个 streaming_call 边界烙入 ~0.9s 静默**
+  （整段喂 0 处；20 字块喂 5 处/34s——与用户感知的 4-5 处吻合；此前断粮实验漏网是
+  因为只切 2 块且断粮 2.5s 恰好不触发）。修复：`_PauseCompressor` 在 PCM 流上实时
+  压缩静默（20ms 窗，峰值 <-40dB 判静默，每段静默保留前 0.35s 自然气口、超出丢弃，
+  逐窗判决零额外延迟）——真实 API 验证：同文本 5 处静默 → **0 处**，丢弃 2.9s。
+  配套 `_audit_silence` 播报静默审计（每轮收尾后台扫描重播 PCM，≥0.6s 静默即
+  WARNING 带位置）作为回归护栏。
+- **断句连贯性（第五轮补充）**：压缩机把边界停顿压到 0.35s 仍隐约可闻 → 喂入策略
+  改为**句边界批量喂**（`_take_first_unit`/`_take_feed_unit`）：首播单元句末优先、
+  ≥8 字逗号兜底（保首播速度）；后续攒 ≥60 字（`TTS_ACCUM_CHARS` 默认 20→60）完整句
+  才喂、只在句末标点切，断粮 >2.5s 有完整句即喂——200 字回答喂入次数 12→4，边界
+  全部落在自然停顿处。压缩机降为兜底。首播 TTS 侧 ~1.0s 持平。
+- **数字区间“-”不念**（用户实测）：`clean_text_for_tts` 新增 `_convert_dash_ranges`
+  ——数字间 - / – / — 转“到”（3月18–21日 → 3月18到21日、9:00-17:00 → 9:00到17:00），
+  ISO 日期转中文日期（2026-08-12 → 2026年8月12日），非数字连字符不动。
+
+**改动文件**：`app.py`（respond 重做：泵线程 + 流式会话 + `_AdtsStreamer` 持续编码 +
+看门狗重建 ≤2 次；`_NoCacheAssetsMiddleware`；缓冲告急诊断）、`src/tts.py`
+（`CosyVoiceTTS.start_stream`/`_StreamHandle`，PCM_24000 格式；`speech_rate` 透传）、
+`src/audio_bootstrap.py`（HLS patch 扩展 + TD 修正 + 转码提速/ADTS 直通三个 monkeypatch）、
+`src/config.py`（新增 `TTS_SPEECH_RATE/TTS_FIRST_FRAGMENT_CHARS/TTS_BATCH_SECONDS/
+TTS_FIRST_BATCH_SECONDS/TTS_STREAM_WATCHDOG_SECONDS`，弃用 `TTS_FIRST_BATCH_BLOCKS`）。
+**顺带修复 bug-123**：answer_question 错误路径给 gr.JSON 喂空串 → 整个事件静默失败（用户连
+错误提示都看不到），改 gr.update()/"[]"。
+**新增测试 27 个**（`tests/test_tts_broadcast.py`，全离线：流式会话/批次器/看门狗/前端 patch/
+中间件/TD 修正/转码/停顿仿真）+ `scripts/e2e_tts_browser.py`（真实浏览器验收，含 mock-LLM 隔离模式）。
+生产可观测：启动日志可见 4 个 patch 状态；`TTS 首播:` 日志（喂文本→发布秒数）；`TTS 播报收尾:`
+（批次/音频/耗时/重建次数）；`TTS 音频块间隔异常`（API 侧断流 >3s 告警）。
+**残余风险**：LLM 流中段长停顿（内容缺口）下播报必然中断后自动恢复——缓冲可吸收 <20s 波动；
+dashscope 侧长时间断流由看门狗 15s 重建兜底（重喂最后片段，有界重复 ≤1 段）。
+
+---
+
 ### v1.3.5-pre (开发中) — 新增功能与修复（第九/十/十一/十二轮）
 
 #### 新增功能

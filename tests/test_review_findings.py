@@ -679,6 +679,64 @@ class TestAnswerQuestionEmpty:
         assert "请输入问题" in self._last_assistant_content(history)
 
 
+class TestAnswerQuestionChunksJsonSafe:
+    """bug-123：answer_question 错误/空问题路径的 chunks 输出曾为空字符串，
+    gr.JSON postprocess 解析空串抛 Error → 整个事件静默失败（前端连错误提示都看不到）。
+    契约：所有路径的 chunks 值必须是合法 JSON 字符串或 gr.update()。"""
+
+    @staticmethod
+    def _assert_json_safe(value):
+        import json
+
+        if isinstance(value, dict):  # gr.update() 透传，前端不更新
+            return
+        json.loads(value)  # 字符串必须可解析（空串会抛 JSONDecodeError）
+
+    def test_empty_question_chunks_safe(self):
+        from app import answer_question
+        _, chunks, *_ = next(answer_question("   ", [], use_stream=True))
+        self._assert_json_safe(chunks)
+
+    def test_init_failure_chunks_safe(self, monkeypatch):
+        import app as app_mod
+
+        monkeypatch.setattr(app_mod, "init_pipeline",
+                            lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("x")))
+        from app import answer_question
+        _, chunks, *_ = next(answer_question("司母戊鼎", [], use_stream=True))
+        self._assert_json_safe(chunks)
+
+    def test_unbuilt_kb_chunks_safe(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import app as app_mod
+
+        monkeypatch.setattr(app_mod, "init_pipeline",
+                            lambda *_a, **_kw: SimpleNamespace(_is_built=False))
+        from app import answer_question
+        _, chunks, *_ = next(answer_question("司母戊鼎", [], use_stream=True))
+        self._assert_json_safe(chunks)
+
+    def test_query_exception_chunks_safe(self, monkeypatch):
+        """query_stream 抛异常路径：chunks 必须是 "[]" 而非 ""。"""
+        from types import SimpleNamespace
+
+        import app as app_mod
+
+        class _Pipe:
+            _is_built = True
+
+            def query_stream(self, **kw):
+                raise RuntimeError("检索爆炸")
+                yield
+
+        monkeypatch.setattr(app_mod, "init_pipeline", lambda *_a, **_kw: _Pipe())
+        from app import answer_question
+        results = list(answer_question("司母戊鼎", [], use_stream=True))
+        for r in results:
+            self._assert_json_safe(r[1])
+
+
 # =============================================================================
 # 25. 零长度/空 corpus 的 BM25
 # =============================================================================

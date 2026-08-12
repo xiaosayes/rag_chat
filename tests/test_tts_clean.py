@@ -174,7 +174,23 @@ class TestSpecialChars:
         assert clean_text_for_tts("活动 3～5 天。") == "活动 3 到 5 天。"
 
     def test_date_range(self):
-        assert clean_text_for_tts("展期 2024-08-06~2024-08-07 开放。") == "展期 2024-08-06 到 2024-08-07 开放。"
+        # audit-TTS 第五轮：ISO 日期转中文日期（连字符日期 TTS 无法朗读），区间波浪号仍转"到"
+        assert clean_text_for_tts("展期 2024-08-06~2024-08-07 开放。") == "展期 2024年8月6日 到 2024年8月7日 开放。"
+
+    def test_dash_ranges(self):
+        """数字区间连字符转“到”（用户实测 3月18–21日 的 en-dash 被删 → 念成“三月一八二一日”）。"""
+        assert clean_text_for_tts("活动时间为3月18–21日") == "活动时间为3月18到21日。"
+        assert clean_text_for_tts("票价50-80元") == "票价50到80元。"
+        assert clean_text_for_tts("每天9:00-17:00开放") == "每天9:00到17:00开放。"
+        assert clean_text_for_tts("展期3月18—21日") == "展期3月18到21日。"
+
+    def test_iso_date_to_chinese(self):
+        assert clean_text_for_tts("发布于2026-08-12。") == "发布于2026年8月12日。"
+
+    def test_non_numeric_hyphen_untouched(self):
+        """非数字间的连字符不动（self-hosted / A-1024）。"""
+        assert "self-hosted" in clean_text_for_tts("self-hosted 部署")
+        assert "A-1024" in clean_text_for_tts("编号A-1024")
 
 
 # ========== 保留字符 ==========

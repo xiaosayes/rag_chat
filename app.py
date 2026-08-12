@@ -4,6 +4,7 @@
 """
 
 import sys
+import queue
 import threading
 import time
 import json
@@ -16,13 +17,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 语音功能（bug-121）：gradio 导入即触发 pydub 导入，pydub 在 import 时缓存
 # ffmpeg 查找结果，因此 HLS 流式音频输出所需的 ffmpeg 引导必须在 gradio 之前执行
-from src.audio_bootstrap import ensure_ffmpeg, patch_gradio_hls_reuse
+from src.audio_bootstrap import (
+    _adts_duration,
+    ensure_ffmpeg,
+    patch_gradio_audio_transcode,
+    patch_gradio_hls_reuse,
+    patch_gradio_media_stream_targetduration,
+)
 
 ensure_ffmpeg()
 
 # 必须在真实浏览器使用前应用：gradio 6.22 前端 bug——同一 Audio 组件多轮流式值
-# 只创建一次 hls（Se 标记不重置），第 2 轮起自动播报无声（bug-121 实测）
+# 只创建一次 hls（Se 标记不重置），第 2 轮起自动播报无声（bug-121 实测）；
+# audit-TTS 补充：原生 HLS 分支一次性赋值修复 + hls.js 缓冲 1s→60s（停顿放大器）
 patch_gradio_hls_reuse()
+from src.audio_bootstrap import verify_frontend_patches  # noqa: E402
+verify_frontend_patches()  # 复读磁盘 JS 确认 3 标记落盘（写权限/版本漂移防御）
+# audit-TTS：修正服务端 MediaStream TARGETDURATION 每段 +1 蠕变（无更新时 hls.js
+# 按 TD/2 重载 playlist，长回答发布间断会被放大成数十秒停顿，仿真实证 22.5s）
+patch_gradio_media_stream_targetduration()
+# audit-TTS：流式音频转码提速 + EXTINF 真实时长（pydub 双进程 0.7s/批 → 单 ffmpeg
+# 0.23s/批；AAC priming 致声明漂移 48ms/段出 MSE 空洞——E2E 实证卡顿跳段）
+patch_gradio_audio_transcode()
 
 import gradio as gr
 from loguru import logger
@@ -346,6 +362,102 @@ def _extract_last_answer_text(history) -> str:
     return content.strip()
 
 
+class _PauseCompressor:
+    """TTS PCM 流静默压缩（audit-TTS 第五轮）。
+
+    根因（真实 API 实证）：喂入式合成在每个 streaming_call 边界烙入 ~0.9s 静默——
+    整段喂 0 处、20 字块喂 4 处、整句喂 3 处，边界位置即静默位置；减少喂入次数
+    只能减少不能消除，且与首播小批次策略冲突。故在 PCM 流上压缩：保留每段静默的
+    前 cap_s（自然气口），超出部分丢弃——逐 20ms 窗实时判决（“本窗到来时当前静默
+    是否已超 cap”），无需前瞻、零额外延迟。峰值 <300（≈-40dB）判静默。
+    """
+
+    def __init__(self, rate: int = 24000, cap_s: float = 0.35, thresh: int = 300):
+        import numpy as np
+
+        self._np = np
+        self.rate = rate
+        self.win = int(rate * 0.02)               # 20ms 窗（采样数）
+        self.cap_windows = max(1, round(cap_s / 0.02))
+        self.thresh = thresh
+        self._buf = bytearray()
+        self._silent_run = 0                      # 当前连续静默窗数
+        self.dropped_s = 0.0                      # 累计丢弃时长（诊断）
+
+    def feed(self, pcm: bytes) -> bytes:
+        self._buf.extend(pcm)
+        out = bytearray()
+        wbytes = self.win * 2
+        while len(self._buf) >= wbytes:
+            w = bytes(self._buf[:wbytes])
+            del self._buf[:wbytes]
+            peak = int(self._np.abs(self._np.frombuffer(w, dtype=self._np.int16)).max())
+            if peak < self.thresh:
+                self._silent_run += 1
+                if self._silent_run > self.cap_windows:
+                    self.dropped_s += 0.02
+                    continue                       # 超出 cap 的静默窗：丢弃
+            else:
+                self._silent_run = 0
+            out += w
+        return bytes(out)
+
+    def flush(self) -> bytes:
+        """收尾：残余不足一窗的字节原样放出。"""
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+
+def _audit_silence(pcm: bytes, rate: int = 24000, min_s: float = 0.6) -> list:
+    """播报内容静默审计（audit-TTS 第五轮）：返回 ≥min_s 的静默区间 [(起s, 止s)]。
+
+    背景：客户端遥测零上报但用户听到多处停顿 → waiting/stalled 未触发说明不是
+    缓冲断流，停顿只可能烙在音频内容里（播放器平滑播过静默不产生任何事件）。
+    重播 PCM 即实际播放内容，直接扫描它给内容侧定性。20ms 窗峰值 <300 视为静默；
+    贴边（含头/尾）的静默段属起音/拖尾，不计。
+    """
+    import numpy as np
+
+    if len(pcm) < rate * 2:  # 短于 1s 不审
+        return []
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.int32)
+    win = int(rate * 0.02)
+    n = len(samples) // win
+    if n == 0:
+        return []
+    peaks = np.abs(samples[: n * win].reshape(n, win)).max(axis=1)
+    silent = peaks < 300
+    runs, start = [], None
+    for i, s in enumerate(silent):
+        if s and start is None:
+            start = i
+        elif not s and start is not None:
+            if (i - start) * 0.02 >= min_s:
+                runs.append((round(start * 0.02, 2), round(i * 0.02, 2)))
+            start = None
+    if start is not None and (n - start) * 0.02 >= min_s:
+        runs.append((round(start * 0.02, 2), round(n * 0.02, 2)))
+    total = len(samples) / rate
+    # 贴头（起≈0）/贴尾（止≈total）的段是起音/拖尾，排除
+    return [r for r in runs if r[0] > 0.02 and r[1] < total - 0.03]
+
+
+def _audit_silence_log(pcm: bytes) -> None:
+    """审计结果落日志（后台线程执行，勿阻塞发布）。"""
+    try:
+        runs = _audit_silence(pcm)
+        if runs:
+            logger.warning(
+                f"播报静默审计: {len(runs)} 处 ≥0.6s 静默 {runs}——"
+                f"与听感停顿位置吻合 → 停顿烙在音频内容里（TTS 侧）；"
+                f"无此日志却有停顿 → 播放/传输侧")
+        else:
+            logger.info("播报静默审计: 无 ≥0.6s 静默（音频内容连续）")
+    except Exception as e:
+        logger.warning(f"播报静默审计失败: {e}")
+
+
 def _write_replay_wav(chunks):
     """合并各句 wav 字节写入重播缓存文件，返回 Path。
 
@@ -389,6 +501,61 @@ def _write_replay_wav(chunks):
 
 
 _SENTENCE_END = "，。！？…；、："  # 逗号/句号等（用户要求按标点划分，避免句中切导致卡壳）
+
+
+_SENTENCE_FINAL = "。！？；!?\n"   # 句末标点（喂入单元只在这里切）
+_CLAUSE_PAUSE = "，、：,."        # 首播兜底可用的停顿标点
+
+
+def _cut_at_last(text: str, chars: str, limit: int) -> int:
+    """text[:limit] 内最后一个 chars 字符的下一位置；无则 -1。"""
+    head = text[:limit]
+    for i in range(len(head) - 1, -1, -1):
+        if head[i] in chars:
+            return i + 1
+    return -1
+
+
+def _take_first_unit(buf: str, hard_cap: int = 80):
+    """首播喂入单元（audit-TTS 第五轮断句修复）。
+
+    实证：streaming_call 边界会烙静默/韵律断层——边界在句中即“断句不连贯”。
+    故首播单元也必须落在标点边界：① 有句末标点 → 切到句末；② ≥8 字有句读标点
+    → 切到最后一个（逗号处停顿自然，保首播速度——实测整句等待会让首播退到
+    ~1.3s，逗号兜底与旧 8 字策略同速但边界落在自然停顿处）；③ ≥hard_cap 硬切。
+    """
+    text = buf.strip()
+    if not text:
+        return "", buf
+    cut = _cut_at_last(text, _SENTENCE_FINAL, hard_cap)
+    if cut > 0:
+        return text[:cut], buf[len(buf) - len(text) + cut:]
+    if len(text) >= 8:
+        cut = _cut_at_last(text, _SENTENCE_END, hard_cap)  # 含逗号等的宽标点集
+        if cut > 0:
+            return text[:cut], buf[len(buf) - len(text) + cut:]
+    if len(text) >= hard_cap:
+        return text[:hard_cap], buf[len(buf) - len(text) + hard_cap:]
+    return "", buf
+
+
+def _take_feed_unit(buf: str, min_chars: int, max_chars: int = 200,
+                    starve: bool = False):
+    """后续喂入单元：批量完整句（攒 ≥min_chars 字且切在句末标点；max_chars 上限；
+    starve=True（距上次喂入超阈值，引擎可能断粮）时有完整句即喂）。
+    无完整句且缓冲超 max_chars 时硬切（吞掉切点后剩余缓冲开头的孤立标点）。
+    """
+    text = buf.lstrip()
+    if not text:
+        return "", buf
+    lead = len(buf) - len(text)
+    cut = _cut_at_last(text, _SENTENCE_FINAL, max_chars)
+    if cut > 0 and (cut >= min_chars or starve):
+        return text[:cut], buf[lead + cut:]
+    if cut <= 0 and len(text) >= max_chars:
+        rest = text[max_chars:].lstrip(_SENTENCE_END + " ")  # 吞孤立标点（bug-121）
+        return text[:max_chars], rest
+    return "", buf
 
 
 def _take_sentence(text: str, chunk_chars: int):
@@ -469,31 +636,273 @@ def _merge_wavs(chunks: list) -> bytes:
     return buf.getvalue()
 
 
-def _maybe_play_batch(audio_blocks: list, first_play: bool, last_batch_dur: float,
-                      llm_chunk_count: int = 0):
-    """语音播报双缓冲区策略：决定本次是否合并播报最新攒到的音频块。
+def _wrap_pcm(pcm: bytes, rate: int = 24000) -> bytes:
+    """裸 PCM(16bit mono) → wav 字节（重播文件用）。"""
+    import io
+    import wave
 
-    bug-121：首次攒满 tts_first_batch_blocks(5) 个 **LLM 流式输出 chunk**（每块约
-    10-15 字）后合并播报。后续不再按"攒到时长 ≥ 上一批"等待——实测攒批等待会让
-    播放器在首播批播完后断流（结尾 join 一次性等剩余合成，中间停顿最长 1 分钟），
-    改为**合成完成即播**（后端合成 1-2s/段，段音频 2-4s，播放速度慢于合成即无缝）。
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
 
-    Args:
-        audio_blocks: 已合成待播的音频块；
-        first_play: 是否首次播报（由 LLM chunk 数决定）；
-        last_batch_dur: 上一批播报音频时长（秒，仅记录不再用于判断）；
-        llm_chunk_count: 已输出的 LLM 流式 chunk 数（仅首播判断使用）。
 
-    Returns:
-        可播报的合并 wav bytes；不满足条件返回 None（块继续攒）。
+class _AdtsStreamer:
+    """单 ffmpeg 进程持续 AAC 编码 + ADTS 帧界切片（audit-TTS 音质修复）。
+
+    逐批独立编码时每个 HLS 段都带 AAC priming（~43ms 头静音）+ 拖尾 padding，
+    0.9s 段即每 0.9s 一个接口吞音（实测：段解码开头 42.7ms 才有声、接口能量塌
+    至 1/3）。改为单个持续编码进程：PCM 实时写入 stdin，stdout 输出的是一条
+    连续 AAC 流，按 ADTS 帧界切片出段——段只是同一流的切片，编码状态跨段连续，
+    接口无缝（实测接口 RMS 与整体相当）。爬坡阈值：首播段小（0.4s）快开播，
+    0.6/0.8s 爬坡，之后 0.9s 标准段（≤1s 保 TD=1，见 TD patch）。
     """
-    if not audio_blocks:
-        return None
-    if first_play:
-        if llm_chunk_count < settings.tts_first_batch_blocks:
-            return None
-        return _merge_wavs(audio_blocks)
-    return _merge_wavs(audio_blocks)
+
+    _FRAME_SAMPLES = 1024  # AAC-LC 帧长（采样）
+
+    def __init__(self, rate: int = 24000, seg_seconds: float = 0.9,
+                 first_seg_seconds: float = 0.4, ramp_seconds=(0.6, 0.8),
+                 bitrate: str = "96k"):
+        import shutil
+        import subprocess
+
+        self.rate = rate
+        # 各段的帧数阈值（爬坡）
+        self._thresholds = [max(1, round(s * rate / self._FRAME_SAMPLES))
+                            for s in (first_seg_seconds, *ramp_seconds)]
+        self._standard = max(1, round(seg_seconds * rate / self._FRAME_SAMPLES))
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg 不可用（_init_tts 已把关，此处防御）")
+        self._proc = subprocess.Popen(
+            [ffmpeg, "-hide_banner", "-loglevel", "error",
+             # 原始 PCM 无头可探，默认 probesize 会让 demuxer 攒满探针缓冲才开工
+             # （实测首字节延迟 >700ms）；32B 探针 + 零分析时长 → ~210ms（实测）
+             "-probesize", "32", "-analyzeduration", "0",
+             "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0",
+             "-f", "adts", "-b:a", bitrate, "-flush_packets", "1", "pipe:1"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self._q = queue.Queue()       # 切好的 ADTS 段
+        self._buf = bytearray()       # 未切片字节
+        self._seg_count = 0
+        self.done = threading.Event()  # stdout EOF（编码器退出）
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    # ---- 写入（respond 线程） ----
+    def feed(self, pcm: bytes) -> None:
+        if self.done.is_set():
+            return
+        try:
+            self._proc.stdin.write(pcm)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            self.done.set()  # 编码器死亡：播报段停更（重播文件不受影响，走原始 PCM）
+
+    # ---- 读取/切片（reader 线程） ----
+    def _read_loop(self):
+        try:
+            while True:
+                chunk = self._proc.stdout.read1(4096)  # read1：有数据即返回（read 会等满缓冲）
+                if not chunk:
+                    break
+                self._buf.extend(chunk)
+                self._emit(False)
+        finally:
+            self._emit(True)
+            self.done.set()
+
+    @staticmethod
+    def _scan_upto_end(buf) -> int:
+        """返回覆盖所有完整 ADTS 帧的字节数（尾部残帧/非帧数据不计）。"""
+        i, n = 0, len(buf)
+        while i + 7 <= n:
+            if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:
+                break
+            frame_len = ((buf[i + 3] & 0x3) << 11) | (buf[i + 4] << 3) | ((buf[i + 5] & 0xE0) >> 5)
+            if frame_len < 7 or i + frame_len > n:
+                break
+            i += frame_len
+        return i
+
+    @staticmethod
+    def _scan_frames(buf, n_frames: int):
+        """返回覆盖前 n_frames 个完整 ADTS 帧的字节数；不足返回 None。"""
+        i, n = 0, len(buf)
+        for _ in range(n_frames):
+            if i + 7 > n:
+                return None
+            if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:
+                return None
+            frame_len = ((buf[i + 3] & 0x3) << 11) | (buf[i + 4] << 3) | ((buf[i + 5] & 0xE0) >> 5)
+            if frame_len < 7 or i + frame_len > n:
+                return None
+            i += frame_len
+        return i
+
+    def _emit(self, final: bool):
+        while True:
+            target = (self._thresholds[self._seg_count]
+                      if self._seg_count < len(self._thresholds) else self._standard)
+            pos = self._scan_frames(self._buf, target)
+            if pos is None:
+                if final and self._buf:
+                    # 收尾：残余完整帧出一段（不满一帧的尾巴丢弃）
+                    end = self._scan_upto_end(self._buf)
+                    if end:
+                        self._q.put(bytes(self._buf[:end]))
+                    self._buf.clear()
+                return
+            self._q.put(bytes(self._buf[:pos]))
+            self._buf = self._buf[pos:]
+            self._seg_count += 1
+
+    # ---- 消费（respond 线程） ----
+    def collect(self, timeout: float = 0.0) -> list:
+        """取当前可用的 ADTS 段；timeout>0 时阻塞等首段（上限 timeout 秒）。"""
+        out = []
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if not out and timeout > 0:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    item = self._q.get(timeout=remaining)
+                else:
+                    item = self._q.get_nowait()
+            except queue.Empty:
+                break
+            out.append(item)
+        return out
+
+    def collect_all(self, timeout: float = 10.0) -> list:
+        """编码器收尾后排空全部残余段。"""
+        out = []
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                out.append(self._q.get(timeout=0.2))
+            except queue.Empty:
+                if self.done.is_set() and self._q.empty():
+                    break
+        return out
+
+    def finish(self) -> None:
+        """关闭编码器 stdin（EOF → ffmpeg 冲尾 → stdout EOF → done）。"""
+        try:
+            if self._proc.stdin and not self._proc.stdin.closed:
+                self._proc.stdin.close()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        self.finish()
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+
+
+_TTS_STALL_PROBE_HEAD = """
+<script>
+(function(){
+  // 客户端停顿遥测（audit-TTS）：自动播报的 <video> 的卡顿时长/位置/前向缓冲
+  // 上报服务端日志「客户端停顿上报」。waiting≥0.4s；stalled（缓冲≈0 时）；
+  // seek 跳变≥0.5s（hls.js 跳缝 = 内容被跳过，听感是跳词而非停顿）。
+  // ahead≈0 = 缓冲耗空（发布/网络追不平）；ahead>3 = 播放器侧问题。
+  function ahead(v){try{var b=v.buffered;return b.length?+(b.end(b.length-1)-v.currentTime).toFixed(2):-1}catch(e){return -2}}
+  function report(d){try{if(navigator.sendBeacon)navigator.sendBeacon('/__tts_stall',JSON.stringify(d));}catch(e){}}
+  function instr(v){
+    if(v.__ttsStallInstr)return; v.__ttsStallInstr=1;
+    var w0=0, seekFrom=null, lastStalled=0;
+    v.addEventListener('waiting',function(){if(!w0)w0=performance.now();});
+    v.addEventListener('playing',function(){
+      if(!w0)return;
+      var d=(performance.now()-w0)/1000; w0=0;
+      if(d>=0.4)report({type:'waiting',stall_s:+d.toFixed(2),pos:+v.currentTime.toFixed(2),ahead:ahead(v),rs:v.readyState,ns:v.networkState});
+    });
+    v.addEventListener('seeking',function(){seekFrom=v.currentTime;});
+    v.addEventListener('seeked',function(){
+      if(seekFrom===null)return;
+      var j=v.currentTime-seekFrom; seekFrom=null;
+      if(j>=0.5)report({type:'seek',jump_s:+j.toFixed(2),pos:+v.currentTime.toFixed(2),ahead:ahead(v)});
+    });
+    v.addEventListener('stalled',function(){
+      var now=performance.now(); if(now-lastStalled<5000)return;
+      var a=ahead(v); if(a>=0.5)return; lastStalled=now;
+      report({type:'stalled',pos:+v.currentTime.toFixed(2),ahead:a,rs:v.readyState,ns:v.networkState});
+    });
+  }
+  function scan(){var vs=document.querySelectorAll('video');for(var i=0;i<vs.length;i++)instr(vs[i]);}
+  new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
+  scan();
+})();
+</script>
+"""
+
+
+class _TtsStallBeaconMiddleware:
+    """接收客户端停顿遥测（audit-TTS）：/ __tts_stall 的 sendBeacon POST 直接应答 204
+    并落日志；其余请求原样透传。ASGI 中间件实现，免注册路由。"""
+
+    PATH = "/__tts_stall"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") != self.PATH:
+            await self.app(scope, receive, send)
+            return
+        body = b""
+        while True:
+            msg = await receive()
+            if msg["type"] != "http.request":
+                break
+            body += msg.get("body", b"")
+            if not msg.get("more_body"):
+                break
+        try:
+            d = json.loads(body.decode("utf-8", "replace") or "{}")
+            logger.warning(
+                f"客户端停顿上报: {d}"
+                f"（ahead≈0→发布/网络追不平；ahead>3→播放器侧；type=seek→hls.js 跳缝）")
+        except Exception:
+            logger.warning(f"客户端停顿上报(解析失败): {body[:200]!r}")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+
+class _NoCacheAssetsMiddleware:
+    """/assets/*.js 强制 no-cache（audit-TTS 第 2 轮无声修复的配套）。
+
+    patch_gradio_hls_reuse 原地修改 gradio 前端 JS，文件名（内容哈希）不变；
+    Starlette FileResponse 不带 Cache-Control → 浏览器启发式缓存（≈10%×文件
+    年龄，可达数周）会让客户端长期运行 patch 前的旧 JS（第 2 轮无声修复因此
+    不生效）。no-cache 强制每次 revalidate，ETag/mtime 变化后即拿到新文件。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+
+        async def send_with_header(message):
+            if (message["type"] == "http.response.start"
+                    and "/assets/" in path and path.endswith(".js")):
+                headers = message.setdefault("headers", [])
+                headers.append([b"cache-control", b"no-cache"])
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
 
 
 def _init_tts():
@@ -508,7 +917,8 @@ def _init_tts():
         logger.warning("未配置 TTS 音色（TTS_VOICE 为空），语音播报不可用")
         return None
     return CosyVoiceTTS(model=settings.tts_model, voice=settings.tts_voice,
-                        chunk_chars=settings.tts_chunk_chars)
+                        chunk_chars=settings.tts_chunk_chars,
+                        speech_rate=settings.tts_speech_rate)
 
 
 def tts_after_answer(chatbot_history, enabled):
@@ -544,7 +954,8 @@ def tts_after_answer(chatbot_history, enabled):
     logger.info(f"TTS 播报文本: {text[:60]}")
     text = clean_text_for_tts(text)
     tts = CosyVoiceTTS(model=settings.tts_model, voice=settings.tts_voice,
-                       chunk_chars=settings.tts_chunk_chars)
+                       chunk_chars=settings.tts_chunk_chars,
+                       speech_rate=settings.tts_speech_rate)
     chunks = []
     try:
         for sentence in tts.split_sentences(text, settings.tts_chunk_chars):
@@ -608,21 +1019,21 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
     """
     if not question or not question.strip():
         _append_conversation(history, "", "请输入问题")
-        yield history, "", ""
+        yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
         return
 
     try:
         pipe = init_pipeline(project_id)
     except Exception as e:
         _append_conversation(history, question, f"初始化失败: {e}")
-        yield history, "", ""
+        yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
         return
 
     if not pipe._is_built:
         _append_conversation(history, question,
             "知识库尚未构建！\n\n请先在终端运行:\n```\npython scripts/generate_mock_data.py -n 50\npython scripts/build_knowledge_base.py --source mixed\n```"
         )
-        yield history, "", ""
+        yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
         return
 
     conversation_history = _convert_history(history)
@@ -668,12 +1079,12 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
                 _update_last_assistant(history, question, full_answer + f"\n{HISTORY_SEPARATOR}> 剩余内容生成失败")
             else:
                 _update_last_assistant(history, question, error_msg)
-            yield history, json.dumps(chunks_info, ensure_ascii=False) if chunks_info else "", full_answer
+            yield history, json.dumps(chunks_info, ensure_ascii=False), full_answer  # bug-123：chunks_info 为空也是合法 "[]"
     else:
         try:
             # 非流式模式：先显示"正在查询..."提示
             _update_last_assistant(history, question, "正在查询知识库...")
-            yield history, "", ""
+            yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
 
             result = pipe.query(
                 question=question, top_k=settings.retriever_top_k, rerank=settings.reranker_enabled,
@@ -689,146 +1100,255 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
         except Exception as e:
             error_msg = f"查询出错: {e}"
             _update_last_assistant(history, question, error_msg)
-            yield history, "", ""
+            yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
 
 
 def respond(message, chat_history, stream, project, tts_enabled):
-    """回答 + 语音播报（攒字缓冲区 + 播报双缓冲区，bug-121）。
+    """回答 + 语音播报（audit-TTS：单会话流式合成 —— 首句 ≤1s、全程无停顿）。
 
-    a. 攒字：LLM 流式输出文本攒够 tts_accum_chars(20) 字 → 触发一次 TTS 合成
-    b. 双缓冲：首次攒满 tts_first_batch_blocks(5) 个合成块合并播报；后续以
-       "攒到音频时长 ≥ 上一批时长"近似上次播报结束，统一合并播报，循环至回答结束
-    合成/播报任何异常都不影响回答输出（try/except 包裹，避免事件中断导致后续无法发送）。
+    旧链路（bug-121 分段独立合成）：等整段合成完成（~2s/段）才有音频，且首播
+    攒批门（5 chunk + 2s 等待）→ 首播 ~3s；段间会话边界（WS 连接+首块 0.6s）
+    → 中途接缝。新链路：每个回答一个 CosyVoice 流式会话，LLM 文本增量喂入
+    （首段 tts_first_fragment_chars(8) 字即喂，实测首音频块 ~0.6s 与文本长度
+    无关），PCM 音频块边产边播（首播批 0.2s，后续 2s/批）→ 首播 ≈1s，且全程
+    一条连续音频流（无段间边界；客户端 60s 缓冲 + TD 修正吸收残余抖动）。
+    关键：answer_question 在后台泵线程迭代，音频按 0.1s 节拍独立发布——LLM 流
+    中途停顿（实测 qwen-plus 高峰可停 40s+）不再阻塞音频发布（旧结构音频收集
+    耦联在 LLM yield 上，是“有时长停顿”根因之一，E2E 实证 47s 断流）。
+    会话异常（报错/看门狗无音频超时）自动重建（≤2 次，重喂最后一个片段，有界
+    重复）；合成/播报任何异常都不影响回答输出。
     """
     if not message or not message.strip():
         yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
         return
     tts = _init_tts() if tts_enabled else None
-    tasks = None
-    results_q = None
-    synth_thread = None
-    if tts is not None:
-        # 后台合成线程（单 worker 保序）：合成不阻塞 LLM 流式回答（bug-121 实测：
-        # 同步合成每 20 字阻塞 1-2s，回答显示与首播均明显停顿）
-        import queue as _queue
-        import threading
-
-        tasks = _queue.Queue()
-        results_q = _queue.Queue()
-
-        def _worker():
-            while True:
-                item = tasks.get()
-                if item is None:
-                    break
-                seq, text = item
-                try:
-                    wav = tts.synthesize_sentence(text)
-                    results_q.put((seq, None, wav))
-                except Exception as e:
-                    results_q.put((seq, e, None))
-
-        synth_thread = threading.Thread(target=_worker, daemon=True)
-        synth_thread.start()
-    tts_text_buf = ""   # 攒字缓冲区（原始文本，待切分）
-    audio_blocks = []   # 播报双缓冲 A：合成完成待播的音频块
-    replay_blocks = []  # 全部已合成音频块（结尾合并写重播文件）
-    failed_texts = []   # (seq, text) 合成失败段（结尾按序合并重试，避免播报缺字）
-    next_seq = 0
-    seg_by_seq = {}
-    first_play = True   # 是否首次播报（攒满 tts_first_batch_blocks 个 LLM chunk 才首播）
-    last_batch_dur = 0.0
+    # 单编码器持续 AAC 流（音质修复：逐批独立编码每段带 priming 静音坑）；
+    # 无 ffmpeg 时 _init_tts 已返回 None，此处不会触发 RuntimeError
+    streamer = _AdtsStreamer(rate=24000,
+                             seg_seconds=settings.tts_batch_seconds,
+                             first_seg_seconds=settings.tts_first_batch_seconds,
+                             ramp_seconds=(0.6, 0.8)) if tts is not None else None
+    replay_pcm = bytearray()  # 原始 PCM 累积（重播文件用，与编码器健康解耦）
+    compressor = _PauseCompressor(rate=24000) if tts is not None else None
+    handle = None          # 流式会话句柄（懒启动：首个非空片段才建会话）
+    fed_texts = []         # 已喂入片段（重启用）
+    last_feed_at = time.time()  # 上次喂入时刻（断粮守卫：>2.5s 有完整句即喂）
+    restarts = 0
+    tts_dead = False       # 重建次数用尽 → 放弃本轮播报（回答不受影响）
+    tts_text_buf = ""      # 攒字缓冲区（原始文本，待切分）
     prev_raw = ""
-    llm_chunk_count = 0  # LLM 流式输出 chunk 计数（首播判据，每块约 10-15 字）
+    replay_blocks = []     # 已发布音频批（结尾合并写重播文件）
+    played_any = False
+    respond_t0 = time.time()  # audit-TTS 首播延迟度量基准
+    last_audio_at = time.time()
+    first_feed_at = None
+    # 缓冲告急诊断（audit-TTS）：播放器消耗≈开播至今墙钟，估算剩余缓冲
+    published_audio_s = 0.0
+    first_publish_at = None
+    last_dearth_log = 0.0
+    pcm_stats = {"chunks": 0, "bytes": 0}  # audit-TTS：PCM 到达计量（诊断 API 断流）
+
+    def _on_audio(pcm: bytes) -> None:
+        """PCM 到达回调（SDK 接收线程）：静默压缩 → 喂编码器 + 重播累积 + 计量。"""
+        nonlocal last_audio_at
+        now = time.time()
+        gap = now - last_audio_at
+        last_audio_at = now  # 先计量：API 已交付（即使全是待丢的静默），看门狗不误判
+        pcm_stats["chunks"] += 1
+        pcm_stats["bytes"] += len(pcm)
+        pcm = compressor.feed(pcm)  # 丢弃 >0.35s 的静默窗（喂入边界烙入的停顿）
+        if not pcm:
+            return
+        streamer.feed(pcm)
+        replay_pcm.extend(pcm)
+        # 首轮音频到达后，超过 3s 无块视为 API 侧断流（生产可观测性）
+        if pcm_stats["chunks"] > 1 and gap > 3.0:
+            logger.warning(f"TTS 音频块间隔异常: {gap:.1f}s（API 侧断流/拥塞；"
+                           f"累计 {pcm_stats['bytes'] / 48000:.1f}s 音频）")
+
+    def _feed(text) -> bool:
+        """喂一个片段（会话懒启动）；返回 False 表示会话异常需重建。"""
+        nonlocal handle, first_feed_at
+        try:
+            if handle is None:
+                handle = tts.start_stream(_on_audio)
+            handle.feed(text)
+        except Exception as e:
+            logger.warning(f"TTS 喂文本失败（会话异常）: {e}")
+            return False
+        fed_texts.append(text)
+        if first_feed_at is None:
+            first_feed_at = time.time()
+        return True
+
+    def _session_broken() -> bool:
+        if handle is None:
+            return False
+        if handle.error:
+            return True
+        # 看门狗：有待播文本、会话未完成、超过阈值无音频 → 判定挂起
+        return (fed_texts and not handle.done.is_set()
+                and time.time() - last_audio_at > settings.tts_stream_watchdog_seconds)
+
+    def _restart() -> None:
+        """重建会话并重喂最后一个片段（有界重复 ≤1 段；更早缺失接受并记录）。"""
+        nonlocal handle, restarts, tts_dead
+        if restarts >= 2:
+            tts_dead = True
+            logger.warning("TTS 会话多次异常，放弃本轮播报（回答不受影响）")
+            return
+        restarts += 1
+        logger.warning(f"TTS 会话异常（{(handle.error if handle else None) or '无音频超时'}），"
+                       f"重建会话({restarts}/2)")
+        try:
+            if handle is not None:
+                handle.cancel()
+        except Exception:
+            pass
+        handle = None
+        if fed_texts:
+            _feed(fed_texts[-1])
+
+    def _collect(wait: float = 0.0) -> list:
+        """收集已切好的 ADTS 段；wait>0 时阻塞等首段（上限 wait 秒）。"""
+        return streamer.collect(timeout=wait)
+
+    # audit-TTS：后台泵线程迭代 answer_question，音频发布按 0.1s 节拍独立驱动，
+    # 与 LLM yield 节奏解耦（LLM 流停顿不再断音频流）
+    text_q = queue.Queue()
+
+    def _answer_pump():
+        try:
+            for r in answer_question(message, chat_history, stream, project):
+                text_q.put(("item", r))
+        except Exception as e:
+            text_q.put(("error", e))
+        finally:
+            text_q.put(("end", None))
+
     try:
-        for result in answer_question(message, chat_history, stream, project):
-            yield "", result[0], result[1], gr.update(), gr.update(), gr.update()
-            if tts is None:
-                continue
-            # 用原始累积文本做 diff（answer_question 第三值；display 经 clean 补标点
-            # 后前缀漂移，按长度 diff 会错位导致漏字/标点错乱——bug-121 实测）
-            raw = result[2] if len(result) > 2 else ""
-            if len(raw) <= len(prev_raw):
-                continue
-            tts_text_buf += raw[len(prev_raw):]
-            prev_raw = raw
-            llm_chunk_count += 1  # 一个 LLM 流式输出 chunk（约 10-15 字）
-            # a. 攒字：够阈值 → 切分（按标点）→ 段 clean → 提交后台合成（不阻塞）
-            while tts_text_buf and len(tts_text_buf) >= settings.tts_accum_chars:
-                seg, tts_text_buf = _take_sentence(tts_text_buf, settings.tts_accum_chars)
-                if not seg:
-                    break
-                seg_clean = clean_text_for_tts(seg)
-                if not seg_clean:
-                    continue
-                tasks.put((next_seq, seg_clean))
-                seg_by_seq[next_seq] = seg_clean
-                next_seq += 1
-            # 收集已完成合成（非阻塞；单 worker 按序产出）。
-            # 首播临界（已攒满 5 个 LLM chunk）：最多等 2s 收集首批已合成音频，
-            # 避免首播拖到回答结束（合成慢于 LLM 流式时）
-            wait_deadline = 0.0
-            if first_play and llm_chunk_count >= settings.tts_first_batch_blocks:
-                wait_deadline = time.time() + 2.0
-            while True:
+        threading.Thread(target=_answer_pump, daemon=True).start()
+        ended = False
+        while not ended:
+            try:
+                kind, payload = text_q.get(timeout=0.1)
+            except queue.Empty:
+                kind, payload = "tick", None
+            if kind == "item":
+                yield "", payload[0], payload[1], gr.update(), gr.update(), gr.update()
+                if tts is not None and not tts_dead:
+                    # 用原始累积文本做 diff（answer_question 第三值；display 经 clean
+                    # 补标点后前缀漂移，按长度 diff 会错位漏字——bug-121 实测）
+                    raw = payload[2] if len(payload) > 2 else ""
+                    if len(raw) > len(prev_raw):
+                        tts_text_buf += raw[len(prev_raw):]
+                        prev_raw = raw
+                    # 增量喂文本（第五轮断句修复）：streaming_call 边界会烙静默/
+                    # 韵律断层 → 边界必须落在自然停顿处。首播单元切句末（逗号兜底）；
+                    # 后续批量完整句（≥tts_accum_chars 字起喂），只在句末标点切
+                    while not tts_dead:
+                        if not fed_texts:
+                            seg, tts_text_buf = _take_first_unit(tts_text_buf)
+                        else:
+                            seg, tts_text_buf = _take_feed_unit(
+                                tts_text_buf, min_chars=settings.tts_accum_chars,
+                                starve=time.time() - last_feed_at > 2.5)
+                        if not seg:
+                            break
+                        seg_clean = clean_text_for_tts(seg)
+                        if not seg_clean:
+                            continue
+                        if _feed(seg_clean):
+                            last_feed_at = time.time()
+                        else:
+                            _restart()
+            elif kind == "error":
+                logger.warning(f"回答流异常（防御兜底，answer_question 多已内部处理）: {payload}")
+            elif kind == "end":
+                ended = True
+            # 每拍（≤0.1s）收集音频并发布：与 LLM 节奏解耦的核心
+            if tts is not None and not tts_dead:
+                if _session_broken():
+                    _restart()
+                segs = _collect()
+                for seg in segs:
+                    played_any = True
+                    replay_blocks.append(seg)
+                    published_audio_s += _adts_duration(seg, 24000)
+                    if first_publish_at is None:
+                        first_publish_at = time.time()
+                    if len(replay_blocks) == 1 and first_feed_at is not None:
+                        logger.info(f"TTS 首播: 喂文本@{first_feed_at - respond_t0:.2f}s "
+                                    f"首批@{time.time() - respond_t0:.2f}s "
+                                    f"（喂文本→发布 {time.time() - first_feed_at:.2f}s，验收 ≤1s）")
+                    logger.debug(f"TTS 批({len(replay_blocks)}) @{time.time() - respond_t0:.2f}s")
+                    yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
+                        gr.update(value="播报中…")
+                # 缓冲告急：发布节拍空 + PCM 断流 >1s + 估算剩余 <1.5s → 听众即将感知停顿
+                if (not segs and first_publish_at is not None
+                        and time.time() - last_audio_at > 1.0
+                        and time.time() - last_dearth_log > 10):
+                    est = published_audio_s - (time.time() - first_publish_at)
+                    if est < 1.5:
+                        last_dearth_log = time.time()
+                        logger.warning(
+                            f"TTS 缓冲告急: 估算剩余 {max(est, 0):.1f}s"
+                            f"（已发布 {published_audio_s:.1f}s / 开播 {time.time() - first_publish_at:.1f}s）；"
+                            f"LLM 出文停顿正被听众感知。若频繁出现：查客户端 HLS patch "
+                            f"是否生效（StaticAudio-*.js 应含 maxBufferLength:60）与网络 RTT")
+        # 回答结束：喂尾文本 → finish（后台线程，阻塞型） → 排空（含看门狗重建）
+        if tts is not None and not tts_dead:
+            tail = clean_text_for_tts(tts_text_buf.strip()) if tts_text_buf.strip() else ""
+            if tail and not _feed(tail):
+                _restart()
+
+            def _finish_async(h):
                 try:
-                    if wait_deadline > time.time():
-                        seq, err, wav = results_q.get(timeout=wait_deadline - time.time())
-                    else:
-                        seq, err, wav = results_q.get_nowait()
-                except Exception:
-                    break
-                if err:
-                    logger.warning(f"TTS 合成失败，待结尾重试: {err}")
-                    failed_texts.append((seq, seg_by_seq.get(seq, "")))
-                else:
-                    audio_blocks.append(wav)
-                    replay_blocks.append(wav)
-                    logger.info(f"TTS 合成块({len(replay_blocks)})")
-            # b. 双缓冲播报（首次攒满 5 个 LLM chunk / 后续按时长）
-            batch = _maybe_play_batch(audio_blocks, first_play, last_batch_dur, llm_chunk_count)
-            if batch is not None:
-                audio_blocks = []
-                first_play = False
-                last_batch_dur = _wav_duration(batch)
-                yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
-                    gr.update(value="播报中…")
-        # 回答结束：提交剩余文本 + 失败段重试 → 循环收集合成完成即播
-        # （不一次性 join 等全部——实测会让播放器断流最长 1 分钟，改为逐批 yield）
-        if tts is not None:
-            if tts_text_buf.strip():
-                seg_clean = clean_text_for_tts(tts_text_buf.strip())
-                if seg_clean:
-                    tasks.put((next_seq, seg_clean))
-                    seg_by_seq[next_seq] = seg_clean
-                    next_seq += 1
-            retry_text = "".join(t for _, t in sorted(failed_texts))
-            if retry_text:
-                tasks.put((next_seq, retry_text))
-                seg_by_seq[next_seq] = retry_text
-                next_seq += 1
-            tasks.put(None)  # 无更多合成任务
-            while synth_thread.is_alive() or not results_q.empty():
-                try:
-                    seq, err, wav = results_q.get(timeout=0.5)
-                except Exception:
-                    continue
-                if err:
-                    logger.warning(f"TTS 重试仍失败（该段无法播报）: {err}")
-                else:
-                    audio_blocks.append(wav)
-                    replay_blocks.append(wav)
-                    if audio_blocks:
-                        batch = _merge_wavs(audio_blocks)
-                        audio_blocks = []
-                        yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
+                    h.finish()
+                except Exception as e:
+                    logger.warning(f"TTS finish 异常: {e}")
+
+            if handle is not None:
+                # audit-TTS：streaming_complete 会阻塞等全部合成完成（实测 26s+！）
+                # 并在完成后 close WebSocket——同步调用会冻结发布（中途停顿真凶之一，
+                # E2E 实证 playlist 冻结 22s）→ 放后台线程执行
+                threading.Thread(target=_finish_async, args=(handle,), daemon=True).start()
+                end_at = time.time() + 120  # 总兜底，防无限循环
+                while not tts_dead and time.time() < end_at:
+                    for seg in _collect(wait=0.5):
+                        played_any = True
+                        replay_blocks.append(seg)
+                        yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
                             gr.update(value="播报中…")
-            if audio_blocks:
-                batch = _merge_wavs(audio_blocks)
-                yield gr.update(), gr.update(), gr.update(), batch, gr.update(), \
-                    gr.update(value="播报中…")
-            if replay_blocks:
-                replay_path = _write_replay_wav(replay_blocks)
+                    if handle.done.is_set():
+                        break  # 会话完成：全部 PCM 已交付（WS 消息有序，on_complete 殿后）
+                    if time.time() - last_audio_at > settings.tts_stream_watchdog_seconds:
+                        _restart()
+                        if not tts_dead and handle is not None:
+                            threading.Thread(target=_finish_async,
+                                             args=(handle,), daemon=True).start()
+                # 全部 PCM 已喂完 → 压缩器残尾入管 → 关编码器 stdin 冲尾，排空残余段
+                tail_pcm = compressor.feed(b"") + compressor.flush()
+                if tail_pcm:
+                    streamer.feed(tail_pcm)
+                    replay_pcm.extend(tail_pcm)
+                streamer.finish()
+                for seg in streamer.collect_all(timeout=10):
+                    played_any = True
+                    replay_blocks.append(seg)
+                    yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
+                        gr.update(value="播报中…")
+                if handle is not None and handle.error:
+                    logger.warning(f"TTS 会话出错（部分音频可能缺失）: {handle.error}")
+                logger.info(f"TTS 播报收尾: 批次={len(replay_blocks)} "
+                            f"音频={len(replay_pcm) / 48000:.1f}s "
+                            f"耗时={time.time() - respond_t0:.1f}s 重建={restarts}")
+            if replay_pcm:
+                # 重播走原始 PCM（与编码器健康解耦，质量无损）
+                replay_path = _write_replay_wav([_wrap_pcm(bytes(replay_pcm), 24000)])
+                # 静默审计（后台线程）：客户端零上报但用户听到停顿时给内容侧定性
+                threading.Thread(target=_audit_silence_log,
+                                 args=(bytes(replay_pcm),), daemon=True).start()
                 yield gr.update(), gr.update(), gr.update(), gr.update(), \
                     gr.update(value=str(replay_path)), gr.update(value="已播报（可点击重播）")
             else:
@@ -838,6 +1358,14 @@ def respond(message, chat_history, stream, project, tts_enabled):
         logger.warning(f"语音播报异常（不影响回答）: {e}")
         yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), \
             gr.update(value=f"语音播报异常: {e}")
+    finally:
+        if handle is not None:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        if streamer is not None:
+            streamer.close()
 
 
 def format_answer(answer: str, chunks: list, timing: dict = None) -> str:
@@ -1102,6 +1630,15 @@ def main():
         # bug-098：Gradio 6.0 将 theme/css 移到 launch()
         launch_kwargs["theme"] = _UI_THEME
         launch_kwargs["css"] = _UI_CSS
+        # audit-TTS：/assets/*.js no-cache——HLS patch 原地改文件、哈希文件名不变，
+        # 浏览器启发式缓存会让客户端长期跑 patch 前的旧 JS（第 2 轮无声修复不生效）
+        from starlette.middleware import Middleware
+
+        launch_kwargs["head"] = _TTS_STALL_PROBE_HEAD  # 客户端停顿遥测探针
+        launch_kwargs["app_kwargs"] = {
+            "middleware": [Middleware(_NoCacheAssetsMiddleware),
+                           Middleware(_TtsStallBeaconMiddleware)]
+        }
     if args.ssl_keyfile or args.ssl_certfile:
         # bug-122：浏览器 getUserMedia 要求安全上下文（HTTPS/localhost），
         # 自签或正式证书均可；仅提供其一则报错提示

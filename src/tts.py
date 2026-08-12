@@ -5,6 +5,7 @@
 合成流式：dashscope SpeechSynthesizer + ResultCallback（on_data 逐块回调）
 """
 import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional, Union
 
@@ -69,8 +70,77 @@ def _unbalanced_parens(s: str) -> bool:
     return depth > 0
 
 
+class _StreamHandle:
+    """单会话流式合成句柄（audit-TTS：首句 ≤1s + 全程无停顿）。
+
+    增量喂文本（streaming_call），PCM 音频块经 on_audio 回调即产即发
+    （实测首音频块 ~0.6s，与文本长度无关；PCM 格式无 WAV 头，直接凑批）。
+    线程模型：feed/finish/cancel 由调用线程；on_* 回调由 dashscope SDK 接收线程。
+    """
+
+    def __init__(self, tts: "CosyVoiceTTS", on_audio: Callable[[bytes], None]):
+        from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
+
+        self._on_audio = on_audio
+        self.sample_rate = 24000
+        self.first_audio_at: Optional[float] = None
+        self.error: Optional[str] = None
+        self.done = threading.Event()
+        self._synth = SpeechSynthesizer(
+            model=tts.model,
+            voice=tts.voice,
+            format=AudioFormat.PCM_24000HZ_MONO_16BIT,  # 无头 PCM：凑批免拆头
+            speech_rate=tts.speech_rate,
+            callback=self,
+        )
+
+    # ---- dashscope ResultCallback 接口（SDK 接收线程） ----
+    def on_open(self) -> None:
+        pass
+
+    def on_data(self, data: bytes) -> None:
+        if self.first_audio_at is None:
+            self.first_audio_at = time.time()
+        try:
+            self._on_audio(data)
+        except Exception:
+            pass  # 回调异常不杀 SDK 接收线程
+
+    def on_complete(self) -> None:
+        self.done.set()
+
+    def on_error(self, message) -> None:
+        self.error = str(message)
+        self.done.set()
+
+    def on_close(self) -> None:
+        self.done.set()
+
+    def on_event(self, message) -> None:
+        pass
+
+    # ---- 控制面（调用线程） ----
+    def feed(self, text: str) -> None:
+        self._synth.streaming_call(text)
+
+    def finish(self) -> None:
+        self._synth.streaming_complete()
+
+    def cancel(self) -> None:
+        try:
+            self._synth.streaming_cancel()
+        except Exception:
+            pass
+        finally:
+            self.done.set()
+        try:
+            self._synth.close()
+        except Exception:
+            pass
+
+
 class CosyVoiceTTS:
-    """CosyVoice TTS 封装：逐句合成 + 句子级流式回调。"""
+    """CosyVoice TTS 封装：逐句合成 + 句子级流式回调 + 单会话流式（audit-TTS）。"""
 
     def __init__(
         self,
@@ -79,6 +149,7 @@ class CosyVoiceTTS:
         format=None,  # dashscope AudioFormat 枚举；None → WAV 24kHz
         sample_rate: int = 24000,
         chunk_chars: int = 1000,
+        speech_rate: float = 1.0,  # 语速倍率 0.5~2.0（用户验收：1.1 加快 10%）
     ):
         from dashscope.audio.tts_v2 import AudioFormat
 
@@ -89,6 +160,7 @@ class CosyVoiceTTS:
         self.format = format or AudioFormat.WAV_24000HZ_MONO_16BIT
         self.sample_rate = sample_rate
         self.chunk_chars = chunk_chars
+        self.speech_rate = speech_rate
         ensure_ffmpeg()  # 防御性引导（app 入口已提前调用）
 
     @staticmethod
@@ -132,6 +204,7 @@ class CosyVoiceTTS:
             model=self.model,
             voice=self.voice,
             format=self.format,
+            speech_rate=self.speech_rate,
             callback=collector,
         )
         synth.call(text)
@@ -146,6 +219,15 @@ class CosyVoiceTTS:
         for sentence in self.split_sentences(text, self.chunk_chars):
             wav = self.synthesize_sentence(sentence)
             on_sentence(sentence, wav)
+
+    def start_stream(self, on_audio: Callable[[bytes], None]) -> _StreamHandle:
+        """开启单会话流式合成：feed 增量文本，PCM 音频块经 on_audio 即产即发。
+
+        audit-TTS：分段独立合成需等整段完成（~2s/段）才有音频，首播 ~3s 且段间
+        必现接缝；单会话流式的首音频块实测 ~0.6s（与文本长度无关），且全程一条
+        连续音频流（无段间边界）。
+        """
+        return _StreamHandle(self, on_audio)
 
     @staticmethod
     def write_wav(data: bytes, path: Union[str, Path]) -> None:

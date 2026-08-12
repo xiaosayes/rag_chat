@@ -241,6 +241,22 @@ def _convert_tilde_ranges(text: str) -> str:
     return text.replace("~", "").replace("～", "")
 
 
+def _convert_dash_ranges(text: str) -> str:
+    """数字区间连字符转 "到"（用户实测：3月18–21日 的 en-dash 被清洗删除 → 念成
+    "三月一八二一日"）。处理：
+      1. ISO 日期 2026-08-12 → 2026年8月12日（避免被区间规则误转，且 TTS 友好）；
+      2. 数字间的 - / –（en-dash）/ —（em-dash）→ 到：18-21 → 18到21、
+         9:00-17:00 → 9:00到17:00；
+      3. 非数字间的连字符（如 self-hosted）不动。
+    """
+    text = re.sub(
+        r"(\d{4})-(\d{1,2})-(\d{1,2})",
+        lambda m: f"{m.group(1)}年{int(m.group(2))}月{int(m.group(3))}日",
+        text,
+    )
+    return re.sub(r"(\d)\s*[-–—]\s*(\d)", r"\1到\2", text)
+
+
 def clean_text_for_tts(text: Optional[str]) -> str:
     """将答案原始文本清洗为适合语音合成（TTS）+ 字幕展示的纯文本（bug-115）
 
@@ -318,6 +334,7 @@ def clean_text_for_tts(text: Optional[str]) -> str:
     for line, is_heading in cleaned:
         line = _strip_emphasis(line)
         line = _convert_tilde_ranges(line)
+        line = _convert_dash_ranges(line)
         line = strip_emoji(line)
         # 控制字符 / 零宽字符 / 制表符（→ 空格）
         line = re.sub(

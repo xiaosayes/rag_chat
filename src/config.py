@@ -98,8 +98,14 @@ class Settings(BaseSettings):
     tts_model: str = Field(default="cosyvoice-v3-flash", description="TTS 模型（一期；二期真人音色用 cosyvoice-v3.5-flash）")
     tts_voice: str = Field(default="", description="TTS 音色（默认小男孩，真实 API 确认后填入）")
     tts_chunk_chars: int = Field(default=1000, ge=100, description="TTS 长文本分段长度（字符）")
-    tts_accum_chars: int = Field(default=20, ge=1, description="语音播报攒字缓冲区：LLM 流式输出攒够该字数触发一次 TTS 合成（bug-121）")
-    tts_first_batch_blocks: int = Field(default=5, ge=1, description="语音播报双缓冲区：首次攒满该数量的合成块合并播报（bug-121）")
+    tts_accum_chars: int = Field(default=60, ge=1, description="后续喂入批量阈值（字）：攒够该字数的完整句（句末标点切）才喂入。audit-TTS 第五轮：streaming_call 边界烙静默/韵律断层，20 字小块致每回答 4-5 处断句 → 批量化减边界 + 只切句末")
+    tts_first_batch_blocks: int = Field(default=5, ge=1, description="[已弃用] bug-121 分段合成的首播门；audit-TTS 单会话流式改造后不再使用（保留字段兼容旧 .env）")
+    # audit-TTS：单会话流式合成（首句 ≤1s + 全程无停顿）
+    tts_first_fragment_chars: int = Field(default=8, ge=1, description="[已弃用] 第五轮断句修复后首播单元改由 _take_first_unit 决定（句末标点优先，逗号/80 字兜底）；保留字段兼容旧 .env")
+    tts_speech_rate: float = Field(default=1.1, ge=0.5, le=2.0, description="TTS 语速倍率（CosyVoice speech_rate，0.5~2.0）：用户反馈原速不紧不慢，1.1 加快 10%")
+    tts_batch_seconds: float = Field(default=2.0, gt=0, description="播报标准段时长（秒音频）：连续 AAC 流按帧界切片发布。audit-TTS：0.9s 段在高 RTT 客户端下请求周期追不平消费（拉 playlist→拉段串行，2 次 RTT/段）→ 2.0s 减半请求频率；首播爬坡 0.4/0.6/0.8 不受影响；TD patch clamp 到 2")
+    tts_first_batch_seconds: float = Field(default=0.4, gt=0, description="首播批次时长（秒音频）：小批次快速开播")
+    tts_stream_watchdog_seconds: float = Field(default=15.0, gt=0, description="流式会话看门狗：有待播文本但无音频超过该时长 → 重建会话（最多 2 次）")
 
     # ========== 意图理解（L1 语义 + L2 LLM 兜底）==========
     # 分层意图分类：L0 规则（is_kb_related）→ L1 向量语义 → L2 LLM 兜底
