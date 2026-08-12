@@ -30,6 +30,53 @@
 
 ## 更新日志
 
+### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）
+
+> 语音输入从「点击录音」升级为**免提语音助手**（默认关闭，`VOICE_ASSIST_ENABLED=true` 开启，
+> 关闭时手动模式行为零变化）：唤醒词唤醒 → 双计时自动提问 → 播报可打断 → 多轮循环。
+> 真实 API 全链路冒烟实证（`scripts/smoke_voice_assist.py`）：唤醒命中 → 进入 8s 提问窗 →
+> 提问识别 wpgs 边说边出字（说完时首字早已在屏上，<1s 达成）→ 2s 静默自动提交。
+
+**六项能力**（需求 → 方案）：
+
+1. **自动唤醒**：唤醒词可编辑（`.env ASR_WAKE_WORDS` 逗号分隔；`asr_dict.json` 的
+   `wake_words`/`wake_greeting` 项目级覆盖）。待机态语音段经 VAD 门控才送讯飞
+   （省额度），识别文本**先归一（去标点）再纠错**后子串匹配唤醒词（"泥好，小胡！"也能命中）。
+   应答语默认「您好，我是小虎，请问有什么可以帮您？」——**合成一次内存+磁盘缓存复用**
+   （`data/processed/tts_cache/greeting_<hash>.wav`，零合成延迟）。
+2. **前置 VAD**：silero-vad（模型内置 `src/assets/silero_vad.onnx`，MIT 许可；自持 ONNX
+   推理，**不装 silero-vad 包**——其顶层依赖 torchaudio）。参数按用户标定：
+   `VAD_THRESHOLD=0.5 / VAD_MIN_SPEECH_MS=400`（过滤"嗯/啊"）
+   `/ VAD_MIN_SILENCE_MS=800`（段结束）`/ VAD_SPEECH_PAD_MS=200` / `VAD_MAX_SPEECH_S=15`
+   （强制切段防卡死）。关键实证：官方推理每窗需前拼 64 采样上下文，缺失则概率输出全废。
+3. **双计时**：播报结束进倾听态，8s 内无语音→回待机（流程中断）；每段语音结束延长 2s，
+   循环延长；2s 静默→视为提问完毕→**自动提交问答**（隐藏 Textbox `.change` 独立事件——
+   gradio 单事件 concurrency_limit=1，塞进流事件会堵死打断检测）。
+4. **多轮 + 打断**：播报中 VAD 确认持续语音（≥400ms）即打断——服务端按 `session_hash`
+   定位当前播报 token，respond 每 0.1s 拍检查 cancel（停喂停发、取消 TTS 会话、跳过收尾）；
+   客户端 60s HLS 缓冲由 head JS 观察 `voice_status` 的 ⚡ 标记**强停 `<video>`**。
+   打断的语音直接作为新问题（免唤醒）。手动发送的回答同样注册 token、可被打断。
+5. **识别提速**：保持讯飞流式（wpgs 边说边出字，实测增量 <500ms）——"说完到首字 <1s"
+   由流式天然满足；旧「客户端静音块判停 2s」被 VAD 800ms 端点取代（仅助手模式）。
+   决策记录：否决"说完再一次性识别"（整段重识别必超 1s）。
+6. **纠词典新格式**：`asr_dict.json` 支持顶层 `[{"from":"巨声智能","to":"具身智能"}]`
+   列表（与旧 dict 形态兼容，可混用；全局+项目级合并，多字符优先替换照旧）。
+
+**防自触发（一体机外放关键）**：新增 `patch_gradio_mic_aec()`——gradio 录音默认
+`getUserMedia({audio:true})` 无 AEC，TTS 播报会被自己麦克风拾取 → VAD 误判 → 死循环；
+补丁强制 `echoCancellation/noiseSuppression/autoGainControl`（浏览器 AEC 以本页输出为参考）。
+叠加双保险：播报期间只跑 VAD 不送 ASR。`verify_frontend_patches()` 自检扩为 3+1 标记。
+
+**免提常驻收音**：head JS 页面加载自动点录音（`VOICE_ASSIST_ENABLED` 才注入）；
+一体机无人值守用 Chrome `--use-fake-ui-for-media-stream` 免授权弹窗（落地方案 §5.5-7 惯例）。
+
+**新增文件**：`src/vad.py`（StreamVAD 分段状态机 + SileroVadOnnx 自持推理）、
+`src/voice_assistant.py`（四态状态机 standby/await_broadcast/broadcast/listen，纯逻辑零 gradio 依赖）、
+`src/assets/silero_vad.onnx`、`tests/test_voice_assist.py`（52 项，全离线）、
+`tests/fixtures/vad_*.wav`（TTS 预生成中文语音夹具）、`scripts/smoke_voice_assist.py`。
+**依赖**：新增 `onnxruntime>=1.16.0`（纯 CPU 足够，0.095ms/30ms 窗）。
+**全量测试：615 passed**（基线 563）。
+
 ### v1.4.0 (2026-08-12) — TTS 播报架构重做（第十三轮 audit-TTS）
 
 > 语音播报架构重做——**单会话流式合成**。五项验收全过：首播 TTS 侧 ~1.0s（≤1s）、
