@@ -224,13 +224,31 @@ class IflytekASR:
 
 
 def load_dict(project_id: str = "", dict_dir: Optional[Path] = None) -> dict:
-    """加载多音字/热词配置：全局 asr_dict.json + 项目 {project_id}_asr_dict.json（项目覆盖）。
+    """加载多音字/热词/纠错/唤醒配置：全局 asr_dict.json + 项目 {project_id}_asr_dict.json（项目覆盖）。
+
+    文件支持两种 JSON 形态（audit-ASR）：
+      - dict：{"hotwords": [...], "corrections": {...或[{\"from\",\"to\"}]},
+               "wake_words": [...], "wake_greeting": \"...\"}（后两个键可选，缺省不出现在返回值中）
+      - 顶层 list：[{\"from\": \"巨声智能\", \"to\": \"具身智能\"}, ...] —— 纯纠词典
+
+    覆盖语义：hotwords/corrections 键级合并（项目覆盖同名词条）；
+    wake_words/wake_greeting 项目文件一旦定义即**整体替换**全局值。
 
     Returns:
-        {"hotwords": [...], "corrections": {...}}
+        {"hotwords": [...], "corrections": {...}, 可选 "wake_words": [...], "wake_greeting": str}
     """
     dict_dir = Path(dict_dir) if dict_dir else Path("data/voice")
     merged: Dict = {"hotwords": [], "corrections": {}}
+
+    def _merge_corrections(value) -> None:
+        """corrections 兼容 dict 与 [{from,to}] 列表两种形态；坏条目跳过。"""
+        if isinstance(value, dict):
+            merged["corrections"].update(value)
+        elif isinstance(value, list):
+            for item in value:
+                if (isinstance(item, dict)
+                        and item.get("from") and isinstance(item.get("to"), str)):
+                    merged["corrections"][item["from"]] = item["to"]
 
     def _merge(path: Path) -> None:
         if not path.exists():
@@ -240,8 +258,20 @@ def load_dict(project_id: str = "", dict_dir: Optional[Path] = None) -> dict:
         except Exception as e:
             logger.warning(f"加载语音字典失败 {path}: {e}")
             return
+        if isinstance(data, list):
+            # 顶层列表 = 纯纠词典（audit-ASR 需求6）
+            _merge_corrections(data)
+            return
+        if not isinstance(data, dict):
+            logger.warning(f"语音字典格式不支持（期望 dict 或 list）: {path}")
+            return
         merged["hotwords"].extend(data.get("hotwords", []))
-        merged["corrections"].update(data.get("corrections", {}) or {})
+        _merge_corrections(data.get("corrections"))
+        # 唤醒配置：项目文件定义即整体替换全局（audit-ASR）
+        if data.get("wake_words"):
+            merged["wake_words"] = list(data["wake_words"])
+        if data.get("wake_greeting"):
+            merged["wake_greeting"] = str(data["wake_greeting"])
 
     _merge(dict_dir / "asr_dict.json")
     if project_id:

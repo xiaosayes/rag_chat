@@ -95,11 +95,103 @@ def patch_gradio_hls_reuse() -> bool:
         return False
 
 
-def verify_frontend_patches() -> bool:
-    """启动自检：复读磁盘上的 StaticAudio-*.js，确认三个 patch 标记真实落盘。
+def patch_gradio_mic_aec() -> bool:
+    """麦克风 AEC 补丁（audit-ASR）：record.esm-*.js 的 getUserMedia 约束强制
+    echoCancellation/noiseSuppression/autoGainControl。
 
-    patch_gradio_hls_reuse 写入后再读回验证——写权限不足/多版本 gradio/路径漂移
-    时 patch 日志可能“看似成功”但服务出去的还是旧文件（用户侧停顿排查依据）。
+    根因：gradio 录音 `getUserMedia({audio:t==null||t})`（即 audio:true，无 AEC）——
+    一体机外放场景 TTS 播报被麦克风拾取，silero VAD 必然判为语音 → 自触发打断/
+    唤醒死循环。浏览器内置 AEC 以本页输出为参考信号，是同源播报回串的标准解法
+    （《数字人一体机落地方案》§5.1 亦冻结 echoCancellation:true）。
+    """
+    old = "getUserMedia({audio:t==null||t})"
+    new = ("getUserMedia({audio:Object.assign({echoCancellation:!0,"
+           "noiseSuppression:!0,autoGainControl:!0},t==null||t===!0?{}:t)})")
+    marker = "echoCancellation:!0"
+    try:
+        import gradio
+
+        assets_dir = os.path.join(
+            os.path.dirname(os.path.abspath(gradio.__file__)),
+            "templates", "frontend", "assets",
+        )
+        files = glob.glob(os.path.join(assets_dir, "record.esm-*.js"))
+        if not files:
+            logger.warning("麦克风 AEC patch：未找到 record.esm-*.js（gradio 版本/路径不符）")
+            return False
+        ok = True
+        for f in files:
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    src = fh.read()
+                if marker in src:
+                    logger.info(f"麦克风 AEC patch 已应用（跳过）: {os.path.basename(f)}")
+                    continue
+                if old not in src:
+                    logger.warning(
+                        f"麦克风 AEC patch 未匹配（gradio 版本可能变化，结构校验跳过）: "
+                        f"{os.path.basename(f)}")
+                    ok = False
+                    continue
+                with open(f, "w", encoding="utf-8") as fh:
+                    fh.write(src.replace(old, new, 1))
+                logger.info(f"麦克风 AEC patch 已应用: {os.path.basename(f)}")
+            except Exception as e:
+                logger.warning(f"麦克风 AEC patch 失败 {os.path.basename(f)}: {e}")
+                ok = False
+        return ok
+    except Exception as e:
+        logger.warning(f"麦克风 AEC patch 不可用: {e}")
+        return False
+
+
+def patch_gradio_stream_endstream_guard() -> bool:
+    """修复 gradio 6.22 流式输出收尾 KeyError（audit-ASR 实证）。
+
+    现象：带 streaming Audio 输出的生成器事件结束时，末趟 final pass 所有输出值为
+    None；`handle_streaming_outputs` 对未打开过流的输出执行 `stream_run[output_id]
+    .end_stream()` → KeyError（E2E 实录：fn=auto_respond，out[3] id=28 Audio data=None）。
+    触发条件：该轮从未 yield 音频（TTS 关闭/合成失败/被打断跳过收尾）。后果：事件
+    收尾中断，最后一批输出（状态/重播更新）丢失。
+    修复：final 趟预检——流式输出若无已打开的流且值为 None，降级为空 update（跳过）。
+    """
+    try:
+        from gradio import components, utils
+        from gradio.blocks import Blocks
+
+        if getattr(Blocks.handle_streaming_outputs, "_asr_guarded", False):
+            return True
+        _orig = Blocks.handle_streaming_outputs
+
+        async def _guarded(self, block_fn, data, session_hash=None, run=None,
+                           root_path=None, final=False):
+            if final and session_hash is not None and run is not None:
+                streams = self.pending_streams.get(session_hash, {}).get(run)
+                for i, block in enumerate(block_fn.outputs):
+                    if (isinstance(block, components.StreamingOutput)
+                            and block.streaming
+                            and not utils.is_prop_update(data[i])
+                            and (streams is None or block._id not in streams)
+                            and data[i] is None):
+                        data[i] = {"__type__": "update"}  # 从未开流 → 末趟跳过
+            return await _orig(self, block_fn, data, session_hash=session_hash,
+                               run=run, root_path=root_path, final=final)
+
+        _guarded._asr_guarded = True
+        Blocks.handle_streaming_outputs = _guarded
+        logger.info("gradio 流式输出收尾 KeyError guard patch 已应用")
+        return True
+    except Exception as e:
+        logger.warning(f"gradio 流式收尾 guard patch 不可用: {e}")
+        return False
+
+
+def verify_frontend_patches() -> bool:
+    """启动自检：复读磁盘上的 StaticAudio-*.js / record.esm-*.js，确认 patch 标记真实落盘。
+
+    patch 写入后再读回验证——写权限不足/多版本 gradio/路径漂移时 patch 日志可能
+    “看似成功”但服务出去的还是旧文件（用户侧停顿排查依据）。audit-ASR 增查麦克风
+    AEC 标记（缺失则一体机外放场景会自触发打断/误唤醒）。
     """
     markers = [
         "Se.url===e.url",
@@ -127,7 +219,20 @@ def verify_frontend_patches() -> bool:
                     f"客户端将运行未打补丁的旧播放逻辑（缓冲 ~1s，LLM 出文停顿必现可闻停顿）。"
                     f"请检查 gradio 版本（需 6.22.x）与 site-packages 写权限后重启")
                 return False
-        logger.info(f"前端 patch 自检通过: 3/3 标记在位（{os.path.basename(files[0])}）")
+        # audit-ASR：麦克风 AEC 补丁同检
+        rec_files = glob.glob(os.path.join(assets_dir, "record.esm-*.js"))
+        if not rec_files:
+            logger.error("前端 patch 自检失败: 未找到 record.esm-*.js（gradio 版本/路径不符）")
+            return False
+        with open(rec_files[0], encoding="utf-8") as fh:
+            rec_src = fh.read()
+        if "echoCancellation:!0" not in rec_src:
+            logger.error(
+                f"前端 patch 自检失败: {os.path.basename(rec_files[0])} 缺 echoCancellation "
+                f"标记——一体机外放场景 TTS 播报会被麦克风拾取自触发打断/误唤醒。"
+                f"请检查 gradio 版本（需 6.22.x）与 site-packages 写权限后重启")
+            return False
+        logger.info(f"前端 patch 自检通过: 3+1 标记在位（{os.path.basename(files[0])}）")
         return True
     except Exception as e:
         logger.error(f"前端 patch 自检异常: {e}")

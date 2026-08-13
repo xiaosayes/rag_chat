@@ -23,16 +23,33 @@ from src.audio_bootstrap import (
     patch_gradio_audio_transcode,
     patch_gradio_hls_reuse,
     patch_gradio_media_stream_targetduration,
+    patch_gradio_mic_aec,
 )
 
 ensure_ffmpeg()
+
+# audit-ASR：onnxruntime 主线程预加载——服务器进程内、工作线程里首次 lazy import
+# 实测 4/4 触发 DLL 初始化失败（DLL load failed: onnxruntime_pybind11_state，
+# 用户生产 VAD 初始化失败即此根因）；主线程提前 import 后，工作线程只是缓存命中。
+try:
+    import onnxruntime as _onnxruntime_preload  # noqa: F401
+except Exception:
+    pass  # 未安装：VAD 初始化路径会给出可操作报错并降级
+
+# audit-ASR：gradio 6.22 流式输出收尾 KeyError 修复（未产出音频的事件末趟 None 触发
+# end_stream KeyError，收尾输出丢失；E2E 实证）
+from src.audio_bootstrap import patch_gradio_stream_endstream_guard  # noqa: E402
+patch_gradio_stream_endstream_guard()
 
 # 必须在真实浏览器使用前应用：gradio 6.22 前端 bug——同一 Audio 组件多轮流式值
 # 只创建一次 hls（Se 标记不重置），第 2 轮起自动播报无声（bug-121 实测）；
 # audit-TTS 补充：原生 HLS 分支一次性赋值修复 + hls.js 缓冲 1s→60s（停顿放大器）
 patch_gradio_hls_reuse()
+# audit-ASR：getUserMedia 强制 AEC/降噪/增益——一体机外放下 TTS 播报被麦克风
+# 拾取会被 VAD 判为语音 → 自触发打断/唤醒死循环（浏览器 AEC 以本页输出为参考）
+patch_gradio_mic_aec()
 from src.audio_bootstrap import verify_frontend_patches  # noqa: E402
-verify_frontend_patches()  # 复读磁盘 JS 确认 3 标记落盘（写权限/版本漂移防御）
+verify_frontend_patches()  # 复读磁盘 JS 确认 3+1 标记落盘（写权限/版本漂移防御）
 # audit-TTS：修正服务端 MediaStream TARGETDURATION 每段 +1 蠕变（无更新时 hls.js
 # 按 TD/2 重载 playlist，长回答发布间断会被放大成数十秒停顿，仿真实证 22.5s）
 patch_gradio_media_stream_targetduration()
@@ -337,6 +354,307 @@ def asr_stream_stop(state, project_id: str = ""):
         yield state, gr.update(value=final), gr.update(value="已识别完成，可修改后发送")
     else:
         yield state, gr.update(), gr.update(value="")
+
+
+# ========== 语音助手（audit-ASR）：唤醒 + VAD + 双计时 + 打断 ==========
+
+class _BroadcastToken:
+    """一次播报（回答/欢迎语）的生命周期句柄：cancel=打断请求，done=收尾完成。"""
+
+    __slots__ = ("kind", "cancel", "done", "at")
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.cancel = threading.Event()
+        self.done = threading.Event()
+        self.at = time.time()
+
+
+_broadcast_tokens: dict = {}
+_broadcast_lock = threading.Lock()
+
+# 待提交问题存储（audit-ASR 修复轮2）：问题文本**不走组件值**——gradio 6.22 会把
+# 更新指令串线进组件值（用户复测实证：聊天气泡出现 [['add','[value]','问题\u200b#2']]
+# 乱码且 nonce 未被剥离）。组件只传纯数字 nonce，文本存此处按会话取。
+_pending_questions: dict = {}
+_pending_greet: set = set()   # 待播欢迎语的会话键（组件值可能串线，以此为准）
+_pending_lock = threading.Lock()
+
+
+def _session_key(request) -> str:
+    try:
+        return (request.session_hash if request else None) or "anon"
+    except Exception:
+        return "anon"
+
+
+def _register_broadcast(request, kind: str) -> _BroadcastToken:
+    """注册新播报；同会话未完结的旧播报先取消（新提问打断旧回答的残留发布）。"""
+    token = _BroadcastToken(kind)
+    key = _session_key(request)
+    with _broadcast_lock:
+        old = _broadcast_tokens.get(key)
+        if old is not None and not old.done.is_set():
+            old.cancel.set()
+        _broadcast_tokens[key] = token
+    return token
+
+
+def _active_broadcast(request) -> Optional[_BroadcastToken]:
+    """当前活跃播报。cancel 中的视为非激活：打断后 respond 收尾（done）需 ~0.1s，
+    期间若按 active 上报，状态机会被抖回 broadcast 态、吞掉打断出的新问题。"""
+    with _broadcast_lock:
+        tok = _broadcast_tokens.get(_session_key(request))
+    if tok is None or tok.done.is_set() or tok.cancel.is_set():
+        return None
+    return tok
+
+
+_assist_init_error = ""  # VAD 初始化失败原因（降级提示上屏：用户不用翻日志就知道修什么）
+
+
+def _create_voice_assistant(project_id: str = ""):
+    """构建 VoiceAssistant；VAD 不可用 → None 且 _assist_init_error 记录原因（降级不崩）。"""
+    global _assist_init_error
+    from src.vad import create_vad
+    from src.voice_assistant import VoiceAssistant, make_corrector
+
+    try:
+        vad = create_vad(
+            model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
+            min_speech_ms=settings.vad_min_speech_ms, min_silence_ms=settings.vad_min_silence_ms,
+            pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
+            sample_rate=settings.asr_sample_rate)
+    except Exception as e:
+        _assist_init_error = (str(e) or type(e).__name__)[:150]
+        logger.warning(f"VAD 初始化失败（语音助手不可用）: {e}")
+        return None
+    _assist_init_error = ""
+    cfg = load_dict(project_id, settings.asr_dict_dir)
+    wake_words = cfg.get("wake_words") or [
+        w.strip() for w in settings.asr_wake_words.split(",") if w.strip()]
+
+    def asr_factory():
+        # 纠错由 FSM 的 correct_fn 统一施加（先归一后纠错，唤醒匹配容错），实例不再重复配置
+        return IflytekASR(
+            settings.xfyun_app_id, settings.xfyun_api_key, settings.xfyun_api_secret,
+            language=settings.asr_language, accent=settings.asr_accent,
+            vad_eos_ms=settings.asr_vad_eos, hotwords=cfg["hotwords"])
+
+    return VoiceAssistant(
+        vad, asr_factory, wake_words=wake_words,
+        correct_fn=make_corrector(cfg["corrections"]),
+        initial_wait_s=settings.asr_initial_wait_s,
+        extend_wait_s=settings.asr_extend_wait_s,
+        greeting=cfg.get("wake_greeting") or settings.asr_wake_greeting)
+
+
+def voice_stream_dispatch(audio_filepath, state, project_id: str = "", request: gr.Request = None):
+    """语音流事件分发：VOICE_ASSIST_ENABLED 走语音助手，否则手动模式（bug-121 语义不变）。
+
+    输出恒为 5 元组 [asr_state, msg, voice_status, auto_q, greet_trig]（手动模式后两个 no-op）。
+    """
+    if settings.voice_assist_enabled:
+        yield from _assist_stream_chunk(audio_filepath, state, project_id, request)
+        return
+    for s, m, v in asr_stream_chunk(audio_filepath, state, project_id):
+        yield s, m, v, gr.update(), gr.update()
+
+
+def _assist_stream_chunk(audio_filepath, state, project_id, request):
+    """语音助手路径：常驻录音 → PCM16k → 播报状态同步 → FSM → 动作翻译为 gradio 输出。"""
+    no = gr.update()
+    if not (settings.xfyun_app_id and settings.xfyun_api_key and settings.xfyun_api_secret):
+        yield state, no, gr.update(value="未配置讯飞密钥（XFYUN_APP_ID/API_KEY/API_SECRET），请在 .env 补充"), no, no
+        return
+    if not audio_filepath:
+        yield state, no, no, no, no
+        return
+    if state is None:
+        assistant = _create_voice_assistant(project_id)
+        if assistant is None:
+            state = {"assist_failed": True}
+            yield state, no, gr.update(
+                value=f"VAD 初始化失败：{_assist_init_error or '未知原因'}"
+                      f"（置 VOICE_ASSIST_ENABLED=false 回手动模式）"), no, no
+            return
+        state = {"assistant": assistant, "nonce": 0}
+        logger.info(f"语音助手会话已启动（VAD 监听 + 唤醒词「{settings.asr_wake_words}」）")
+    if state.get("assist_failed"):
+        yield state, no, no, no, no
+        return
+    assistant = state["assistant"]
+    try:
+        raw = Path(audio_filepath).read_bytes()
+        pcm_block = _to_pcm16k(raw, settings.asr_sample_rate)
+        token = _active_broadcast(request)
+        actions = assistant.notify_broadcast(token is not None)
+        actions += assistant.process_chunk(pcm_block)
+    except Exception as e:
+        logger.warning(f"语音助手音频处理失败: {e}")
+        yield state, no, gr.update(value=f"语音助手异常: {e}"), no, no
+        return
+    msg_u, status_u, auto_u, greet_u = no, no, no, no
+    for a in actions:
+        if a.kind == "msg":
+            msg_u = gr.update(value=a.text)
+        elif a.kind == "status":
+            status_u = gr.update(value=a.text)
+            logger.info(f"语音助手状态: {a.text}")
+        elif a.kind == "submit":
+            state["nonce"] += 1
+            with _pending_lock:
+                _pending_questions[_session_key(request)] = a.text
+            auto_u = state["nonce"]  # gr.State：递增多调必触发 .change（deep_hash 检测）
+        elif a.kind == "greet":
+            state["nonce"] += 1
+            with _pending_lock:
+                _pending_greet.add(_session_key(request))
+            greet_u = state["nonce"]
+        elif a.kind == "barge_in" and token is not None:
+            token.cancel.set()
+    yield state, msg_u, status_u, auto_u, greet_u
+
+
+def voice_stop_dispatch(state, project_id: str = ""):
+    """停止录音分发：assist 模式关闭状态机会话；手动模式照旧。输出恒 5 元组。"""
+    if settings.voice_assist_enabled:
+        if state and state.get("assistant"):
+            state["assistant"].close()
+        yield None, gr.update(), gr.update(value="录音已停止（刷新页面可重启语音助手）"), gr.update(), gr.update()
+        return
+    for s, m, v in asr_stream_stop(state, project_id):
+        yield s, m, v, gr.update(), gr.update()
+
+
+def auto_respond(nonce, chat_history, stream, project, tts_enabled, request: gr.Request = None):
+    """语音助手自动提交（audit-ASR 需求3）：隐藏 Textbox .change 触发。
+
+    独立事件（concurrency_limit=1 约束：不得塞进 stream 事件，否则 respond 运行的
+    30s+ 内音频块排队、打断检测失效）。问题文本取自服务端 pending 存储（消费一次性）；
+    nonce 仅为触发器，无 pending → no-op（页面加载等伪触发兜底）。
+    """
+    key = _session_key(request)
+    with _pending_lock:
+        question = _pending_questions.pop(key, "").strip()
+    if not question:
+        yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
+        return
+    logger.info(f"语音助手自动提交问答: {question}")
+    yield from respond(question, chat_history, stream, project, tts_enabled, request)
+
+
+_greeting_mem: dict = {}  # 欢迎语 PCM 内存缓存：key → 24k mono PCM
+
+
+def _wake_greeting_text(project: str = "") -> str:
+    """唤醒应答语文本：asr_dict.json 的 wake_greeting（项目级覆盖）> settings 默认。"""
+    cfg = load_dict(project, settings.asr_dict_dir)
+    return cfg.get("wake_greeting") or settings.asr_wake_greeting
+
+
+def _greeting_pcm(project: str = "") -> Optional[bytes]:
+    """欢迎语 PCM（24k mono 16bit）：首次合成，之后内存/磁盘缓存复用（零合成延迟）。"""
+    import io
+    import wave
+
+    text = _wake_greeting_text(project)
+    key = hashlib.sha1(
+        f"{settings.tts_model}|{settings.tts_voice}|{settings.tts_speech_rate}|{text}".encode("utf-8")
+    ).hexdigest()[:12]
+    if key in _greeting_mem:
+        return _greeting_mem[key]
+    cache_dir = settings.project_root / "data" / "processed" / "tts_cache"
+    path = cache_dir / f"greeting_{key}.wav"
+    try:
+        if path.exists():
+            wav_bytes = path.read_bytes()
+        else:
+            tts = _init_tts()
+            if tts is None:
+                return None
+            wav_bytes = tts.synthesize_sentence(text)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(wav_bytes)
+            logger.info(f"欢迎语已合成并缓存: {path.name}（{text}）")
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            pcm = w.readframes(w.getnframes())  # CosyVoice 默认 WAV_24000HZ_MONO_16BIT
+        _greeting_mem[key] = pcm
+        return pcm
+    except Exception as e:
+        logger.warning(f"欢迎语合成/读取失败（降级无音频）: {e}")
+        return None
+
+
+def play_greeting(trigger, project: str = "", tts_enabled: bool = True,
+                  request: gr.Request = None):
+    """唤醒应答（audit-ASR 需求1 + 优化轮3 提速）。
+
+    音频走**预置静态文件 + 前端 JS 直播**（GET /__voice_greeting，启动预合成 + 客户端
+    预加载）：原 HLS 链路（编码 ~0.2s + 发布 + 客户端起播 ~0.4s+）对固定应答语纯属
+    浪费，直播 ~0.1s 起播。本函数只注册 token 并等待音频时长（驱动状态机 播报态→
+    倾听态 迁移）+ 输出 tts_status；可打断（cancel 即提前收尾）。
+    门闩：组件值串线会产生伪触发（E2E 实录 trigger='[]'）→ 以 pending 存储为准，
+    且必须先判再注册 token——伪触发注册会误取消进行中的回答播报。
+    """
+    no = gr.update()
+    key = _session_key(request)
+    with _pending_lock:
+        pending = key in _pending_greet
+        if pending:
+            _pending_greet.discard(key)
+    if not trigger or not pending:
+        yield no, no, no
+        return
+    token = _register_broadcast(request, "greeting")
+    try:
+        pcm = _greeting_pcm(project) if tts_enabled else None
+        if not pcm:
+            yield no, no, gr.update(value=("✅ 已唤醒（语音播报已关闭），请提问" if not tts_enabled
+                                           else "✅ 已唤醒（欢迎语不可用），请提问"))
+            return
+        duration = len(pcm) / 48000.0  # 24k 16bit mono
+        yield no, no, gr.update(value="🔊 应答中…")
+        # 等待音频时长（前端 JS 直播静态文件），每 0.1s 检查打断
+        deadline = time.time() + duration + 0.3  # +客户端起播余量
+        while time.time() < deadline and not token.cancel.is_set():
+            time.sleep(0.1)
+        if not token.cancel.is_set():
+            yield no, no, gr.update(value="✅ 已唤醒，请提问")
+    except Exception as e:
+        logger.warning(f"欢迎语播报异常: {e}")
+        yield no, no, gr.update(value=f"欢迎语播报异常: {e}")
+    finally:
+        token.done.set()
+
+
+class _GreetingAudioMiddleware:
+    """GET /__voice_greeting → 唤醒应答 wav（优化轮3：预置音频，前端预加载直播）。
+
+    no-cache：应答语可配置变更，浏览器每次 revalidate（ETag/mtime 变化即拿新文件）。
+    """
+
+    PATH = "/__voice_greeting"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") != self.PATH:
+            await self.app(scope, receive, send)
+            return
+        pcm = _greeting_pcm("")  # 默认项目（一体机单项目场景；项目级 wake_greeting 覆写暂走默认）
+        if not pcm:
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        body = _wrap_pcm(pcm, 24000)
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"audio/wav"),
+            (b"content-length", str(len(body)).encode()),
+            (b"cache-control", b"no-cache"),
+        ]})
+        await send({"type": "http.response.body", "body": body})
 
 
 # ========== 语音功能（bug-121）：TTS 语音播报（句子级流式） ==========
@@ -845,6 +1163,100 @@ _TTS_STALL_PROBE_HEAD = """
 """
 
 
+def _voice_assist_head() -> str:
+    """语音助手前端辅助 JS（audit-ASR，仅 VOICE_ASSIST_ENABLED 时注入 launch(head=)）。
+
+    ① 自动点录音：页面加载后轮询点击 #voice_audio 的录音按钮（免提常驻收音；
+       getUserMedia 授权弹窗仅首次，一体机 Chrome 惯例 --use-fake-ui-for-media-stream）。
+    ② 打断强停：MutationObserver 观察 #voice_status 出现 ⚡ 标记 → 暂停 #tts_audio
+       的 <video>（客户端 HLS 缓冲最深 60s，服务端停发不足以停声，必须前端强停）。
+    __voiceAssistAutoRecord / __voiceAssistBargeIn 为控制台/测试标记。
+    """
+    return """
+<script>
+(function(){
+  function findRecordBtn(){
+    // gradio 6 按浏览器语言本地化按钮（zh-CN=「录制/停止录制」，en=Record/Stop）
+    // → aria-label 与文本双语匹配，先排 stop 再匹 record（「停止录制」也含「录制」）
+    var root=document.getElementById('voice_audio'); if(!root)return null;
+    var btns=root.querySelectorAll('button');
+    for(var i=0;i<btns.length;i++){
+      var s=((btns[i].getAttribute('aria-label')||'')+' '+(btns[i].textContent||'')).toLowerCase();
+      if(/stop|停止/.test(s))continue;
+      if(/record|录制|录音/.test(s))return btns[i];
+    }
+    return null;
+  }
+  function findStopBtn(){
+    var root=document.getElementById('voice_audio'); if(!root)return null;
+    var btns=root.querySelectorAll('button');
+    for(var i=0;i<btns.length;i++){
+      var s=((btns[i].getAttribute('aria-label')||'')+' '+(btns[i].textContent||''));
+      if(/停止|stop/i.test(s))return btns[i];
+    }
+    return null;
+  }
+  function streamAlive(){
+    // 可靠判据：voice_status 有服务端写入的状态文本（首个流块必写：待机行/错误提示）。
+    // 排除“录音已停止”文本（重试复位时写入的假阳性）。WS/fetch 挂钩均不可行——
+    // gradio 6.22 的流块走长连接复用通道（实证：无 WebSocket、无逐块 POST）。
+    var vs=document.getElementById('voice_status');
+    var t=vs?(vs.textContent||'').trim():'';
+    return t.length>0 && t.indexOf('录音已停止')<0;
+  }
+  var phase='wait', phaseAt=0, tries=0;
+  var timer=setInterval(function(){
+    tries++;
+    if(tries>75){clearInterval(timer);console.warn('__voiceAssistAutoRecord give up');return;}
+    if(phase==='wait'){
+      // 起始延迟 ~5s：过早点击会落在 gradio hydrate 前的按钮上——UI 进录音态
+      // 但录音/上行管线未启动（实证：UI 录音中但零流事件）
+      if(tries<5)return;
+      var b=findRecordBtn();
+      if(b){try{b.click();}catch(e){}
+        phase='clicked'; phaseAt=tries;
+        console.log('__voiceAssistAutoRecord clicked(t'+tries+')');}
+    }else{
+      if(streamAlive()){clearInterval(timer);
+        console.log('__voiceAssistAutoRecord stream-ok');return;}
+      if(tries-phaseAt>6){
+        var sb=findStopBtn(); if(sb){try{sb.click();}catch(e){}}
+        phase='wait'; phaseAt=tries;  // 复位后下轮重试（自愈）
+        console.warn('__voiceAssistAutoRecord retry: no stream within 6s');
+      }
+    }
+  },1000);
+  // 唤醒应答预置音频（优化轮3）：页面加载即预加载，命中「已唤醒」立即直播，
+  // ~0.1s 起播（原 HLS 链路 ~1s+）；打断时与播报 video 一并暂停
+  var greetAudio=null;
+  try{greetAudio=new Audio('/__voice_greeting');greetAudio.preload='auto';greetAudio.load();}catch(e){}
+  var lastGreet=0, lastBarge=0;
+  function check(){
+    var vs=document.getElementById('voice_status'); if(!vs)return;
+    var t=vs.textContent||'';
+    var now=Date.now();
+    if(t.indexOf('已唤醒')>=0 && greetAudio && now-lastGreet>2000){
+      lastGreet=now;
+      try{greetAudio.currentTime=0;
+        var p=greetAudio.play(); if(p&&p.catch)p.catch(function(e){console.warn('greet play blocked',e);});
+      }catch(e){}
+      return;
+    }
+    if(t.indexOf('⚡')<0)return;
+    if(now-lastBarge<1000)return; lastBarge=now;
+    var root=document.getElementById('tts_audio');
+    var v=root?root.querySelector('video'):null;
+    if(v){try{v.pause();}catch(e){}}
+    if(greetAudio){try{greetAudio.pause();}catch(e){}}
+    console.log('__voiceAssistBargeIn playback paused');
+  }
+  new MutationObserver(check).observe(document.documentElement,
+    {childList:true,subtree:true,characterData:true});
+})();
+</script>
+"""
+
+
 class _TtsStallBeaconMiddleware:
     """接收客户端停顿遥测（audit-TTS）：/ __tts_stall 的 sendBeacon POST 直接应答 204
     并落日志；其余请求原样透传。ASGI 中间件实现，免注册路由。"""
@@ -1103,8 +1515,13 @@ def answer_question(question: str, history: list, use_stream: bool, project_id: 
             yield history, gr.update(), ""  # bug-123：空串会让 gr.JSON postprocess 抛 Error（事件静默失败）
 
 
-def respond(message, chat_history, stream, project, tts_enabled):
+def respond(message, chat_history, stream, project, tts_enabled, request: gr.Request = None):
     """回答 + 语音播报（audit-TTS：单会话流式合成 —— 首句 ≤1s、全程无停顿）。
+
+    audit-ASR 需求4（打断）：入口注册播报 token（手动发送同样注册，任何播报都可被打断）；
+    主循环/收尾循环每拍检查 cancel —— 语音助手在播报中检出持续语音（VAD ≥400ms）即置位，
+    本生成器停喂停发、取消 TTS 会话、跳过收尾冲刷与重播写入，yield "已打断"状态。
+    客户端 HLS 缓冲（≤60s）由 head JS 观察 voice_status 的 ⚡ 标记强停 <video> 清除。
 
     旧链路（bug-121 分段独立合成）：等整段合成完成（~2s/段）才有音频，且首播
     攒批门（5 chunk + 2s 等待）→ 首播 ~3s；段间会话边界（WS 连接+首块 0.6s）
@@ -1121,6 +1538,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
     if not message or not message.strip():
         yield "", chat_history, "[]", gr.update(), gr.update(), gr.update()
         return
+    token = _register_broadcast(request, "answer")  # audit-ASR：打断靶向（request=None→"anon"）
+    cancelled = False
     tts = _init_tts() if tts_enabled else None
     # 单编码器持续 AAC 流（音质修复：逐批独立编码每段带 priming 静音坑）；
     # 无 ffmpeg 时 _init_tts 已返回 None，此处不会触发 RuntimeError
@@ -1230,6 +1649,9 @@ def respond(message, chat_history, stream, project, tts_enabled):
         threading.Thread(target=_answer_pump, daemon=True).start()
         ended = False
         while not ended:
+            if token.cancel.is_set():
+                cancelled = True
+                break
             try:
                 kind, payload = text_q.get(timeout=0.1)
             except queue.Empty:
@@ -1297,7 +1719,8 @@ def respond(message, chat_history, stream, project, tts_enabled):
                             f"LLM 出文停顿正被听众感知。若频繁出现：查客户端 HLS patch "
                             f"是否生效（StaticAudio-*.js 应含 maxBufferLength:60）与网络 RTT")
         # 回答结束：喂尾文本 → finish（后台线程，阻塞型） → 排空（含看门狗重建）
-        if tts is not None and not tts_dead:
+        # audit-ASR：被打断则整段跳过（不 finish、不冲尾、不写重播）
+        if tts is not None and not tts_dead and not cancelled:
             tail = clean_text_for_tts(tts_text_buf.strip()) if tts_text_buf.strip() else ""
             if tail and not _feed(tail):
                 _restart()
@@ -1315,6 +1738,9 @@ def respond(message, chat_history, stream, project, tts_enabled):
                 threading.Thread(target=_finish_async, args=(handle,), daemon=True).start()
                 end_at = time.time() + 120  # 总兜底，防无限循环
                 while not tts_dead and time.time() < end_at:
+                    if token.cancel.is_set():
+                        cancelled = True
+                        break
                     for seg in _collect(wait=0.5):
                         played_any = True
                         replay_blocks.append(seg)
@@ -1328,22 +1754,26 @@ def respond(message, chat_history, stream, project, tts_enabled):
                             threading.Thread(target=_finish_async,
                                              args=(handle,), daemon=True).start()
                 # 全部 PCM 已喂完 → 压缩器残尾入管 → 关编码器 stdin 冲尾，排空残余段
-                tail_pcm = compressor.feed(b"") + compressor.flush()
-                if tail_pcm:
-                    streamer.feed(tail_pcm)
-                    replay_pcm.extend(tail_pcm)
-                streamer.finish()
-                for seg in streamer.collect_all(timeout=10):
-                    played_any = True
-                    replay_blocks.append(seg)
-                    yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
-                        gr.update(value="播报中…")
-                if handle is not None and handle.error:
-                    logger.warning(f"TTS 会话出错（部分音频可能缺失）: {handle.error}")
-                logger.info(f"TTS 播报收尾: 批次={len(replay_blocks)} "
-                            f"音频={len(replay_pcm) / 48000:.1f}s "
-                            f"耗时={time.time() - respond_t0:.1f}s 重建={restarts}")
-            if replay_pcm:
+                # audit-ASR：排空循环内被打断 → 跳过冲尾/审计（残余段已无听众）
+                if not cancelled:
+                    tail_pcm = compressor.feed(b"") + compressor.flush()
+                    if tail_pcm:
+                        streamer.feed(tail_pcm)
+                        replay_pcm.extend(tail_pcm)
+                    streamer.finish()
+                    for seg in streamer.collect_all(timeout=10):
+                        played_any = True
+                        replay_blocks.append(seg)
+                        yield gr.update(), gr.update(), gr.update(), seg, gr.update(), \
+                            gr.update(value="播报中…")
+                    if handle is not None and handle.error:
+                        logger.warning(f"TTS 会话出错（部分音频可能缺失）: {handle.error}")
+                    logger.info(f"TTS 播报收尾: 批次={len(replay_blocks)} "
+                                f"音频={len(replay_pcm) / 48000:.1f}s "
+                                f"耗时={time.time() - respond_t0:.1f}s 重建={restarts}")
+            if cancelled:
+                pass  # 打断：不写重播（部分内容无意义），由下方统一 yield 打断状态
+            elif replay_pcm:
                 # 重播走原始 PCM（与编码器健康解耦，质量无损）
                 replay_path = _write_replay_wav([_wrap_pcm(bytes(replay_pcm), 24000)])
                 # 静默审计（后台线程）：客户端零上报但用户听到停顿时给内容侧定性
@@ -1354,11 +1784,17 @@ def respond(message, chat_history, stream, project, tts_enabled):
             else:
                 yield gr.update(), gr.update(), gr.update(), gr.update(), \
                     gr.update(), gr.update(value="")
+        if cancelled:
+            # audit-ASR 需求4：打断收尾（客户端缓冲由 head JS 观察 ⚡ 标记强停 <video>）
+            logger.info("播报被打断（barge-in）：停止发布并取消合成")
+            yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), \
+                gr.update(value="⚡ 已打断，请继续提问")
     except Exception as e:
         logger.warning(f"语音播报异常（不影响回答）: {e}")
         yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), \
             gr.update(value=f"语音播报异常: {e}")
     finally:
+        token.done.set()  # audit-ASR：状态机经 notify_broadcast(False) 进 LISTEN
         if handle is not None:
             try:
                 handle.cancel()
@@ -1511,9 +1947,15 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                         type="filepath",
                         label="语音输入（点击开始说话，实时转写，说完点击停止）",
                         scale=6,
+                        elem_id="voice_audio",  # audit-ASR：自动点录音 JS 定位
                     )
-                    voice_status = gr.Markdown("", scale=4)
+                    voice_status = gr.Markdown("", scale=4, elem_id="voice_status")  # audit-ASR：打断观察
                     asr_state = gr.State(None)
+                    # audit-ASR：触发器用 gr.State（服务端值跟踪，deep_hash 变更检测）——
+                    # 隐藏 Textbox 组件值会被 gradio 6.22 流式 diff 串线（实证：[['add',...]]
+                    # 与 '[]' 乱码进事件输入）；State 值不经过前端，天然免疫
+                    auto_q = gr.State(0)
+                    greet_trig = gr.State(0)
 
                 with gr.Row():
                     use_stream = gr.Checkbox(label="流式输出", value=default_stream)
@@ -1537,7 +1979,8 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
                 )
 
                 gr.Markdown("### 语音播报")
-                tts_audio = gr.Audio(streaming=True, autoplay=True, label="播报（自动播放）", visible=True)
+                tts_audio = gr.Audio(streaming=True, autoplay=True, label="播报（自动播放）", visible=True,
+                                     elem_id="tts_audio")  # audit-ASR：打断强停 <video> 定位
                 tts_replay = gr.Audio(label="重播", visible=True)
                 tts_enabled = gr.Checkbox(label="语音播报", value=True)
                 tts_status = gr.Markdown("")
@@ -1572,18 +2015,31 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
         clear_btn.click(clear_history, None, [chatbot, chunks_json])
         status_btn.click(get_system_status, [project_dropdown], [status_text])
 
-        # 语音功能（bug-121）：ASR 流式输入
+        # 语音功能（bug-121 手动 / audit-ASR 语音助手）：ASR 流式输入
+        # 分发器按 VOICE_ASSIST_ENABLED 分流；输出恒 5 元组（手动模式后两个 no-op）
         voice_audio.stream(
-            asr_stream_chunk,
+            voice_stream_dispatch,
             [voice_audio, asr_state, project_dropdown],
-            [asr_state, msg, voice_status],
-            stream_every=0.5,
+            [asr_state, msg, voice_status, auto_q, greet_trig],
+            stream_every=0.3,  # 优化轮3：0.5→0.3s 块节奏（部分结果上屏更密、端点判定更及时）
         )
         # 注意：gradio 6 的 stop 事件是"播放停止按钮"；录音停止必须用 stop_recording
         voice_audio.stop_recording(
-            asr_stream_stop,
+            voice_stop_dispatch,
             [asr_state, project_dropdown],
-            [asr_state, msg, voice_status],
+            [asr_state, msg, voice_status, auto_q, greet_trig],
+        )
+        # audit-ASR：语音助手自动提交（双计时到期）→ 独立事件走问答+播报，不阻塞收音
+        auto_q.change(
+            auto_respond,
+            [auto_q, chatbot, use_stream, project_dropdown, tts_enabled],
+            tts_outputs,
+        )
+        # audit-ASR：唤醒应答播报（缓存音频；应答语全文经 voice_status 常驻行展示）
+        greet_trig.change(
+            play_greeting,
+            [greet_trig, project_dropdown, tts_enabled],
+            [tts_audio, tts_replay, tts_status],
         )
 
         for btn in example_btns:
@@ -1592,6 +2048,31 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
         demo.load(get_system_status, [project_dropdown], [status_text])
 
     return demo
+
+
+def _voice_assist_startup_probe() -> bool:
+    """启动自检（audit-ASR）：VOICE_ASSIST_ENABLED=true 时验证 VAD 可用。
+
+    不要等到用户开口才暴露环境问题（onnxruntime 未装 / 模型未拷贝）——启动即
+    ERROR 日志，部署验收一眼可见。assist 关闭 → 跳过（True）。
+    """
+    if not settings.voice_assist_enabled:
+        return True
+    from src.vad import create_vad
+
+    try:
+        create_vad(
+            model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
+            min_speech_ms=settings.vad_min_speech_ms, min_silence_ms=settings.vad_min_silence_ms,
+            pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
+            sample_rate=settings.asr_sample_rate)
+        logger.info("语音助手启动自检通过：VAD 可用（silero onnx）")
+        return True
+    except Exception as e:
+        logger.error(
+            f"语音助手已开启但 VAD 不可用: {e} —— 修复后重启进程；"
+            f"或置 VOICE_ASSIST_ENABLED=false 回手动模式")
+        return False
 
 
 def main():
@@ -1611,6 +2092,17 @@ def main():
 
     setup_logger(settings.log_level)
     logger.info("正在初始化 RAG 系统...")
+    _voice_assist_startup_probe()  # audit-ASR：assist 开启时先验 VAD，失败即 ERROR 日志
+    if settings.voice_assist_enabled:
+        # 优化轮3：启动后台预合成唤醒应答音频（首次唤醒零合成延迟 + 前端可预加载）
+        def _warm_greeting():
+            try:
+                pcm = _greeting_pcm("")
+                logger.info(f"唤醒应答音频就绪: {len(pcm) / 48000:.1f}s" if pcm
+                            else "唤醒应答音频未就绪（首次唤醒无声，状态行仍在）")
+            except Exception as e:
+                logger.warning(f"唤醒应答音频预热失败: {e}")
+        threading.Thread(target=_warm_greeting, daemon=True).start()
     try:
         init_pipeline(args.project)
     except Exception as e:
@@ -1635,10 +2127,17 @@ def main():
         from starlette.middleware import Middleware
 
         launch_kwargs["head"] = _TTS_STALL_PROBE_HEAD  # 客户端停顿遥测探针
+        if settings.voice_assist_enabled:
+            # audit-ASR：自动点录音 + 打断强停（仅助手模式注入）
+            launch_kwargs["head"] += _voice_assist_head()
         launch_kwargs["app_kwargs"] = {
             "middleware": [Middleware(_NoCacheAssetsMiddleware),
                            Middleware(_TtsStallBeaconMiddleware)]
         }
+        if settings.voice_assist_enabled:
+            # 优化轮3：预置应答音频端点（前端 JS 预加载直播，唤醒 ~0.1s 起播）
+            launch_kwargs["app_kwargs"]["middleware"].append(
+                Middleware(_GreetingAudioMiddleware))
     if args.ssl_keyfile or args.ssl_certfile:
         # bug-122：浏览器 getUserMedia 要求安全上下文（HTTPS/localhost），
         # 自签或正式证书均可；仅提供其一则报错提示

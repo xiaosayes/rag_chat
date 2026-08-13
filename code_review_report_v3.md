@@ -325,3 +325,127 @@ F26（防路径遍历注释过度承诺）。部署公网前需处理 F22。
 - gradio 升级风险：4 个 monkeypatch/JS patch 均带结构校验，版本不匹配时跳过并告警
   （启动日志可见），测试 `TestFrontendPatchExtended`/`TestMediaStreamTargetDuration`/
   `TestAudioTranscodePatch` 可验证。
+
+
+---
+
+## 十、第十四轮：语音助手（audit-ASR，2026-08-12）
+
+**需求（用户下达，6 项）**：自动唤醒（唤醒词可编辑，初版"你好小虎"）；前置 silero VAD
+（0.5/400ms/800ms/200ms/15s 五参数）；双计时提问（播报后 8s 窗，段后循环延长 2s，
+静默即自动提交）；多轮提问 + 随时打断播报；说完到首字 <1s；纠词典支持
+`[{"from","to"}]` 列表格式。设计/计划：`docs/superpowers/specs|plans/2026-08-12-voice-assist*`。
+
+### 关键实证（非推测）
+
+1. **silero-vad pip 包不可直接用**：`silero_vad/__init__` 顶层 import torchaudio
+   （服务器 conda 无此包，本地 DLL 亦损坏）→ 自持 ONNX 推理（onnxruntime 直调），
+   模型用仓库内置 `src/assets/silero_vad.onnx`（v6 16k 专用导出，1.3MB，与全量版
+   逐窗概率实测一致）。**官方推理每窗须前拼上窗末 64 采样作上下文**（utils_vad 源码
+   实证），缺失则概率输出全废（实测真实语音峰值仅 0.13，修复后 1.0）。
+2. **gradio 6.22 事件并发=1**：自动提交若塞进 stream 事件，respond 30s+ 运行期间
+   音频块全排队、打断检测失效 → 隐藏 Textbox `.change` 独立事件承载自动提交/欢迎语。
+3. **gradio 录音无 AEC**：`getUserMedia({audio:true})`（record.esm 源码实证）——
+   一体机外放下 TTS 播报被自身麦克风拾取，VAD 必误判 → `patch_gradio_mic_aec()`
+   强制 echoCancellation 三件套（浏览器 AEC 以本页输出为参考），叠加"播报期只 VAD
+   不送 ASR"双保险；`verify_frontend_patches()` 自检扩为 3+1 标记。
+4. **打断必须前端强停**：客户端 HLS 缓冲最深 60s，服务端停发不够 → head JS
+   MutationObserver 观察 voice_status 的 ⚡ 标记暂停 `<video>`；服务端按 session_hash
+   定位 token，respond 主循环/排空双检 cancel（停喂停发、取消会话、跳过重播写入）。
+   **cancel 中的 token 按非激活上报**——否则打断后 respond 收尾的 ~0.1s 窗口内状态机
+   被抖回 broadcast 态、吞掉新问题（测试固化）。
+5. **提速结论**：保持讯飞流式（wpgs 边说边出字，实测增量 <500ms），"说完到首字 <1s"
+   天然满足（说完时首字早已在屏）；否决一次性重识别（必超 1s）。
+
+### 真实 API 全链路冒烟（scripts/smoke_voice_assist.py，非 pytest）
+
+「你好，小虎」夹具 → greet 命中；模拟播报收尾 → 进 listen（8s 窗）；「请介绍一下
+司母戊鼎…」夹具 → wpgs 部分结果逐块上屏（含动态修正：私募屋→司母戊鼎）→ 段结束
+2s 静默 → 自动提交「请介绍一下司母戊鼎的历史背景和文化价值？」。**全链路通过**。
+
+### 架构与变更
+
+- `src/vad.py`：StreamVAD（五参数分段状态机，语义随 silero VADIterator：段长 <min_speech
+  丢弃、≥min_speech 提前发 confirmed_start、max_speech 强制切段、pad 前后补偿、段间
+  reset LSTM 状态）；SileroVadOnnx（自持推理）；create_vad（抛可操作原因）/try_create_vad
+  （→None 降级手动模式）。
+- `src/voice_assistant.py`：VoiceAssistant 四态（standby/await_broadcast/broadcast/listen），
+  纯逻辑零 gradio 依赖（假 VAD/假 ASR/假时钟全离线测试）；唤醒匹配先归一（去标点）
+  后纠错（ASR 标点会切断错词致纠错失配，实证："泥好，小胡！"）。
+- `app.py`：voice_stream_dispatch（恒 5 元组，手动模式零变化）；_BroadcastToken 注册表；
+  respond 取消分支；auto_respond/play_greeting（欢迎语内存+磁盘缓存，零合成延迟）；
+  UI elem_id + 隐藏触发组件；`_voice_assist_head()`（自动点录音 + 打断强停，仅助手模式注入）；
+  `_voice_assist_startup_probe()`（启动自检：assist 开启先验 VAD，失败 ERROR 日志）。
+- `src/asr.py` load_dict：顶层列表=纠词典；dict 形态新增可选 wake_words/wake_greeting
+  （项目文件定义即整体替换全局）。
+- 配置（`.env`）：VOICE_ASSIST_ENABLED（默认 false——手动模式行为零变化）/
+  ASR_WAKE_WORDS/ASR_WAKE_GREETING/ASR_INITIAL_WAIT_S=8/ASR_EXTEND_WAIT_S=2/
+  VAD_THRESHOLD/VAD_MIN_SPEECH_MS/VAD_MIN_SILENCE_MS/VAD_SPEECH_PAD_MS/VAD_MAX_SPEECH_S/
+  SILERO_VAD_MODEL_PATH。
+- 依赖：+onnxruntime（纯 CPU）；**不要** pip install silero-vad（torchaudio 重依赖）。
+
+### 测试
+
+`tests/test_voice_assist.py` 55 项（全离线）：VAD 五参数逐项（脚本化假模型）+ 真实模型
+对 TTS 预生成夹具/静音/噪声冒烟 + FSM 全迁移（唤醒/双计时/循环延长/打断/超时回落）+
+app 接线（动作翻译/注册表/自动提交 nonce/欢迎语缓存/respond 打断）+ 前端 patch 标记 +
+VAD 失败诊断（原因上屏/启动自检）。
+**全量：618 passed, 0 failed**（基线 563）。
+
+### 残余风险与监控
+
+- AEC 残余回串致误打断：400ms 最短语音过滤 + 播报期不送 ASR；生产日志观测
+  `语音助手状态: ⚡` 频率，误判多则上调 VAD_THRESHOLD。
+- 待机态每个语音段烧一次讯飞 IAT（VAD 门控后量小）；终局迁移前端 sherpa-onnx KWS
+  （落地方案 §5.5，隐私 + 零额度）。
+- 自动点录音被浏览器策略拒绝：head JS 重试 20s + 控制台告警，用户手动点录音兜底。
+- gradio 升级：麦克风补丁带结构校验，未匹配跳过并告警（自检 ERROR 日志可见）。
+- VAD 初始化失败的部署侧误诊（用户复测实证：UI 只让"详见日志"，运维不知道修什么）
+  → 修复：失败原因直接上屏（缺 onnxruntime / 缺模型文件一眼可辨）+ 启动自检
+  `_voice_assist_startup_probe()`（assist 开启时先建 VAD 会话验证，失败即 ERROR 日志）。
+
+### 修复轮2（用户复测三问题，全部实证定位）
+
+1. **"说出唤醒词后走了 LLM"**：唤醒匹配原本只在待机态；用户在倾听态（8s 窗）说唤醒词
+   被当问题提交。修复：倾听态整句命中唤醒词→重新应答；唤醒词前缀自动剥离
+   （"你好小虎，司母戊鼎…"→问题"司母戊鼎…"）。
+2. **"不知道什么状态"**：状态提示原本只在切换瞬间闪现 → 常驻状态行（每块重算、
+   有变化才上屏）：待机中（唤醒词提示）/倾听中（剩余秒数）/播报中（可打断）等；
+   欢迎语全文经状态行展示（初版写对话框，与 respond 末趟在途更新互写丢失，E2E 实证
+   后移出——chatbot 共享可变状态跨事件写必然竞争）。
+3. **对话框乱码**：`[['add','[value]','问题\u200b#2']]` —— 隐藏 Textbox 组件值被
+   gradio 6.22 流式 diff 协议串线（更新指令当成值）。根修：文本一律走服务端
+   pending 存储（`_pending_questions`/`_pending_greet`，消费一次性），触发器改
+   gr.State（服务端值跟踪 + deep_hash 变更检测，前端不可达→免疫）。E2E 实证零乱码。
+4. **gradio 6.22 流式收尾 KeyError（新发现的 gradio 侧 bug）**：生成器事件末趟
+   final pass 输出全 None，流式输出若从未开流（TTS 关闭/被打断跳过收尾）则
+   `stream_run[output_id].end_stream()` KeyError → 事件收尾中断、末批输出丢失。
+   `patch_gradio_stream_endstream_guard()`：末趟预检降级为空 update。
+5. **onnxruntime DLL 初始化失败（用户"VAD 初始化失败"根因）**：裸进程各种顺序均
+   正常，但服务器进程工作线程里 lazy import 4/4 必现 → app import 期主线程预加载。
+6. **自动点录音**：①hydration 竞争——过早点击落在未就绪按钮上，UI 显示录音中但
+   零流事件；②判据三连坑——UI 录音态假阳性、WebSocket 挂钩（6.22 流块不走 WS）、
+   fetch 挂钩（不走逐块 POST）均不可观测 → 最终判据：voice_status 出现服务端文本
+   （排除"录音已停止"假阳性），6s 无流通则停止重录自愈；③playwright 同步 API 只在
+   调用时泵事件循环，sleep 空转收不到 console 事件（E2E 脚本层教训）。
+
+E2E：`scripts/e2e_assist_loop.py`（全链路：自动录音→自动提交干净气泡→唤醒应答）
++ `scripts/e2e_autorecord.py`（自动录音+流通确认）。**全量 628 passed**。
+
+### 优化轮3（用户复测提速：唤醒应答 2-3s / 转写慢）
+
+**延迟构成（先分解后优化）**：唤醒→应答 2-3s = VAD 端点 800ms + ASR finish ~0.3s +
+块节奏 0.5s + HLS 编码发布 ~0.2s + 客户端起播 ~0.4s。
+
+**优化（真实 API 实测，`scripts/measure_asr_latency.py`）**：
+1. **唤醒词提前命中**：待机态在 wpgs 部分结果上匹配唤醒词（词尾后 ~0.3s 可见），
+   不等 VAD 静音端点 → 实测词尾→greet 动作 **0.15s**（旧路径 ≥1.5s）。
+2. **应答音频预置直播**：固定应答语合成一次（启动后台预热+内存/磁盘缓存），
+   经 `GET /__voice_greeting` 由前端 `new Audio()` 预加载直播（~0.1s 起播），
+   绕开 HLS 链路；服务端 play_greeting 仅 token 等待驱动状态机（可打断）。
+3. **转写提速**：VAD 段端点 800→500ms（关键论证：端点激进不会切碎问题——
+   2s 延长计时会把分段续接成同一问题）+ 流块节奏 0.5→0.3s。
+   实测：说完→定稿上屏 **~0.7-0.8s**；说完→自动提交 2.5s（其中 2s 为需求3
+   既定延长计时参数，可调 `ASR_EXTEND_WAIT_S`）。
+
+**全量 637 passed**；E2E 全链路复跑通过（含 /__voice_greeting 调用断言）。
