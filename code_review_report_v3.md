@@ -449,3 +449,14 @@ E2E：`scripts/e2e_assist_loop.py`（全链路：自动录音→自动提交干�
    既定延长计时参数，可调 `ASR_EXTEND_WAIT_S`）。
 
 **全量 637 passed**；E2E 全链路复跑通过（含 /__voice_greeting 调用断言）。
+
+
+---
+
+## 附：当前 git 基线快照（2026-08-12 深夜，语音助手收官）
+
+- `origin/main` = **c043769**（feature/asr 已 --no-ff 并入；含 T1-T7 + 修复轮1-2 + 优化轮3）
+- `origin/feature/asr` = 3461019；`origin/feature/audio` = c3fc7ac（冻结，不再动）
+- 远程：origin = 本地 Gitea（localhost:3000）；github 远程受网络限制未同步
+- 全量测试：**637 passed, 0 failed**（全离线）；真实 API 冒烟/E2E 脚本见 scripts/
+- 下一阶段：竖屏一体机前端开发（依据《数字人一体机落地方案》），内核零改动只加薄层
