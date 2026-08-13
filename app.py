@@ -588,13 +588,12 @@ def _greeting_pcm(project: str = "") -> Optional[bytes]:
 
 def play_greeting(trigger, project: str = "", tts_enabled: bool = True,
                   request: gr.Request = None):
-    """唤醒应答播报（audit-ASR 需求1）：缓存 PCM 经 _AdtsStreamer 发布。
+    """唤醒应答（audit-ASR 需求1 + 优化轮3 提速）。
 
-    注册 greeting token → 状态机经 notify_broadcast 进入播报态（可打断）；
-    收尾 done → 状态机进 LISTEN（8s 提问窗口）。
-    修复轮2b：欢迎语**不写对话框**——chatbot 是共享可变状态，与 respond 末趟在途
-    更新互相覆写丢消息（E2E 实证）；应答语全文改经状态机的 voice_status 常驻行
-    展示（「🔊 应答中｜您好，我是小虎…」），零竞争。
+    音频走**预置静态文件 + 前端 JS 直播**（GET /__voice_greeting，启动预合成 + 客户端
+    预加载）：原 HLS 链路（编码 ~0.2s + 发布 + 客户端起播 ~0.4s+）对固定应答语纯属
+    浪费，直播 ~0.1s 起播。本函数只注册 token 并等待音频时长（驱动状态机 播报态→
+    倾听态 迁移）+ 输出 tts_status；可打断（cancel 即提前收尾）。
     门闩：组件值串线会产生伪触发（E2E 实录 trigger='[]'）→ 以 pending 存储为准，
     且必须先判再注册 token——伪触发注册会误取消进行中的回答播报。
     """
@@ -609,33 +608,53 @@ def play_greeting(trigger, project: str = "", tts_enabled: bool = True,
         return
     token = _register_broadcast(request, "greeting")
     try:
-        if not tts_enabled:
-            yield no, no, gr.update(value="✅ 已唤醒（语音播报已关闭），请提问")
-            return
-        pcm = _greeting_pcm(project)
+        pcm = _greeting_pcm(project) if tts_enabled else None
         if not pcm:
-            yield no, no, gr.update(value="✅ 已唤醒（欢迎语不可用），请提问")
+            yield no, no, gr.update(value=("✅ 已唤醒（语音播报已关闭），请提问" if not tts_enabled
+                                           else "✅ 已唤醒（欢迎语不可用），请提问"))
             return
-        streamer = _AdtsStreamer(rate=24000,
-                                 seg_seconds=settings.tts_batch_seconds,
-                                 first_seg_seconds=settings.tts_first_batch_seconds,
-                                 ramp_seconds=(0.6, 0.8))
-        try:
-            streamer.feed(pcm)
-            streamer.finish()
-            for seg in streamer.collect_all(timeout=10):
-                if token.cancel.is_set():
-                    break
-                yield seg, no, gr.update(value="🔊 应答中…")
-            if not token.cancel.is_set():
-                yield no, no, gr.update(value="✅ 已唤醒，请提问")
-        finally:
-            streamer.close()
+        duration = len(pcm) / 48000.0  # 24k 16bit mono
+        yield no, no, gr.update(value="🔊 应答中…")
+        # 等待音频时长（前端 JS 直播静态文件），每 0.1s 检查打断
+        deadline = time.time() + duration + 0.3  # +客户端起播余量
+        while time.time() < deadline and not token.cancel.is_set():
+            time.sleep(0.1)
+        if not token.cancel.is_set():
+            yield no, no, gr.update(value="✅ 已唤醒，请提问")
     except Exception as e:
         logger.warning(f"欢迎语播报异常: {e}")
         yield no, no, gr.update(value=f"欢迎语播报异常: {e}")
     finally:
         token.done.set()
+
+
+class _GreetingAudioMiddleware:
+    """GET /__voice_greeting → 唤醒应答 wav（优化轮3：预置音频，前端预加载直播）。
+
+    no-cache：应答语可配置变更，浏览器每次 revalidate（ETag/mtime 变化即拿新文件）。
+    """
+
+    PATH = "/__voice_greeting"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") != self.PATH:
+            await self.app(scope, receive, send)
+            return
+        pcm = _greeting_pcm("")  # 默认项目（一体机单项目场景；项目级 wake_greeting 覆写暂走默认）
+        if not pcm:
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        body = _wrap_pcm(pcm, 24000)
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"audio/wav"),
+            (b"content-length", str(len(body)).encode()),
+            (b"cache-control", b"no-cache"),
+        ]})
+        await send({"type": "http.response.body", "body": body})
 
 
 # ========== 语音功能（bug-121）：TTS 语音播报（句子级流式） ==========
@@ -1207,15 +1226,28 @@ def _voice_assist_head() -> str:
       }
     }
   },1000);
-  var lastBarge=0;
+  // 唤醒应答预置音频（优化轮3）：页面加载即预加载，命中「已唤醒」立即直播，
+  // ~0.1s 起播（原 HLS 链路 ~1s+）；打断时与播报 video 一并暂停
+  var greetAudio=null;
+  try{greetAudio=new Audio('/__voice_greeting');greetAudio.preload='auto';greetAudio.load();}catch(e){}
+  var lastGreet=0, lastBarge=0;
   function check(){
     var vs=document.getElementById('voice_status'); if(!vs)return;
     var t=vs.textContent||'';
+    var now=Date.now();
+    if(t.indexOf('已唤醒')>=0 && greetAudio && now-lastGreet>2000){
+      lastGreet=now;
+      try{greetAudio.currentTime=0;
+        var p=greetAudio.play(); if(p&&p.catch)p.catch(function(e){console.warn('greet play blocked',e);});
+      }catch(e){}
+      return;
+    }
     if(t.indexOf('⚡')<0)return;
-    var now=Date.now(); if(now-lastBarge<1000)return; lastBarge=now;
+    if(now-lastBarge<1000)return; lastBarge=now;
     var root=document.getElementById('tts_audio');
     var v=root?root.querySelector('video'):null;
     if(v){try{v.pause();}catch(e){}}
+    if(greetAudio){try{greetAudio.pause();}catch(e){}}
     console.log('__voiceAssistBargeIn playback paused');
   }
   new MutationObserver(check).observe(document.documentElement,
@@ -1989,7 +2021,7 @@ def create_ui(default_stream: bool = True, default_project: str = ""):
             voice_stream_dispatch,
             [voice_audio, asr_state, project_dropdown],
             [asr_state, msg, voice_status, auto_q, greet_trig],
-            stream_every=0.5,
+            stream_every=0.3,  # 优化轮3：0.5→0.3s 块节奏（部分结果上屏更密、端点判定更及时）
         )
         # 注意：gradio 6 的 stop 事件是"播放停止按钮"；录音停止必须用 stop_recording
         voice_audio.stop_recording(
@@ -2061,6 +2093,16 @@ def main():
     setup_logger(settings.log_level)
     logger.info("正在初始化 RAG 系统...")
     _voice_assist_startup_probe()  # audit-ASR：assist 开启时先验 VAD，失败即 ERROR 日志
+    if settings.voice_assist_enabled:
+        # 优化轮3：启动后台预合成唤醒应答音频（首次唤醒零合成延迟 + 前端可预加载）
+        def _warm_greeting():
+            try:
+                pcm = _greeting_pcm("")
+                logger.info(f"唤醒应答音频就绪: {len(pcm) / 48000:.1f}s" if pcm
+                            else "唤醒应答音频未就绪（首次唤醒无声，状态行仍在）")
+            except Exception as e:
+                logger.warning(f"唤醒应答音频预热失败: {e}")
+        threading.Thread(target=_warm_greeting, daemon=True).start()
     try:
         init_pipeline(args.project)
     except Exception as e:
@@ -2092,6 +2134,10 @@ def main():
             "middleware": [Middleware(_NoCacheAssetsMiddleware),
                            Middleware(_TtsStallBeaconMiddleware)]
         }
+        if settings.voice_assist_enabled:
+            # 优化轮3：预置应答音频端点（前端 JS 预加载直播，唤醒 ~0.1s 起播）
+            launch_kwargs["app_kwargs"]["middleware"].append(
+                Middleware(_GreetingAudioMiddleware))
     if args.ssl_keyfile or args.ssl_certfile:
         # bug-122：浏览器 getUserMedia 要求安全上下文（HTTPS/localhost），
         # 自签或正式证书均可；仅提供其一则报错提示

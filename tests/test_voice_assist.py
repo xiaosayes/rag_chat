@@ -5,6 +5,7 @@
 import json
 import math
 import struct
+import time
 
 import gradio as gr
 import pytest
@@ -27,7 +28,7 @@ class TestVoiceAssistConfig:
         s = Settings()
         assert s.vad_threshold == 0.5
         assert s.vad_min_speech_ms == 400
-        assert s.vad_min_silence_ms == 800
+        assert s.vad_min_silence_ms == 500  # 优化轮3 提速（原 800，双计时兜底完整性）
         assert s.vad_speech_pad_ms == 200
         assert s.vad_max_speech_s == 15
         assert s.silero_vad_model_path == ""
@@ -778,8 +779,9 @@ class TestPlayGreeting:
                             lambda project: b"\x01\x00" * 24000)  # 1s 假 PCM
         app_mod._pending_greet.add("anon")  # 门闩前提（修复轮2b）
         results = list(app_mod.play_greeting("#1", "museum", True, None))
+        # 优化轮3：PCM 就绪走预置静态文件直播 → 服务端不发 HLS 段
         audio = [r[0] for r in results if isinstance(r[0], bytes)]
-        assert audio, "欢迎语应发布音频段"
+        assert not audio, "优化轮3：欢迎语不走 HLS 发布（前端 JS 直播预置文件）"
         final_status = [r[2].get("value", "") for r in results if isinstance(r[2], dict)]
         assert any("小虎" in s or "请提问" in s or "唤醒" in s for s in final_status)
         assert app_mod._active_broadcast(None) is None  # token 已 done
@@ -1002,8 +1004,154 @@ class TestGreetGate:
     def test_real_trigger_with_pending_plays(self, monkeypatch, tmp_path):
         import app as app_mod
         _assist_settings(monkeypatch, tmp_path)
-        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: b"\x01\x00" * 24000)
+        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: b"\x01\x00" * 2400)
         app_mod._pending_greet.add("anon")
         results = list(app_mod.play_greeting("#9", "museum", True, None))
-        assert any(isinstance(r[0], bytes) for r in results)
+        statuses = [r[2].get("value", "") for r in results if isinstance(r[2], dict)]
+        assert any("应答中" in s or "已唤醒" in s for s in statuses)  # 快速通道状态输出
         assert "anon" not in app_mod._pending_greet  # 消费一次性
+
+
+
+# ============ 优化轮3：唤醒提速（提前命中+预置音频）与转写提速 ============
+
+class TestEarlyWakeOnPartial:
+    """待机态：部分结果含唤醒词即提前唤醒，不等 VAD 端点（省 ~1s）。"""
+
+    class _PartialASR:
+        """current_text 逐步增长的假 ASR 会话。"""
+        def __init__(self, partials, final=""):
+            self.partials = list(partials)
+            self.final = final
+            self.closed = False
+
+        def feed(self, b):
+            pass
+
+        @property
+        def current_text(self):
+            return self.partials.pop(0) if self.partials else ""
+
+        def finish(self):
+            return self.final
+
+        def close(self):
+            self.closed = True
+
+    def test_wake_on_partial_before_segment_end(self):
+        from src.voice_assistant import VoiceAssistant
+        # 首个部分结果在 confirmed_start 当块即被读取 → 第1项对应块1
+        asr = self._PartialASR(["", "你好，小", "你好，小虎"])
+        script = [[("confirmed_start", None)], [], []]  # 无 segment：语音仍在进行
+        va = VoiceAssistant(_ScriptedVAD(script), lambda: asr,
+                            wake_words=["你好小虎"], greeting="您好，我是小虎")
+        va.process_chunk(_PCM)   # confirmed_start，开会话
+        a2 = va.process_chunk(_PCM)  # partial "你好，小" → 未命中
+        assert "greet" not in _kinds(a2)
+        a3 = va.process_chunk(_PCM)  # partial "你好，小虎" → 提前命中
+        assert "greet" in _kinds(a3)
+        assert va.mode == "await_broadcast"
+        assert asr.closed  # 提前唤醒后当前会话立即关闭
+
+    def test_early_wake_ignores_trailing_segment(self):
+        """提前唤醒后，同段的 segment 事件不得重复触发/覆盖。"""
+        from src.voice_assistant import VoiceAssistant
+        asr = self._PartialASR(["", "你好小虎"], final="你好小虎")
+        script = [[("confirmed_start", None)], [], [("segment", b"x")], []]
+        va = VoiceAssistant(_ScriptedVAD(script), lambda: asr,
+                            wake_words=["你好小虎"], greeting="g")
+        va.process_chunk(_PCM)
+        a = va.process_chunk(_PCM)  # 提前命中
+        assert "greet" in _kinds(a)
+        a2 = va.process_chunk(_PCM)  # segment 到达：应忽略，不二次 greet
+        assert "greet" not in _kinds(a2)
+        assert va.mode == "await_broadcast"
+
+    def test_partial_without_wake_no_greet(self):
+        from src.voice_assistant import VoiceAssistant
+        asr = self._PartialASR(["今天天气", "今天天气怎么样"], final="今天天气怎么样")
+        script = [[("confirmed_start", None)], [], [("segment", b"x")], []]
+        va = VoiceAssistant(_ScriptedVAD(script), lambda: asr,
+                            wake_words=["你好小虎"], greeting="g")
+        va.process_chunk(_PCM)
+        va.process_chunk(_PCM)
+        a = va.process_chunk(_PCM)  # segment 落定：非唤醒词
+        assert "greet" not in _kinds(a)
+        assert va.mode == "standby"  # 仍在待机
+
+
+class TestGreetingFastPath:
+    """play_greeting 快速通道：PCM 就绪 → 不发 HLS 段，token 等待音频时长后收尾。"""
+
+    def test_token_wait_mode_no_hls_segments(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        # 0.2s 假 PCM（24k*0.2*2 字节）
+        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: b"\x01\x00" * 4800)
+        app_mod._pending_greet.add("anon")
+        t0 = time.time()
+        results = list(app_mod.play_greeting("#1", "museum", True, None))
+        audio = [r[0] for r in results if isinstance(r[0], bytes)]
+        assert not audio, "PCM 就绪时不走 HLS 发布（前端 JS 直播预置文件）"
+        assert 0.15 <= time.time() - t0 < 3.0, "token 等待≈音频时长后收尾"
+        assert app_mod._active_broadcast(None) is None
+
+    def test_pcm_unavailable_status_only(self, monkeypatch, tmp_path):
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: None)
+        app_mod._pending_greet.add("anon")
+        results = list(app_mod.play_greeting("#1", "museum", True, None))
+        assert not [r[0] for r in results if isinstance(r[0], bytes)]
+        assert app_mod._active_broadcast(None) is None
+
+
+class TestGreetingAudioEndpoint:
+    """预置应答音频端点：GET /__voice_greeting → wav 字节（前端 JS 预加载直播）。"""
+
+    def test_serves_wav_when_pcm_ready(self, monkeypatch, tmp_path):
+        import asyncio
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: b"\x01\x00" * 4800)
+        mw = app_mod._GreetingAudioMiddleware(app=None)
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg):
+            sent.append(msg)
+
+        asyncio.run(mw({"type": "http", "path": "/__voice_greeting", "method": "GET"}, receive, send))
+        assert sent[0]["status"] == 200
+        assert sent[1]["body"][:4] == b"RIFF"
+
+    def test_204_when_unavailable(self, monkeypatch, tmp_path):
+        import asyncio
+        import app as app_mod
+        _assist_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_mod, "_greeting_pcm", lambda project: None)
+        mw = app_mod._GreetingAudioMiddleware(app=None)
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg):
+            sent.append(msg)
+
+        asyncio.run(mw({"type": "http", "path": "/__voice_greeting", "method": "GET"}, receive, send))
+        assert sent[0]["status"] == 204
+
+
+class TestSpeedConfig:
+    def test_vad_min_silence_default_500(self):
+        """提速：段端点 800→500ms（2s 延长计时保证问题完整性，端点激进安全）。"""
+        from src.config import Settings
+        assert Settings().vad_min_silence_ms == 500
+
+    def test_assist_head_has_greeting_preload(self):
+        import app as app_mod
+        head = app_mod._voice_assist_head()
+        assert "/__voice_greeting" in head and "已唤醒" in head

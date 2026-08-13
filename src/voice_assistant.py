@@ -181,6 +181,18 @@ class VoiceAssistant:
             partial = self._correct(self._asr.current_text or "")
             if self._mode == "listen" and partial:
                 actions.append(VoiceAction("msg", self._question + partial))
+            elif self._mode == "standby" and partial:
+                # 优化轮3：待机态部分结果提前命中唤醒词——wpgs 部分结果在词尾后
+                # ~0.3-0.5s 即可见，不等 VAD 800ms 静音端点（省 ~1s 唤醒延迟）
+                norm = self._correct(_normalize(partial))
+                if any(w in norm for w in self._wake_norm):
+                    self._close_asr()  # 提前结束会话；同段尾部 segment 事件被忽略
+                    self._mode = "await_broadcast"
+                    self._await_since = now
+                    actions.append(VoiceAction("greet"))
+                    actions.append(VoiceAction(
+                        "status",
+                        f"✅ 已唤醒｜{self._greeting}" if self._greeting else "✅ 已唤醒"))
         return self._with_status_line(actions, now)
 
     # ---------- 常驻状态行（修复轮2：用户对状态无感知） ----------

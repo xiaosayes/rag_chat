@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     # silero VAD 参数（audit-ASR 需求2，用户标定）
     vad_threshold: float = Field(default=0.5, ge=0, le=1, description="语音概率阈值")
     vad_min_speech_ms: int = Field(default=400, ge=0, description="最短有效语音 ms（过滤'嗯''啊'；达到即提前确认语音开始）")
-    vad_min_silence_ms: int = Field(default=800, ge=0, description="语音内连续静音多久判定为段结束 ms")
+    vad_min_silence_ms: int = Field(default=500, ge=0, description="语音内连续静音多久判定为段结束 ms（需求2初版 800；优化轮3 提速改 500——段切分激进不会切碎问题：2s 延长计时会把分段续接成同一问题，双计时完性兜底）")
     vad_speech_pad_ms: int = Field(default=200, ge=0, description="语音段前后补偿 ms")
     vad_max_speech_s: int = Field(default=15, ge=1, description="单段语音最大秒数（强制切段，防卡死）")
     silero_vad_model_path: str = Field(default="", description="silero_vad.onnx 路径覆盖（默认自动定位 silero_vad 包内置模型）")

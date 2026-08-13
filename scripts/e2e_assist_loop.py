@@ -133,9 +133,11 @@ def main() -> int:
     port = 7872
     demo = app_mod.create_ui()
     demo.queue()
+    from starlette.middleware import Middleware
     demo.launch(
         server_name="127.0.0.1", server_port=port, prevent_thread_lock=True,
         head=app_mod._TTS_STALL_PROBE_HEAD + app_mod._voice_assist_head(),
+        app_kwargs={"middleware": [Middleware(app_mod._GreetingAudioMiddleware)]},
     )
     t0 = time.time()
     while time.time() - t0 < 120:
@@ -165,7 +167,7 @@ def main() -> int:
         page.on("console", lambda m: console.append(m.text))
         netlog = []
         page.on("request", lambda r: netlog.append((r.method, r.url))
-                if "/gradio_api/" in r.url or "/queue" in r.url else None)
+                if "/gradio_api/" in r.url or "/queue" in r.url or "/__voice_greeting" in r.url else None)
         page.on("response", lambda r: netlog.append((f"RESP {r.status}", r.url))
                 if "/gradio_api/" in r.url else None)
         page.goto(f"http://127.0.0.1:{port}")
@@ -226,6 +228,12 @@ def main() -> int:
             failures.append("唤醒应答状态未上屏")
         else:
             print("✅ 唤醒应答状态上屏（已唤醒/应答中）")
+        # 优化轮3：预置应答音频端点被前端调用（JS 直播）
+        greet_audio = [u for m, u in netlog if "/__voice_greeting" in u]
+        if not greet_audio:
+            failures.append("前端未请求预置应答音频 /__voice_greeting")
+        else:
+            print("✅ 预置应答音频端点被调用（JS 直播路径）")
         if "[['add'" in full or "\\u200b" in full or "u200b" in full:
             failures.append("对话框仍有串线乱码/nonce 残留")
         else:
