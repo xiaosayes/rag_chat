@@ -30,6 +30,16 @@
 
 ## 更新日志
 
+### v1.6.0-pre (开发中) — 数字人前端与服务端薄层（feat(web) 轮）
+
+- **新增 `kiosk_server/`（全部新文件，零改动既有代码）**：数字人一体机专属薄层 API
+  （独立进程 :7861，与 Gradio:7860 互斥运行——Qdrant 本地嵌入模式文件锁，已实证）。
+  M1 端点：`GET /api/health|config|presets`、`POST /api/ocr`（百炼 qwen-vl-ocr 手写识别，
+  DASHSCOPE_API_KEY 仅服务端）；可选 `X-Kiosk-Token` 鉴权。
+- **persona 定名湘小图**（部署配置覆盖，零代码）：`.env ASR_WAKE_WORDS=你好湘小图`、
+  `ASR_WAKE_GREETING=您好，请问有什么可以帮您？`
+- 设计与计划：`docs/superpowers/specs|plans/2026-08-14-digital-human-frontend*`。
+
 ### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）
 
 > 语音输入从「点击录音」升级为**免提语音助手**（默认关闭，`VOICE_ASSIST_ENABLED=true` 开启，
