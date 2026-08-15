@@ -1,9 +1,15 @@
 # web-001：kiosk_server 独立配置（os.getenv 直读，不改 src/config.py）
+import base64
 import os
+import sys
+import types
 
 import pytest
 
 from kiosk_server.config import KioskConfig
+
+# web-003：手写 OCR（百炼 qwen-vl-ocr，密钥仅服务端，dashscope 全 mock）
+from kiosk_server.ocr import OcrClient, OcrError
 
 # web-002：预设问题池（服务器 JSON 全量池 + 缺省兜底；前端随机抽 8 展示）
 from kiosk_server.presets import DEFAULT_PRESETS, load_presets
@@ -64,3 +70,61 @@ class TestPresets:
         p = tmp_path / "empty.json"
         p.write_text('{"questions": []}', encoding="utf-8")
         assert load_presets(str(p)) == DEFAULT_PRESETS
+
+
+def _fake_dashscope(monkeypatch, resp):
+    fake = types.ModuleType("dashscope")
+    captured = {}
+
+    class _MMC:
+        @staticmethod
+        def call(**kwargs):
+            captured.update(kwargs)
+            return resp
+
+    fake.MultiModalConversation = _MMC
+    fake.api_key = None
+    monkeypatch.setitem(sys.modules, "dashscope", fake)
+    return captured
+
+
+def _ok_resp(text_parts):
+    msg = types.SimpleNamespace(content=[{"text": t} for t in text_parts])
+    choice = types.SimpleNamespace(message=msg)
+    return types.SimpleNamespace(status_code=200, output=types.SimpleNamespace(choices=[choice]))
+
+
+class TestOcrClient:
+    def test_success_concatenates_parts(self, monkeypatch):
+        captured = _fake_dashscope(monkeypatch, _ok_resp(["你", "好"]))
+        client = OcrClient(model="m-test")
+        png_b64 = base64.b64encode(b"\x89PNG fake").decode()
+        assert client.recognize(f"data:image/png;base64,{png_b64}") == "你好"
+        assert captured["model"] == "m-test"
+        content = captured["messages"][0]["content"]
+        assert content[0]["image"].startswith("data:image/png;base64,")
+
+    def test_string_content_shape(self, monkeypatch):
+        msg = types.SimpleNamespace(content="直接字符串")
+        resp = types.SimpleNamespace(
+            status_code=200,
+            output=types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)]),
+        )
+        _fake_dashscope(monkeypatch, resp)
+        assert OcrClient(model="m").recognize(base64.b64encode(b"x").decode()) == "直接字符串"
+
+    def test_api_error_raises(self, monkeypatch):
+        resp = types.SimpleNamespace(status_code=400, code="BadRequest", message="invalid")
+        _fake_dashscope(monkeypatch, resp)
+        with pytest.raises(OcrError):
+            OcrClient(model="m").recognize(base64.b64encode(b"x").decode())
+
+    def test_empty_and_invalid_and_oversize(self, monkeypatch):
+        _fake_dashscope(monkeypatch, _ok_resp(["x"]))
+        client = OcrClient(model="m", max_image_bytes=4)
+        with pytest.raises(OcrError):
+            client.recognize("")
+        with pytest.raises(OcrError):
+            client.recognize("!!!not-base64!!!")
+        with pytest.raises(OcrError):
+            client.recognize(base64.b64encode(b"12345678").decode())
