@@ -16,7 +16,8 @@ import pytest
 class TestVoiceAssistConfig:
     def test_assist_defaults(self):
         from src.config import Settings
-        s = Settings()
+        # web-005: _env_file=None 隔离本地 .env（部署配置的唤醒词/应答语不影响代码默认值断言）
+        s = Settings(_env_file=None)
         assert s.voice_assist_enabled is False  # 默认关：手动模式行为零变化
         assert s.asr_wake_words == "你好小虎"
         assert s.asr_wake_greeting == "您好，我是小虎，请问有什么可以帮您？"
@@ -25,7 +26,7 @@ class TestVoiceAssistConfig:
 
     def test_vad_defaults(self):
         from src.config import Settings
-        s = Settings()
+        s = Settings(_env_file=None)  # web-005: 同上，隔离本地 .env
         assert s.vad_threshold == 0.5
         assert s.vad_min_speech_ms == 400
         assert s.vad_min_silence_ms == 500  # 优化轮3 提速（原 800，双计时兜底完整性）
