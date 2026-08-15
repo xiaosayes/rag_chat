@@ -38,6 +38,13 @@
   DASHSCOPE_API_KEY 仅服务端）；可选 `X-Kiosk-Token` 鉴权。
 - **persona 定名湘小图**（部署配置覆盖，零代码）：`.env ASR_WAKE_WORDS=你好湘小图`、
   `ASR_WAKE_GREETING=您好，请问有什么可以帮您？`
+- **M2 问答流（web-006~008）**：`WS /ws/voice` 单通道全双工（hello/ask/barge_in/ping +
+  流式文本 + PCM 音频下行）。`kiosk_server/chat.py` BroadcastSession 复用 `RAGPipeline.query_stream`
+  真流式问答 + CosyVoice 单会话流式合成，PCM s16le 24k 直推（前端 WebAudio 播放，弃 HLS/AAC）；
+  喂入切分（句边界批量喂）与 `_PauseCompressor` 静默压缩自 app.py 保真移植（不 import app.py）；
+  看门狗 15s 重建 ≤2 次；打断即停喂停发跳过收尾；多轮历史 4 轮。重播为**端侧 PCM 缓存**
+  （零网络往返，参考工程既有模式）。真实 API 冒烟（`scripts/smoke_kiosk_ws.py`）：
+  FAQ 快路径首文本 0.05s/首音频 0.62s；检索路径首文本 1.79s/首音频 2.37s（防幻觉拒答正常）。
 - 设计与计划：`docs/superpowers/specs|plans/2026-08-14-digital-human-frontend*`。
 
 ### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）
