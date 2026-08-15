@@ -14,10 +14,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.config import settings
 
-from . import __version__
+from . import __version__, services
 from .config import KioskConfig
 from .ocr import OcrClient, OcrError
 from .presets import load_presets
+from .voice_ws import register_voice_ws
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,13 @@ class _TokenMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def create_app(config: KioskConfig | None = None, ocr_client=None) -> FastAPI:
+def create_app(config: KioskConfig | None = None, ocr_client=None,
+               session_factory=None) -> FastAPI:
     cfg = config or KioskConfig.from_env()
     app = FastAPI(title="kiosk_server", version=__version__)
     app.state.config = cfg
     app.state.ocr = ocr_client or OcrClient(cfg.ocr_model, cfg.ocr_max_image_bytes)
+    register_voice_ws(app, cfg, session_factory)   # web-008：/ws/voice
     app.add_middleware(_TokenMiddleware, token=cfg.token)
     app.add_middleware(
         CORSMiddleware,
@@ -56,8 +59,11 @@ def create_app(config: KioskConfig | None = None, ocr_client=None) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        # M1 最小探针；kb/vad/tts 字段随 M2/M3 服务接入追加
-        return {"ok": True, "service": "kiosk_server", "version": __version__}
+        # web-008：kb（懒加载探针，不触发加载）；tts=配置面可用性；vad 探针 M3 追加
+        return {"ok": True, "service": "kiosk_server", "version": __version__,
+                "kb": services.pipeline_status(),
+                "tts": bool(settings.tts_enabled and settings.dashscope_api_key
+                            and settings.tts_voice)}
 
     @app.get("/api/config")
     def client_config():

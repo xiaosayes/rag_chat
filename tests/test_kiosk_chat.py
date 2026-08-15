@@ -265,3 +265,130 @@ class TestBroadcastSession:
         end = [e for e in events if e["type"] == "answer_end"][0]
         assert end["cancelled"] is False
         assert "audio_start" not in _event_types(events)
+
+
+# ============ web-008：/ws/voice 端点（M2 子集）============
+import json
+import os
+
+import pytest
+from fastapi.testclient import TestClient
+
+from kiosk_server.app import create_app
+from kiosk_server.config import KioskConfig
+
+
+def _ws_client(monkeypatch, session_factory, **cfg_kwargs):
+    for k in list(os.environ):
+        if k.startswith("KIOSK_"):
+            monkeypatch.delenv(k)
+    return TestClient(create_app(KioskConfig(**cfg_kwargs),
+                                 session_factory=session_factory))
+
+
+def _factory(pipe, tts):
+    def make(emit):
+        return BroadcastSession(pipe, lambda: tts, emit,
+                                clock=AutoClock(), tick_s=0.01)
+    return make
+
+
+def _drain_until(ws, stop_type, max_msgs=200):
+    """收帧直到某事件类型出现；返回 (json事件列表, binary帧数)。"""
+    events, binaries = [], 0
+    for _ in range(max_msgs):
+        msg = ws.receive()
+        if msg.get("bytes") is not None:
+            binaries += 1
+            continue
+        ev = json.loads(msg["text"])
+        events.append(ev)
+        if ev.get("type") == stop_type:
+            break
+    return events, binaries
+
+
+class TestVoiceWs:
+    def test_hello_and_ping(self, monkeypatch):
+        c = _ws_client(monkeypatch, _factory(FakePipeline([]), None))
+        with c.websocket_connect("/ws/voice") as ws:
+            ws.send_text(json.dumps({"type": "hello"}))
+            ev = json.loads(ws.receive_text())
+            assert ev["type"] == "hello" and ev["ok"] is True
+            ws.send_text(json.dumps({"type": "ping"}))
+            assert json.loads(ws.receive_text())["type"] == "pong"
+
+    def test_ask_full_flow(self, monkeypatch):
+        pipe = FakePipeline(["第一句。", "第二句。"])
+        c = _ws_client(monkeypatch, _factory(pipe, FakeTTS()))
+        with c.websocket_connect("/ws/voice") as ws:
+            ws.send_text(json.dumps({"type": "ask", "text": "测试"}))
+            events, binaries = _drain_until(ws, "answer_end")
+        types = [e["type"] for e in events]
+        assert types[0] == "answer_start" and types[-1] == "answer_end"
+        assert "audio_start" in types and "audio_end" in types
+        assert binaries > 0
+        chunks = "".join(e["text"] for e in events if e["type"] == "answer_chunk")
+        assert chunks == "第一句。第二句。"
+        assert events[-1]["full_text"] == "第一句。第二句。"
+        assert events[-1]["cancelled"] is False
+
+    def test_ask_busy(self, monkeypatch):
+        gate = threading.Event()
+        pipe = FakePipeline(["一。", "二。"], gate=gate)
+        c = _ws_client(monkeypatch, _factory(pipe, FakeTTS()))
+        with c.websocket_connect("/ws/voice") as ws:
+            ws.send_text(json.dumps({"type": "ask", "text": "q1"}))
+            events, _ = _drain_until(ws, "answer_chunk")
+            ws.send_text(json.dumps({"type": "ask", "text": "q2"}))
+            # 下一条非音频事件应为 busy 错误
+            while True:
+                msg = ws.receive()
+                if msg.get("bytes") is not None:
+                    continue
+                ev = json.loads(msg["text"])
+                if ev["type"] == "audio_start":
+                    continue
+                assert ev == {"type": "error", "code": "busy"}
+                break
+            gate.set()
+            _drain_until(ws, "answer_end")
+
+    def test_barge_in_over_ws(self, monkeypatch):
+        gate = threading.Event()
+        pipe = FakePipeline(["一。", "二。"], gate=gate)
+        c = _ws_client(monkeypatch, _factory(pipe, FakeTTS()))
+        with c.websocket_connect("/ws/voice") as ws:
+            ws.send_text(json.dumps({"type": "ask", "text": "q"}))
+            _drain_until(ws, "answer_chunk")
+            ws.send_text(json.dumps({"type": "barge_in"}))
+            gate.set()
+            events, _ = _drain_until(ws, "answer_end")
+        types = [e["type"] for e in events]
+        assert "playback_cancel" in types
+        assert [e for e in events if e["type"] == "answer_end"][0]["cancelled"] is True
+
+    def test_binary_uplink_not_ready(self, monkeypatch):
+        c = _ws_client(monkeypatch, _factory(FakePipeline([]), None))
+        with c.websocket_connect("/ws/voice") as ws:
+            ws.send_bytes(b"\x00" * 320)
+            ev = json.loads(ws.receive_text())
+            assert ev["type"] == "error" and ev["code"] == "voice_uplink_not_ready"
+
+    def test_token_guard(self, monkeypatch):
+        c = _ws_client(monkeypatch, _factory(FakePipeline([]), None), token="s3cret")
+        with pytest.raises(Exception):   # 未带 token：服务端 close(4401)
+            with c.websocket_connect("/ws/voice"):
+                pass
+        with pytest.raises(Exception):
+            with c.websocket_connect("/ws/voice?token=wrong"):
+                pass
+        with c.websocket_connect("/ws/voice?token=s3cret") as ws:
+            ws.send_text(json.dumps({"type": "hello"}))
+            assert json.loads(ws.receive_text())["ok"] is True
+
+    def test_health_extended(self, monkeypatch):
+        c = _ws_client(monkeypatch, _factory(FakePipeline([]), None))
+        body = c.get("/api/health").json()
+        assert body["ok"] is True and body["kb"] == "not_loaded"
+        assert "tts" in body
