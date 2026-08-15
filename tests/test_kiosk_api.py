@@ -128,3 +128,70 @@ class TestOcrClient:
             client.recognize("!!!not-base64!!!")
         with pytest.raises(OcrError):
             client.recognize(base64.b64encode(b"12345678").decode())
+
+
+# web-004：FastAPI 装配（4 端点 + token 鉴权 + CORS）
+from fastapi.testclient import TestClient
+
+from kiosk_server.app import create_app
+from kiosk_server.presets import DEFAULT_PRESETS
+
+
+def _client(monkeypatch, **cfg_kwargs):
+    for k in list(os.environ):
+        if k.startswith("KIOSK_"):
+            monkeypatch.delenv(k)
+    return TestClient(create_app(KioskConfig(**cfg_kwargs)))
+
+
+class TestApp:
+    def test_health_open_without_token(self, monkeypatch):
+        c = _client(monkeypatch, token="t1")
+        r = c.get("/api/health")
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+    def test_config_shape_and_no_secrets(self, monkeypatch):
+        from src.config import settings
+        monkeypatch.setattr(settings, "asr_wake_words", "你好湘小图,湘小图")
+        c = _client(monkeypatch)
+        body = c.get("/api/config").json()
+        assert body["persona"] == "湘小图"
+        assert body["wake_words"] == ["你好湘小图", "湘小图"]
+        assert body["idle_home_s"] == 150.0
+        assert "key" not in str(body).lower() and "secret" not in str(body).lower()
+
+    def test_presets_default(self, monkeypatch, tmp_path):
+        c = _client(monkeypatch, presets_path=str(tmp_path / "none.json"))
+        assert c.get("/api/presets").json()["questions"] == DEFAULT_PRESETS
+
+    def test_ocr_ok(self, monkeypatch):
+        c = _client(monkeypatch)
+
+        class _Fake:
+            def recognize(self, b64):
+                return "你"
+
+        c.app.state.ocr = _Fake()
+        r = c.post("/api/ocr", json={"image_base64": "data:image/png;base64,eA=="})
+        assert r.status_code == 200 and r.json() == {"text": "你"}
+
+    def test_ocr_invalid_400_and_upstream_502(self, monkeypatch):
+        c = _client(monkeypatch)
+
+        class _Fake:
+            def recognize(self, b64):
+                if b64 == "bad":
+                    raise OcrError("图像 base64 非法")
+                raise OcrError("OCR 服务暂不可用")
+
+        c.app.state.ocr = _Fake()
+        assert c.post("/api/ocr", json={"image_base64": "bad"}).status_code == 400
+        r = c.post("/api/ocr", json={"image_base64": "eA=="})
+        assert r.status_code == 502 and "OCR" in r.json()["detail"]
+
+    def test_token_guard(self, monkeypatch):
+        c = _client(monkeypatch, token="s3cret")
+        assert c.get("/api/config").status_code == 401
+        assert c.get("/api/config", headers={"X-Kiosk-Token": "wrong"}).status_code == 401
+        assert c.get("/api/config", headers={"X-Kiosk-Token": "s3cret"}).status_code == 200
+        assert c.get("/api/health").status_code == 200   # 免鉴权
