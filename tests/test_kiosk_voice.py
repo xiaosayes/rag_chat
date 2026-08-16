@@ -1,5 +1,6 @@
 # web-009/010/011：语音全链 glue 测试（真 FSM + 假 VAD/ASR/TTS，全离线）
 import io
+import os
 import threading
 import time
 import wave
@@ -182,7 +183,7 @@ class FakeTTS:
 
 
 def _vsession(monkeypatch, vad_script, asr_scripts, *, tokens=("答句。",),
-              greeting_pcm=b"\x01\x02" * 4800, submit=None):
+              greeting_pcm=b"\x01\x02" * 4800, submit=None, default_submit=False):
     """构造 VoiceSession：真 FSM + 假 VAD/ASR/时钟 + 假播报。返回 (session, events, clock, submits)。"""
     clock = ManualClock()
     FakeASR.instances = []
@@ -199,10 +200,12 @@ def _vsession(monkeypatch, vad_script, asr_scripts, *, tokens=("答句。",),
     emit, events = lambda ev: events.append(ev), []
     submits = []
     fake_tts = FakeTTS()
+    # default_submit=True 时不注入 submit_fn → VoiceSession 默认起线程跑真实问答播报
+    submit_fn = None if default_submit else (submit or submits.append)
     session = VoiceSession(
         FakePipeline(list(tokens)), lambda: fake_tts, assistant, emit,
         greeting_pcm_fn=lambda: greeting_pcm, sync_audio=True,
-        submit_fn=submit or submits.append,
+        submit_fn=submit_fn,
         clock=AutoClock(), tick_s=0.01)
     session._test_submits = submits
     return session, events, clock
@@ -312,3 +315,99 @@ class TestVoiceSession:
                                clock=AutoClock(), tick_s=0.01)
         session.feed_audio(b"\x00" * 640)
         assert events[0]["type"] == "error" and events[0]["code"] == "voice_unavailable"
+
+
+# ============ web-011：/ws/voice 语音全链集成 ============
+import json
+
+from fastapi.testclient import TestClient
+
+from kiosk_server.app import create_app
+from kiosk_server.config import KioskConfig
+
+
+def _voice_ws_client(monkeypatch, vad_script, asr_scripts, default_submit=False, **cfg):
+    """WS 集成：真 FSM + 假 VAD/ASR + 假播报；返回 (TestClient, session_holder)。"""
+    holder = {}
+
+    def factory(emit):
+        session, events, clock = _vsession(
+            monkeypatch, vad_script, asr_scripts, default_submit=default_submit)
+        # VoiceSession 默认 submit_fn = 起线程跑真实问答播报（假件秒回）
+        session._emit = emit          # 换绑到 WS 桥接
+        session._broadcast._emit = session._on_broadcast_event
+        holder["s"] = session
+        return session
+
+    for k in list(os.environ):
+        if k.startswith("KIOSK_"):
+            monkeypatch.delenv(k)
+    return TestClient(create_app(KioskConfig(**cfg), session_factory=factory)), holder
+
+
+def _recv_until(ws, pred, max_msgs=300):
+    events, binaries = [], 0
+    for _ in range(max_msgs):
+        msg = ws.receive()
+        if msg.get("bytes") is not None:
+            binaries += 1
+            continue
+        ev = json.loads(msg["text"])
+        events.append(ev)
+        if pred(ev):
+            break
+    return events, binaries
+
+
+class TestVoiceWsIntegration:
+    def test_full_voice_chain_over_ws(self, monkeypatch):
+        vad_script = [
+            {"events": [("confirmed_start", None)], "in_speech": True, "pending": b"AA"},
+            {"events": [("segment", b"AA")], "in_speech": False},
+            {"events": [("confirmed_start", None)], "in_speech": True, "pending": b"BB"},
+            {"events": [("segment", b"BB")], "in_speech": False},
+            {},
+        ]
+        client, holder = _voice_ws_client(
+            monkeypatch, vad_script,
+            [{"finish": "你好，湘小图！", "partials": ["你好湘小"]},
+             {"finish": "家博会几点开门", "partials": ["家博会"]}],
+            default_submit=True)
+        with client.websocket_connect("/ws/voice") as ws:
+            ws.send_text(json.dumps({"type": "hello"}))
+            hello = json.loads(ws.receive_text())
+            assert hello["ok"] is True and hello["voice"] is True
+            for _ in range(2):                        # 唤醒段
+                ws.send_bytes(b"\x00" * 640)
+            events, _ = _recv_until(ws, lambda e: e["type"] == "state"
+                                    and "倾听中" in e.get("status_text", ""))
+            assert any(e["type"] == "greet" for e in events)
+            ws.send_bytes(b"\x00" * 640)              # 开口
+            ws.send_bytes(b"\x00" * 640)              # 段结束
+            holder["s"]._assistant._clock.advance(2.1)  # 越过 2s 延长窗
+            ws.send_bytes(b"\x00" * 640)              # 触发提交 → 问答播报
+            events, binaries = _recv_until(ws, lambda e: e["type"] == "answer_end")
+        types = [e["type"] for e in events]
+        assert "answer_start" in types and "audio_end" in types
+        assert binaries > 0
+        assert holder["s"]._assistant.mode == "listen"
+
+    def test_hello_voice_false_when_degraded(self, monkeypatch):
+        def factory(emit):
+            return VoiceSession(FakePipeline([]), lambda: None, None, emit,
+                                greeting_pcm_fn=None, sync_audio=True,
+                                clock=AutoClock(), tick_s=0.01)
+
+        for k in list(os.environ):
+            if k.startswith("KIOSK_"):
+                monkeypatch.delenv(k)
+        client = TestClient(create_app(KioskConfig(), session_factory=factory))
+        with client.websocket_connect("/ws/voice") as ws:
+            ws.send_text(json.dumps({"type": "hello"}))
+            hello = json.loads(ws.receive_text())
+            assert hello["ok"] is True and hello["voice"] is False
+
+    def test_health_vad_field(self, monkeypatch):
+        client, _ = _voice_ws_client(monkeypatch, [], [])
+        body = client.get("/api/health").json()
+        assert body["vad"] == "not_initialized"        # 未探测过（假装配未走 services）

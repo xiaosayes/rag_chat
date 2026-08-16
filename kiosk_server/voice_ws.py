@@ -15,14 +15,14 @@ from fastapi import WebSocket, WebSocketDisconnect
 from src.config import settings
 
 from . import __version__, services
-from .chat import BroadcastSession
 from .config import KioskConfig
+from .voice import VoiceSession
 
 logger = logging.getLogger(__name__)
 
 
 def _default_session_factory(cfg: KioskConfig):
-    def make(emit) -> BroadcastSession:
+    def make(emit) -> VoiceSession:
         pipe = services.get_pipeline(cfg.project_id)
 
         def tts_factory():
@@ -32,8 +32,10 @@ def _default_session_factory(cfg: KioskConfig):
                 logger.warning("TTS 初始化失败（本轮纯文本）: %s", e)
                 return None
 
-        return BroadcastSession(
-            pipe, tts_factory, emit,
+        assistant = services.make_voice_assistant(cfg.project_id)   # None=降级纯手动
+        return VoiceSession(
+            pipe, tts_factory, assistant, emit,
+            greeting_pcm_fn=lambda: services.greeting_pcm(cfg.project_id),
             accum_chars=settings.tts_accum_chars,
             watchdog_s=settings.tts_stream_watchdog_seconds,
         )
@@ -85,8 +87,7 @@ def register_voice_ws(app, cfg: KioskConfig, session_factory=None) -> None:
                 if msg.get("type") == "websocket.disconnect":
                     break
                 if msg.get("bytes") is not None:
-                    out_q.put_nowait({"type": "error",
-                                      "code": "voice_uplink_not_ready"})
+                    session.feed_audio(msg["bytes"])   # web-011：PCM 上行→VAD/FSM/ASR
                     continue
                 try:
                     data = json.loads(msg.get("text") or "{}")
@@ -96,7 +97,8 @@ def register_voice_ws(app, cfg: KioskConfig, session_factory=None) -> None:
                 mtype = data.get("type")
                 if mtype == "hello":
                     out_q.put_nowait({"type": "hello", "ok": True,
-                                      "version": __version__})
+                                      "version": __version__,
+                                      "voice": session.voice_enabled})
                 elif mtype == "ping":
                     out_q.put_nowait({"type": "pong"})
                 elif mtype == "ask":

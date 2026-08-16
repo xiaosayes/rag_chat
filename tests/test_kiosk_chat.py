@@ -276,6 +276,7 @@ from fastapi.testclient import TestClient
 
 from kiosk_server.app import create_app
 from kiosk_server.config import KioskConfig
+from kiosk_server.voice import VoiceSession
 
 
 def _ws_client(monkeypatch, session_factory, **cfg_kwargs):
@@ -287,9 +288,11 @@ def _ws_client(monkeypatch, session_factory, **cfg_kwargs):
 
 
 def _factory(pipe, tts):
+    """M3 起 WS 会话为 VoiceSession；assistant=None 即纯手动模式（web-011）。"""
     def make(emit):
-        return BroadcastSession(pipe, lambda: tts, emit,
-                                clock=AutoClock(), tick_s=0.01)
+        return VoiceSession(pipe, lambda: tts, None, emit,
+                            greeting_pcm_fn=None, sync_audio=True,
+                            clock=AutoClock(), tick_s=0.01)
     return make
 
 
@@ -368,12 +371,13 @@ class TestVoiceWs:
         assert "playback_cancel" in types
         assert [e for e in events if e["type"] == "answer_end"][0]["cancelled"] is True
 
-    def test_binary_uplink_not_ready(self, monkeypatch):
+    def test_binary_uplink_voice_unavailable(self, monkeypatch):
+        # assistant=None（VAD 不可用）时 binary 上行 → voice_unavailable（web-011）
         c = _ws_client(monkeypatch, _factory(FakePipeline([]), None))
         with c.websocket_connect("/ws/voice") as ws:
             ws.send_bytes(b"\x00" * 320)
             ev = json.loads(ws.receive_text())
-            assert ev["type"] == "error" and ev["code"] == "voice_uplink_not_ready"
+            assert ev["type"] == "error" and ev["code"] == "voice_unavailable"
 
     def test_token_guard(self, monkeypatch):
         c = _ws_client(monkeypatch, _factory(FakePipeline([]), None), token="s3cret")

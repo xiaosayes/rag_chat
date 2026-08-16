@@ -59,11 +59,13 @@ def create_app(config: KioskConfig | None = None, ocr_client=None,
 
     @app.get("/api/health")
     def health():
-        # web-008：kb（懒加载探针，不触发加载）；tts=配置面可用性；vad 探针 M3 追加
+        # web-008：kb（懒加载探针，不触发加载）；tts=配置面可用性
+        # web-011：vad=语音探针（not_initialized/ready/unavailable:<原因>）
         return {"ok": True, "service": "kiosk_server", "version": __version__,
                 "kb": services.pipeline_status(),
                 "tts": bool(settings.tts_enabled and settings.dashscope_api_key
-                            and settings.tts_voice)}
+                            and settings.tts_voice),
+                "vad": services.voice_status()}
 
     @app.get("/api/config")
     def client_config():
