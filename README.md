@@ -61,6 +61,14 @@
   启动页（真实加载进度 + 条纹进度条 + 小鹿视频）、首页（3D 小鹿 STANDBY 动画池随机轮播、
   预设问题随机抽 8/换一批重抽、语音胶囊双态文案、隐藏系统菜单连点 3 次）。`vite build` 通过；
   `vite preview` 冒烟 index/model/img/font 全 200。前端 vitest 独立计数（10 项）。
+- **M5 聊天态（web-018~022）**：`VoiceWsClient`（hello/ask/barge_in/ping 30s 心跳/指数退避
+  重连 1s→2s→5s）、`PcmPlayer`（WebAudio 链式排播、0.25s 预缓冲、打断逐源即停）、
+  `capture.ts`（AudioWorklet + AEC 三件套，16k s16le 常开推流）、`useVoiceSession`
+  （事件→UI/播放器/小鹿联动；每轮 PCM 端侧缓存，重播零网络）、ChatPanel（鹿左用户右气泡 +
+  波形 loading + MusicBar 重播）、空闲计时（150s 回首页/300s 自刷新，可服务端配置覆盖）。
+  真实浏览器 E2E（`scripts/e2e_frontend_chat.py`）：预设点击 → 首字 @3.2s → 定稿 → MusicBar 挂载。
+  修复：reactive 数组元素需经代理回取持有（原对象直改不触发视图更新）。
+  前端 vitest 35 项（独立计数）。
 - 设计与计划：`docs/superpowers/specs|plans/2026-08-14-digital-human-frontend*`。
 
 ### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）

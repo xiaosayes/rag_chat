@@ -6,46 +6,95 @@
     <div class="panel">
       <img class="panel-bg" :src="'img/v2/content_bg.png'" />
       <div class="panel-inner">
-        <VoiceBar :recording="recording" @mic="onMic" @toggle-keyboard="onKeyboard" />
-        <div class="divider"><img :src="'img/v2/arrow_left.png'" /><i></i><img :src="'img/v2/arrow_right.png'" /></div>
-        <PresetPanel v-if="mode === 'home'" @select="onPreset" />
-        <div v-else class="chat-placeholder">
-          <p>聊天面板（M5 接入）</p>
-          <p class="pending-q" v-if="pendingQuestion">待提问：{{ pendingQuestion }}</p>
-          <button class="back" @click="mode = 'home'">返回</button>
+        <VoiceBar :recording="session.recording.value" @mic="onMic" @toggle-keyboard="onKeyboard" />
+        <div class="divider">
+          <img :src="'img/v2/arrow_left.png'" /><i></i><img :src="'img/v2/arrow_right.png'" />
         </div>
+        <PresetPanel v-if="mode === 'home'" @select="onPreset" />
+        <ChatPanel v-else :session="session" @back="onBack" />
       </div>
+    </div>
+    <div class="home-status" v-if="mode === 'home' && session.statusText.value">
+      {{ session.statusText.value }}
     </div>
     <SplashScreen :show="!store.modelReady" />
   </div>
 </template>
 
 <script lang="ts" setup>
-/** 首页（web-017）：1.1/1.2 设计稿——logo + 小鹿 + 羊皮纸面板（语音胶囊 + 预设）。
- *  M4 范围：聊天态仅占位（M5 接入 WS 全链）。 */
+/** 首页（web-021）：单页双态（home/chat）；WS 语音会话全链接入。 */
 import { onMounted, ref } from "vue";
+import ChatPanel from "../components/ChatPanel.vue";
 import DeerAvatar from "../components/DeerAvatar.vue";
 import PresetPanel from "../components/PresetPanel.vue";
 import SplashScreen from "../components/SplashScreen.vue";
 import SysMenu from "../components/SysMenu.vue";
 import VoiceBar from "../components/VoiceBar.vue";
+import { startCapture, type CaptureHandle } from "../audio/capture";
+import { useIdleTimer } from "../voice/useIdleTimer";
+import { useVoiceSession } from "../voice/useVoiceSession";
 import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
-const deer = ref();
+const deer = ref<InstanceType<typeof DeerAvatar>>();
 const mode = ref<"home" | "chat">("home");
-const recording = ref(false);
-const pendingQuestion = ref("");
+const capturing = ref(false);
+let capture: CaptureHandle | null = null;
+
+const idle = useIdleTimer({
+  homeAfterS: () => store.homeAfterS,
+  refreshAfterS: () => store.refreshAfterS,
+  onHome: () => {
+    if (mode.value === "chat") {
+      session.resetChat();
+      mode.value = "home";
+    }
+  },
+});
+
+const session = useVoiceSession({
+  onTalkChange: (talking) => {
+    if (talking) deer.value?.playTalk();
+    else deer.value?.playStandby();
+  },
+  onActivity: () => idle.reset(),
+  onClose: () => { session.statusText.value = "连接已断开，重连中…"; },
+});
 
 function onMic() {
-  recording.value = !recording.value;   // M5 接 WS 语音全链
+  if (!session.voiceReady.value) session.connect();
+  if (capturing.value) {
+    capture?.stop();
+    capture = null;
+    capturing.value = false;
+    session.setRecording(false);
+    return;
+  }
+  // 常开推流（FSM 计时靠帧驱动——M3 内核契约）
+  startCapture((pcm) => session.client.sendAudio(pcm))
+    .then((h) => {
+      capture = h;
+      capturing.value = true;
+      session.setRecording(true);
+      mode.value = "chat";
+    })
+    .catch(() => {
+      session.statusText.value = "麦克风不可用，请检查设备";
+    });
 }
+
 function onKeyboard() {
   /* M6：键盘/手写输入 */
 }
+
 function onPreset(q: string) {
-  pendingQuestion.value = q;
+  if (!session.voiceReady.value) session.connect();
   mode.value = "chat";
+  session.askText(q);
+}
+
+function onBack() {
+  mode.value = "home";
 }
 
 onMounted(() => {
@@ -53,6 +102,7 @@ onMounted(() => {
   document.addEventListener("touchmove", (e) => {
     if (e.touches.length > 1) e.preventDefault();
   }, { passive: false });
+  session.connect();   // 提前建连（语音助手待机收音由 mic 开启驱动）
 });
 </script>
 
@@ -91,6 +141,7 @@ onMounted(() => {
       position: relative;
       z-index: 1;
       width: 100%;
+      height: 100%;
       padding-top: 3.2vh;
       display: flex;
       flex-direction: column;
@@ -109,19 +160,17 @@ onMounted(() => {
       }
       img { height: 1.6vh; opacity: 0.7; }
     }
-    .chat-placeholder {
-      padding: 6vh 4vh;
-      font-size: 32px;
-      color: #6d5a42;
-      text-align: center;
-      .back {
-        margin-top: 3vh;
-        font-size: 30px;
-        padding: 1vh 4vh;
-        border-radius: 2vh;
-        border: 1px solid #c9b890;
-      }
-    }
+  }
+  .home-status {
+    position: absolute;
+    bottom: 52.5vh;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 26px;
+    color: #fff;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    z-index: 3;
   }
 }
 </style>
