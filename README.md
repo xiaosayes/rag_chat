@@ -45,6 +45,16 @@
   看门狗 15s 重建 ≤2 次；打断即停喂停发跳过收尾；多轮历史 4 轮。重播为**端侧 PCM 缓存**
   （零网络往返，参考工程既有模式）。真实 API 冒烟（`scripts/smoke_kiosk_ws.py`）：
   FAQ 快路径首文本 0.05s/首音频 0.62s；检索路径首文本 1.79s/首音频 2.37s（防幻觉拒答正常）。
+- **M3 语音全链（web-009~012）**：`kiosk_server/voice.py` VoiceSession——PCM 上行 →
+  服务端 StreamVAD → VoiceAssistant 四态 FSM → 讯飞 ASR（wpgs 流式上屏）→ 双计时自动提交进
+  BroadcastSession；唤醒应答 PCM 经同一通道播报（内存+磁盘缓存，文本改动自动重合成）；
+  播报事件驱动 FSM notify_broadcast 生命周期（播报中 ≥400ms 语音即打断）；assistant 不可用
+  时降级纯手动（`hello.voice=false`）。纠词典补湘小图误识别条目（`像小图/像小徒/乡小徒/像小偷
+  →湘小图`，实测讯飞将合成「你好湘小图」识别为「你好像小图」）。真实 API 全链冒烟
+  （`scripts/smoke_kiosk_voice.py`，夹具 CosyVoice 现场合成）：唤醒命中 @2.1s → 应答播报 →
+  倾听态 → wpgs 上屏 → 2s 静默自动提交「家博会几点开门？」→ 回答 80 字 + 播报 14.8s。
+  **已知内核契约**：FSM 双计时由上行帧驱动（无帧不计时）——客户端须常开推流（一体机常开麦天然满足）；
+  FSM 个别状态文案硬编码「小虎」（冻结内核，词面问题不影响功能）。
 - 设计与计划：`docs/superpowers/specs|plans/2026-08-14-digital-human-frontend*`。
 
 ### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）
