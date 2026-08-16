@@ -77,9 +77,133 @@ def make_tts():
 
 
 def _reset_cache() -> None:
-    """测试/关停用：清空单例缓存。"""
+    """测试/关停用：清空单例缓存与语音探针状态。"""
     global _pipeline, _pipeline_project, _pipeline_status
+    global _voice_init_error, _voice_probed
     with _lock:
         _pipeline = None
         _pipeline_project = ""
         _pipeline_status = "not_loaded"
+        _voice_init_error = ""
+        _voice_probed = False
+        _greeting_mem.clear()
+
+
+# ============ web-009：语音助手装配 + 应答语缓存 ============
+
+_voice_init_error = ""
+_voice_probed = False
+
+
+def make_voice_assistant(project_id: str = ""):
+    """仿 app.py _create_voice_assistant：VAD 不可用 → None（降级不崩，原因落日志）。"""
+    global _voice_init_error, _voice_probed
+    try:
+        assistant = _load_voice_assistant(project_id)
+    except Exception as e:
+        _voice_init_error = (str(e) or type(e).__name__)[:150]
+        _voice_probed = True
+        logger.warning("VAD/语音助手初始化失败（语音模式不可用）: %s", e)
+        return None
+    _voice_init_error = ""
+    _voice_probed = True
+    return assistant
+
+
+def _load_voice_assistant(project_id: str = ""):
+    """真实装配路径（测试 monkeypatch 此函数注入假 FSM）。"""
+    from src.asr import IflytekASR, load_dict
+    from src.vad import create_vad
+    from src.voice_assistant import VoiceAssistant, make_corrector
+
+    vad = create_vad(
+        model_path=settings.silero_vad_model_path, threshold=settings.vad_threshold,
+        min_speech_ms=settings.vad_min_speech_ms,
+        min_silence_ms=settings.vad_min_silence_ms,
+        pad_ms=settings.vad_speech_pad_ms, max_speech_s=settings.vad_max_speech_s,
+        sample_rate=settings.asr_sample_rate)
+    cfg = load_dict(project_id, settings.asr_dict_dir)
+    wake_words = cfg.get("wake_words") or [
+        w.strip() for w in settings.asr_wake_words.split(",") if w.strip()]
+
+    def asr_factory():
+        # 纠错由 FSM 的 correct_fn 统一施加（先归一后纠错，唤醒匹配容错）
+        return IflytekASR(
+            settings.xfyun_app_id, settings.xfyun_api_key, settings.xfyun_api_secret,
+            language=settings.asr_language, accent=settings.asr_accent,
+            vad_eos_ms=settings.asr_vad_eos, hotwords=cfg["hotwords"])
+
+    return VoiceAssistant(
+        vad, asr_factory, wake_words=wake_words,
+        correct_fn=make_corrector(cfg["corrections"]),
+        initial_wait_s=settings.asr_initial_wait_s,
+        extend_wait_s=settings.asr_extend_wait_s,
+        greeting=cfg.get("wake_greeting") or settings.asr_wake_greeting)
+
+
+def voice_status() -> str:
+    """健康探针：not_initialized / ready / unavailable:<原因>。"""
+    if not _voice_probed:
+        return "not_initialized"
+    return "ready" if not _voice_init_error else f"unavailable:{_voice_init_error}"
+
+
+_greeting_mem: dict = {}
+
+
+def greeting_pcm(project_id: str = ""):
+    """唤醒应答语 PCM（24k mono s16le）：首次合成，内存+磁盘缓存复用（零合成延迟）。
+
+    移植自 app.py _greeting_pcm（audit-ASR 优化轮3，冻结不可改）：缓存键含
+    model|voice|rate|text —— 应答语改动自动重合成，无需手工清缓存。
+    失败返回 None（降级：无音频，状态行仍可见）。
+    """
+    import hashlib
+    import io
+    import wave
+
+    from src.asr import load_dict
+
+    cfg = load_dict(project_id, settings.asr_dict_dir)
+    text = cfg.get("wake_greeting") or settings.asr_wake_greeting
+    key = hashlib.sha1(
+        f"{settings.tts_model}|{settings.tts_voice}|{settings.tts_speech_rate}|{text}"
+        .encode("utf-8")).hexdigest()[:12]
+    if key in _greeting_mem:
+        return _greeting_mem[key]
+    cache_dir = settings.project_root / "data" / "processed" / "tts_cache"
+    path = cache_dir / f"greeting_{key}.wav"
+    try:
+        if path.exists():
+            wav_bytes = path.read_bytes()
+        else:
+            tts = make_tts()
+            if tts is None:
+                return None
+            wav_bytes = tts.synthesize_sentence(text)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(wav_bytes)
+            logger.info("唤醒应答已合成并缓存: %s（%s）", path.name, text)
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            pcm = w.readframes(w.getnframes())
+        _greeting_mem[key] = pcm
+        return pcm
+    except Exception as e:
+        logger.warning("唤醒应答合成/读取失败（降级无音频）: %s", e)
+        return None
+
+
+def prewarm_voice(project_id: str = "") -> None:
+    """后台预热（仅 __main__ 生产入口调用；create_app 不触发，测试零副作用）。"""
+    def _warm():
+        try:
+            make_voice_assistant(project_id)   # VAD 探针（失败原因进 voice_status）
+        except Exception:
+            pass
+        try:
+            pcm = greeting_pcm(project_id)
+            logger.info("唤醒应答预热: %s", f"{len(pcm) / 48000:.1f}s" if pcm else "未就绪")
+        except Exception as e:
+            logger.warning("唤醒应答预热失败: %s", e)
+
+    threading.Thread(target=_warm, daemon=True).start()
