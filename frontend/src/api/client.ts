@@ -31,8 +31,28 @@ async function getJson<T>(path: string, timeoutMs = 8000): Promise<T> {
   }
 }
 
+async function postJson<T>(path: string, body: unknown, timeoutMs = 15000): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return (await resp.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const api = {
   health: () => getJson<Health>("/api/health"),
   config: () => getJson<KioskConfig>("/api/config"),
   presets: () => getJson<{ questions: string[] }>("/api/presets"),
+  /** 手写 OCR（web-023）：画布 PNG base64 → 文本；失败抛错 */
+  ocr: (imageBase64: string) =>
+    postJson<{ text: string }>("/api/ocr", { image_base64: imageBase64 }),
 };

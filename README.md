@@ -69,6 +69,10 @@
   真实浏览器 E2E（`scripts/e2e_frontend_chat.py`）：预设点击 → 首字 @3.2s → 定稿 → MusicBar 挂载。
   修复：reactive 数组元素需经代理回取持有（原对象直改不触发视图更新）。
   前端 vitest 35 项（独立计数）。
+- **M6 键盘手写（web-023/024）**：全拼键盘（simple-keyboard chinese 布局：候选条点选上屏、
+  Aa 大小写、手写/空格/退格/完成底排）+ 手写板（signature_pad，停笔 2s 自动 → `/api/ocr`
+  百炼 qwen-vl-ocr，密钥仅服务端；识别字追加、失败不清画布）。真实 OCR 冒烟：生成「你好」
+  图像 → `/api/ocr` 返回「你好」。前端 vitest 43 项（独立计数）。
 - 设计与计划：`docs/superpowers/specs|plans/2026-08-14-digital-human-frontend*`。
 
 ### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）

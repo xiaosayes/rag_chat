@@ -6,12 +6,14 @@
     <div class="panel">
       <img class="panel-bg" :src="'img/v2/content_bg.png'" />
       <div class="panel-inner">
-        <VoiceBar :recording="session.recording.value" @mic="onMic" @toggle-keyboard="onKeyboard" />
+        <VoiceBar v-if="inputMode === 'voice'" :recording="session.recording.value"
+                  @mic="onMic" @toggle-keyboard="inputMode = 'keyboard'" />
+        <KeyboardInput v-else @toggle-voice="inputMode = 'voice'" @send="onTypedSend" />
         <div class="divider">
           <img :src="'img/v2/arrow_left.png'" /><i></i><img :src="'img/v2/arrow_right.png'" />
         </div>
-        <PresetPanel v-if="mode === 'home'" @select="onPreset" />
-        <ChatPanel v-else :session="session" @back="onBack" />
+        <PresetPanel v-if="mode === 'home' && inputMode === 'voice'" @select="onPreset" />
+        <ChatPanel v-if="mode === 'chat'" :session="session" @back="onBack" />
       </div>
     </div>
     <div class="home-status" v-if="mode === 'home' && session.statusText.value">
@@ -29,6 +31,7 @@ import DeerAvatar from "../components/DeerAvatar.vue";
 import PresetPanel from "../components/PresetPanel.vue";
 import SplashScreen from "../components/SplashScreen.vue";
 import SysMenu from "../components/SysMenu.vue";
+import KeyboardInput from "../components/KeyboardInput.vue";
 import VoiceBar from "../components/VoiceBar.vue";
 import { startCapture, type CaptureHandle } from "../audio/capture";
 import { useIdleTimer } from "../voice/useIdleTimer";
@@ -38,6 +41,7 @@ import { useAppStore } from "../stores/app";
 const store = useAppStore();
 const deer = ref<InstanceType<typeof DeerAvatar>>();
 const mode = ref<"home" | "chat">("home");
+const inputMode = ref<"voice" | "keyboard">("voice");
 const capturing = ref(false);
 let capture: CaptureHandle | null = null;
 
@@ -83,11 +87,13 @@ function onMic() {
     });
 }
 
-function onKeyboard() {
-  /* M6：键盘/手写输入 */
+function onPreset(q: string) {
+  if (!session.voiceReady.value) session.connect();
+  mode.value = "chat";
+  session.askText(q);
 }
 
-function onPreset(q: string) {
+function onTypedSend(q: string) {
   if (!session.voiceReady.value) session.connect();
   mode.value = "chat";
   session.askText(q);
