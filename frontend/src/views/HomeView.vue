@@ -7,6 +7,7 @@
       <img class="panel-bg" :src="'img/v2/content_bg.png'" />
       <div class="panel-inner">
         <VoiceBar v-if="inputMode === 'voice'" :recording="session.recording.value"
+                  :interruptible="session.mode.value === 'broadcast'"
                   @mic="onMic" @toggle-keyboard="inputMode = 'keyboard'" />
         <KeyboardInput v-else @toggle-voice="inputMode = 'voice'" @send="onTypedSend" />
         <div class="divider">
@@ -33,7 +34,7 @@ import SplashScreen from "../components/SplashScreen.vue";
 import SysMenu from "../components/SysMenu.vue";
 import KeyboardInput from "../components/KeyboardInput.vue";
 import VoiceBar from "../components/VoiceBar.vue";
-import { startCapture, type CaptureHandle } from "../audio/capture";
+import { useHandsfree } from "../voice/useHandsfree";
 import { useIdleTimer } from "../voice/useIdleTimer";
 import { useVoiceSession } from "../voice/useVoiceSession";
 import { useAppStore } from "../stores/app";
@@ -42,8 +43,6 @@ const store = useAppStore();
 const deer = ref<InstanceType<typeof DeerAvatar>>();
 const mode = ref<"home" | "chat">("home");
 const inputMode = ref<"voice" | "keyboard">("voice");
-const capturing = ref(false);
-let capture: CaptureHandle | null = null;
 
 const idle = useIdleTimer({
   homeAfterS: () => store.homeAfterS,
@@ -65,26 +64,24 @@ const session = useVoiceSession({
   onClose: () => { session.statusText.value = "连接已断开，重连中…"; },
 });
 
+// 免提闭环（web-025）：模型就绪自动开麦常开推流；失败降级手动
+const handsfree = useHandsfree({
+  session,
+  modelReady: () => store.modelReady,
+  onError: (msg) => { session.statusText.value = msg; },
+});
+
 function onMic() {
-  if (!session.voiceReady.value) session.connect();
-  if (capturing.value) {
-    capture?.stop();
-    capture = null;
-    capturing.value = false;
-    session.setRecording(false);
+  // 播报中：胶囊=打断钮（1.4 设计稿可打断语义）
+  if (session.mode.value === "broadcast") {
+    session.barge();
     return;
   }
-  // 常开推流（FSM 计时靠帧驱动——M3 内核契约）
-  startCapture((pcm) => session.client.sendAudio(pcm))
-    .then((h) => {
-      capture = h;
-      capturing.value = true;
-      session.setRecording(true);
-      mode.value = "chat";
-    })
-    .catch(() => {
-      session.statusText.value = "麦克风不可用，请检查设备";
-    });
+  if (handsfree.capturing.value) {
+    handsfree.stop();
+    return;
+  }
+  void handsfree.start();
 }
 
 function onPreset(q: string) {

@@ -12,7 +12,8 @@
               <MusicBar v-if="item.pcm?.length" :durationS="item.durationS ?? 0"
                         :currentS="replayState.k === k ? replayState.s : 0"
                         :playing="replayState.k === k && replayState.playing"
-                        @toggle="onReplayToggle(k, item)" />
+                        @toggle="onReplayToggle(k, item)"
+                        @seek="(s: number) => onSeek(k, item, s)" />
               <p class="text">{{ item.text }}</p>
             </template>
           </div>
@@ -47,18 +48,25 @@ function onReplayToggle(k: number, item: ChatItem) {
     stopReplayTracker();
     return;
   }
-  const dur = props.session.replay(item);
-  if (dur > 0) {
-    replayState.k = k;
-    replayState.s = 0;
-    replayState.playing = true;
-    const t0 = Date.now();
-    clearInterval(replayTimer);
-    replayTimer = window.setInterval(() => {
-      replayState.s = (Date.now() - t0) / 1000;
-      if (replayState.s >= dur) stopReplayTracker();
-    }, 200);
-  }
+  startReplay(k, item, 0);
+}
+
+function onSeek(k: number, item: ChatItem, targetS: number) {
+  startReplay(k, item, targetS);     // web-026：拖拽/点击 seek（整帧粒度）
+}
+
+function startReplay(k: number, item: ChatItem, fromS: number) {
+  const dur = props.session.replay(item, fromS);
+  if (dur <= 0) return;
+  replayState.k = k;
+  replayState.s = fromS;
+  replayState.playing = true;
+  const t0 = Date.now();
+  clearInterval(replayTimer);
+  replayTimer = window.setInterval(() => {
+    replayState.s = fromS + (Date.now() - t0) / 1000;
+    if (replayState.s >= fromS + dur) stopReplayTracker();
+  }, 200);
 }
 
 function stopReplayTracker() {

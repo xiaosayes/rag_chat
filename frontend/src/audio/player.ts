@@ -8,6 +8,8 @@ export class PcmPlayer {
   private sources = new Set<AudioBufferSourceNode>();
   private nextStart = 0;
   private stopped = true;
+  private scheduleStartAt = 0;   // 本轮排播起点（音频时钟）
+  private scheduledTotalS = 0;   // 本轮已排播总时长
   onEnded: (() => void) | null = null;
 
   constructor(private sampleRate = 24000, private prebufferS = 0.25,
@@ -28,7 +30,18 @@ export class PcmPlayer {
 
   start() {
     this.stopped = false;
+    this.scheduleStartAt = 0;
+    this.scheduledTotalS = 0;
     void this.ctx.resume();
+  }
+
+  /** 当前播放头位置（秒，相对本轮 start）——MusicBar 进度（web-026） */
+  get positionS(): number {
+    if (!this.scheduleStartAt) return 0;
+    return Math.min(
+      Math.max(0, this.ctx.currentTime - this.scheduleStartAt),
+      this.scheduledTotalS,
+    );
   }
 
   /** 喂入一帧 PCM（s16le）。 */
@@ -43,8 +56,10 @@ export class PcmPlayer {
     src.connect(this.ctx.destination);
     const now = this.ctx.currentTime;
     const startAt = Math.max(this.nextStart, now + this.prebufferS);
+    if (!this.scheduleStartAt) this.scheduleStartAt = startAt;
     src.start(startAt);
     this.nextStart = startAt + samples.length / this.sampleRate;
+    this.scheduledTotalS += samples.length / this.sampleRate;
     this.sources.add(src);
     src.onended = () => {
       this.sources.delete(src);
@@ -67,5 +82,7 @@ export class PcmPlayer {
     }
     this.sources.clear();
     this.nextStart = 0;
+    this.scheduleStartAt = 0;
+    this.scheduledTotalS = 0;
   }
 }

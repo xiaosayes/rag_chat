@@ -144,14 +144,22 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
     client.bargeIn();
   }
 
-  /** 端侧重播（零网络）：player 直接排播缓存 PCM */
-  function replay(item: ChatItem) {
+  /** 端侧重播（零网络）：player 直接排播缓存 PCM；fromS 偏移按整帧粒度丢弃前缀（web-026） */
+  function replay(item: ChatItem, fromS = 0) {
     if (!item.pcm?.length) return 0;
     player.stop();
     player.start();
-    for (const buf of item.pcm) player.push(buf.slice(0));
+    let skipped = 0;
+    for (const buf of item.pcm) {
+      const dur = buf.byteLength / 2 / 24000;
+      if (skipped + dur <= fromS) {          // 整帧落在偏移前 → 丢弃
+        skipped += dur;
+        continue;
+      }
+      player.push(buf.slice(0));
+    }
     deps.onTalkChange?.(true);
-    return item.durationS ?? 0;
+    return Math.max(0, (item.durationS ?? 0) - skipped);
   }
 
   function resetChat() {

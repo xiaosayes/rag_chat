@@ -460,3 +460,46 @@ E2E：`scripts/e2e_assist_loop.py`（全链路：自动录音→自动提交干�
 - 远程：origin = 本地 Gitea（localhost:3000）；github 远程受网络限制未同步
 - 全量测试：**637 passed, 0 failed**（全离线）；真实 API 冒烟/E2E 脚本见 scripts/
 - 下一阶段：竖屏一体机前端开发（依据《数字人一体机落地方案》），内核零改动只加薄层
+
+---
+
+## 十一、第十五轮：数字人前端与服务端薄层（feat(web)，2026-08-14~16）
+
+**范围**：全新数字人前端（竖屏一体机/大屏，Vue3+Vite+TS+three 0.154）+ 服务端薄层
+`kiosk_server/`（FastAPI，:7861，全部新增文件；`src/`、`app.py` 冻结零改动）。
+设计/计划：`docs/superpowers/specs|plans/2026-08-14-*`；部署：`deploy/README.md`。
+
+### 架构事实（以此为准）
+
+- 单通道 `WS /ws/voice`：PCM 上行（16k）→ VAD/FSM/ASR → query_stream → CosyVoice 单会话流式
+  → PCM s16le 24k 直推 → 前端 WebAudio 链式排播（弃 HLS/AAC——首播 0.62s 实测，打断=前端清队列）。
+- REST：`/api/health|config|presets|ocr`；token 可选（WS 走 query 参数，浏览器 WS 无自定义头）。
+- 重播为端侧 PCM 缓存（参考工程既有模式，零网络往返）；多轮历史 4 轮挂 WS 会话。
+- persona=湘小图（`.env ASR_WAKE_WORDS/ASR_WAKE_GREETING` 覆盖，零代码）；纠词典补
+  `像小图/像小徒/乡小徒/像小偷→湘小图`（实测讯飞把合成「你好湘小图」识别为「你好像小图」）。
+
+### 本轮自发现并已修复（测试固化）
+
+1. **薄层收尾期打断后 audio_end 误发**（else 分支落空缺陷）→ 打断不再发 audio_end/留存重播（web-007）。
+2. **Vue reactive 数组元素持有原对象导致视图不更新**（聊天流式文字不刷新）→ 回取代 agent 持有（web-021）。
+3. **测试未隔离本地 .env**（部署配置唤醒词致 637 基线红）→ `Settings(_env_file=None)`，断言意图不变（web-005）。
+4. simple-keyboard 首挂不渲染（watch 非 immediate）；测试假件跨实例共享监听器；`VoiceWsClient.connect` 重入风险（幂等守卫）。
+
+### 实证记录（真实 API/真实浏览器）
+
+- 服务端全链：FAQ 路径首文本 0.05s/首音频 0.62s；检索路径 1.79s/2.37s；语音全链
+  唤醒@2.1s→应答→wpgs 上屏→2s 静默自动提交→回答+播报（`scripts/smoke_kiosk_ws|voice.py`）。
+- 前端 E2E：预设点击→首字 @3.2s→定稿→MusicBar 挂载（`scripts/e2e_frontend_chat.py`）；
+  免提自动开麦+推流+FSM 待机活跃（`scripts/e2e_frontend_voice.py`）。
+- 手写 OCR 真实识别：qwen-vl-ocr-latest 正确识别「你好」测试图。
+
+### 残余风险与监控
+
+- **Chrome fake-file 音频注入在当前 Chromium 无效**（mic RMS 静音底实证）——浏览器内容级语音
+  E2E 暂以服务端冒烟为准，现场验收清单（deploy/README.md §4）兜底。
+- **Qdrant 文件锁互斥**：kiosk_server 与 Gradio 不能同时在线（运维手册已写）；远程模式可选增强。
+- FSM 个别状态文案硬编码「小虎」（冻结内核词面问题，功能无影响）。
+- AEC 在真实麦克风阵列+外放一体机上的残余回串待现场验证（双保险已就位：浏览器 AEC + 播报期不送 ASR）。
+- PCM 带宽 48KB/s/路（局域网无感；公网多机并发需再评估，协议 format 字段可演进 AAC）。
+- 免提常开收音的浏览器进程长期稳定性（720h 无人值守）待现场 soak；已有 300s 空闲自刷新兜底。
+- **测试**：pytest **692 passed**（637 基线 + 55 薄层新增，全离线）；前端 vitest **47 passed**（独立计数）。

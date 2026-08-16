@@ -14,7 +14,10 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useAppStore } from "../stores/app";
 
-const props = defineProps<{ recording?: boolean }>();
+const props = withDefaults(defineProps<{
+  recording?: boolean;
+  interruptible?: boolean;   // 播报中：胶囊变打断按钮
+}>(), { recording: false, interruptible: false });
 defineEmits(["mic", "toggle-keyboard"]);
 const store = useAppStore();
 
@@ -32,8 +35,10 @@ onMounted(() => {
   }, 5000);
 });
 onBeforeUnmount(() => clearInterval(timer));
-const label = computed(() =>
-  props.recording ? "正在录入语音..." : labels.value[labelIndex.value]);
+const label = computed(() => {
+  if (props.interruptible) return "说话或点按可打断";   // 1.4 播报中可打断
+  return props.recording ? "正在录入语音..." : labels.value[labelIndex.value];
+});
 </script>
 
 <style lang="scss" scoped>

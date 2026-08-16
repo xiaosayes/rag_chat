@@ -60,6 +60,8 @@ export class VoiceWsClient {
   }
 
   connect(): void {
+    // 幂等：已有连接（连接中/已开）不重复建连（web-025 免提自动开麦后手动路径可重入）
+    if (this.ws && this.ws.readyState < 2) return;
     this.intentionalClose = false;
     const factory = this.opts.wsFactory ?? defaultFactory;
     const ws = factory(this.url);

@@ -1,6 +1,6 @@
 <template>
   <div class="music-bar">
-    <div class="bar-list">
+    <div class="bar-list" ref="barListEl" @click.stop.prevent="onSeek">
       <div v-for="(bar, i) in bars" :key="i"
            :class="['bar', { finished: i < playedBars }]"
            :style="{ height: bar.height + 'vh', animationDuration: bar.duration + 's' }"></div>
@@ -21,7 +21,16 @@ const props = withDefaults(defineProps<{
   currentS: number;
   playing: boolean;
 }>(), { durationS: 0, currentS: 0, playing: false });
-defineEmits(["toggle"]);
+const emit = defineEmits(["toggle", "seek"]);
+const barListEl = ref<HTMLDivElement>();
+
+function onSeek(e: MouseEvent) {
+  const el = barListEl.value;
+  if (!el || props.durationS <= 0) return;
+  const rect = el.getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  emit("seek", ratio * props.durationS);   // 目标秒数
+}
 
 const BAR_COUNT = 32;
 const bars = ref<{ height: number; duration: number }[]>([]);
