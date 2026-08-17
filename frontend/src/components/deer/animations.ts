@@ -44,3 +44,33 @@ export function pickNext(pool: PoolName, current: string | undefined,
   const candidates = ACTION_POOLS[pool].filter((n) => n !== current);
   return candidates[Math.floor(rand() * candidates.length)];
 }
+
+/** 主题点缀动作映射（web-039）：回答内容 → 点缀动作（高置信、保守收敛）。
+ *  scope：q=看用户问题（用户意图类）；a=看小鹿回答（应答状态类）；qa=两者。
+ *  deny 先于关键词判定（否定语境过滤）。未命中 undefined = 维持现有随机池
+ * （用户确认的「无匹配则随机组合播放」兑底）。 */
+export interface ThemeRule {
+  action: string;
+  scope: "q" | "a" | "qa";
+  keywords: string[];
+  deny?: string[];
+}
+
+export const THEME_RULES: readonly ThemeRule[] = Object.freeze([
+  { action: ANIMATION.ZUOSHOUHUISHOU, scope: "qa", keywords: ["再见", "拜拜"] },
+  { action: ANIMATION.SHUANGSHOUBIXIN, scope: "q", keywords: ["谢谢", "感谢"],
+    deny: ["不用谢", "不谢"] },
+  { action: ANIMATION.YIHUO, scope: "a",
+    keywords: ["抱歉", "暂时没有", "没能找到", "不太确定"] },
+  { action: ANIMATION.TIAOQIZHUANQUAN, scope: "qa", keywords: ["恭喜", "太好了", "棒极了"] },
+]);
+
+export function matchAccentAction(question: string, answer: string = ""): string | undefined {
+  for (const r of THEME_RULES) {
+    const hay = r.scope === "q" ? question : r.scope === "a" ? answer : `${question} ${answer}`;
+    if (!hay) continue;
+    if (r.deny?.some((d) => hay.includes(d))) continue;
+    if (r.keywords.some((k) => hay.includes(k))) return r.action;
+  }
+  return undefined;
+}

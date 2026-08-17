@@ -23,6 +23,29 @@ function makeDeps() {
 const PCM = (n: number) => new Int16Array(n).buffer;
 
 describe("useVoiceSession", () => {
+  it("主题点缀动作（web-039）：greet 挥手；首 chunk 命中主题发一次", () => {
+    const fired: string[] = [];
+    const session = useVoiceSession({
+      client: { connect: vi.fn(), ask: vi.fn(), bargeIn: vi.fn(), close: vi.fn() } as any,
+      player: { start: vi.fn(), push: vi.fn(), stop: vi.fn() } as any,
+      onAction: (n) => fired.push(n),
+    });
+    session.onEvent({ type: "greet" });
+    expect(fired).toEqual(["zuoshouhuishou"]);                 // 唤醒应答挥手
+    session.askText("谢谢你的解答");
+    session.onEvent({ type: "answer_start", turn: 2 });
+    session.onEvent({ type: "answer_chunk", turn: 2, text: "不客气，" });
+    expect(fired).toHaveLength(2);                             // 问题含「谢谢」→ 比心
+    expect(fired[1]).toBe("shuangshoubixin");
+    session.onEvent({ type: "answer_chunk", turn: 2, text: "随时问我。" });
+    expect(fired).toHaveLength(2);                             // 一轮只发一次
+    session.onEvent({ type: "answer_end", turn: 2, full_text: "", cancelled: false });
+    session.askText("家博会几点开门");
+    session.onEvent({ type: "answer_start", turn: 3 });
+    session.onEvent({ type: "answer_chunk", turn: 3, text: "九点开门。" });
+    expect(fired).toHaveLength(2);                             // 无命中不发（随机池兜底）
+  });
+
   it("speaking 标志（web-035）：partial 置位，answer_start/聆听态复位", () => {
     const { session } = makeDeps();
     expect(session.speaking.value).toBe(false);

@@ -55,6 +55,7 @@ const session = useVoiceSession({
     if (talking) deer.value?.playTalk();
     else deer.value?.playStandby();
   },
+  onAction: (name) => deer.value?.playAccent(name),   // web-039 主题点缀动作
   onActivity: () => idle.reset(),
   onClose: () => { session.statusText.value = "连接已断开，重连中…"; },
 });

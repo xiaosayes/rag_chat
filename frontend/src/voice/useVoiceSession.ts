@@ -2,6 +2,7 @@
  *  每轮 PCM 端侧缓存（重播零网络）；greeting 音频不入轮缓存。 */
 import { reactive, ref } from "vue";
 import { PcmPlayer } from "../audio/player";
+import { matchAccentAction } from "../components/deer/animations";
 import { VoiceWsClient } from "./VoiceWsClient";
 
 export interface ChatItem {
@@ -18,6 +19,7 @@ export interface VoiceSessionDeps {
   client?: VoiceWsClient;                     // 缺省自建（测试注入假件）
   player?: PcmPlayer;                         // 缺省自建（测试注入假件）
   onTalkChange?: (talking: boolean) => void;   // 小鹿 TALK/STANDBY
+  onAction?: (name: string) => void;           // 小鹿主题点缀动作（web-039）
   onActivity?: () => void;                     // 服务端活动（空闲计时复位）
   onClose?: () => void;
 }
@@ -33,6 +35,7 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
   /** 当前收集中的轮次 PCM 缓存 */
   let collecting: ArrayBuffer[] | null = null;
   let currentDeer: ChatItem | null = null;
+  let accentPending = false;                   // web-039：每轮主题点缀只发一次
 
   function lastMe(): ChatItem | null {
     const last = chatHistory[chatHistory.length - 1];
@@ -60,9 +63,11 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
         break;
       }
       case "greet":
+        deps.onAction?.("zuoshouhuishou");   // 唤醒应答挥手（web-039）
         break;                    // 应答语走音频流 + 状态行（不写对话框，对齐后端语义）
       case "answer_start":
         speaking.value = false;  // 进入作答（web-035）
+        accentPending = true;    // web-039：新一轮，待首 chunk 判定主题
         // 推入后回取 reactive 代理再持有——直接改原对象不触发视图更新（web-021 实测）
         chatHistory.push({ type: "deer", text: "", status: 0 });
         currentDeer = chatHistory[chatHistory.length - 1];
@@ -71,6 +76,13 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
         if (currentDeer) {
           currentDeer.status = 1;
           currentDeer.text += ev.text;
+          if (accentPending) {           // web-039：首 chunk 判定主题点缀（本地匹配，零延迟）
+            accentPending = false;
+            // 最近一条用户提问（lastMe 仅看队尾，此处倒序找最近 me）
+            const q = [...chatHistory].reverse().find((i) => i.type === "me")?.text ?? "";
+            const theme = matchAccentAction(q, currentDeer.text);
+            if (theme) deps.onAction?.(theme);
+          }
         }
         break;
       case "audio_start":

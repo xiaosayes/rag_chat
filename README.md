@@ -81,6 +81,14 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **主题点缀动作（web-039，用户确认需求）**：数字人根据回答内容做相应动作——
+  纯前端本地实现（零延迟/零后端改动）：`THEME_RULES` 规则表（问题/答案分域 +
+  否定语境过滤，高置信收敛：再见→挥手、感谢→比心、抱歉/没找到→疑惑、恭喜→跳起转圈），
+  唤醒应答固定挥手；未命中维持现有随机池（=随机组合播放）。`useVoiceSession` 在 greet /
+  首 chunk 时本地匹配（微秒级）发一次 `onAction`；`DeerAvatar.playAccent` 单次播放 +
+  双向 0.4s 叠化 + **提前一个叠化时长起回切**（尾帧与池动作淡入重叠，验收标准：衔接自然无停顿）。
+  证据：playAccent 探针实测点火 shuangshoubixin + 峰值截图 + 26 帧连续抓帧零冻结；
+  vitest +6（映射/分域/否定过滤/轮次只发一次）。
 - **聊天区布局修正（web-038，用户反馈）**：①长回答不再超出屏幕——panel-inner 补
   `box-sizing:border-box`、聊天区改 flex 填充剩余空间（`flex:1;min-height:0`）+
   内部滚动（实测容器底边与面板底边对齐、合成 2530px 内容可正常滑动浏览）；

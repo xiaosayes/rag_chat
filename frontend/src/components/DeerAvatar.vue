@@ -28,8 +28,12 @@ let frameId = -1;
 const actions: Record<string, THREE.AnimationAction> = {};
 let current: string | undefined;
 let currentPool: PoolName | undefined;
+let accentActive = false;                 // web-039：点缀动作播放中
+let accentReturn: PoolName | undefined;   // 点缀结束返回池
+const ACCENT_FADE = 0.4;                  // 点缀双向叠化时长（衔接自然，验收标准）
 
 function play(pool: PoolName) {
+  accentActive = false;
   const name = pickNext(pool, current);
   const action = actions[name];
   if (!action) return;
@@ -38,16 +42,39 @@ function play(pool: PoolName) {
   });
   current = name;
   currentPool = poolOf(name);
+  action.setLoop(THREE.LoopRepeat, Infinity);   // 恢复池内循环（点缀曾改 LoopOnce）
+  action.clampWhenFinished = false;
   action.reset().fadeIn(0.5).play();
+}
+
+/** 主题点缀动作（web-039）：单次播放 + 双向叠化，结尾提前起回切——全程无硬切/无定格。 */
+function playAccent(name: string) {
+  const action = actions[name];
+  if (!action) return;
+  accentReturn = currentPool;                       // 记住来处（TALK/STANDBY）
+  Object.keys(actions).forEach((n) => {
+    if (n !== name && actions[n].isRunning()) actions[n].fadeOut(ACCENT_FADE);
+  });
+  current = name;
+  currentPool = undefined;
+  accentActive = true;
+  action.setLoop(THREE.LoopOnce, 1);
+  action.clampWhenFinished = true;                  // 尾帧夹持，与回切叠化无缝重叠
+  action.reset().fadeIn(ACCENT_FADE).play();
 }
 
 function tick() {
   renderer.render(scene, camera);
   mixer.update(clock.getDelta());
-  // 片段播完 → 同池随机续播（参考 playAnimationAgain 语义）
   if (current && actions[current]) {
     const a = actions[current];
-    if (a.isRunning() && a.time >= a.getClip().duration - 0.05 && currentPool) {
+    if (accentActive) {
+      // 提前一个叠化时长起回切：点缀尾帧与池动作淡入重叠，杜绝停顿感（验收）
+      if (a.time >= a.getClip().duration - ACCENT_FADE) {
+        play(accentReturn ?? "STANDBY");
+      }
+    } else if (a.isRunning() && a.time >= a.getClip().duration - 0.05 && currentPool) {
+      // 片段播完 → 同池随机续播（参考 playAnimationAgain 语义）
       play(currentPool);
     }
   }
@@ -110,6 +137,7 @@ onBeforeUnmount(() => cancelAnimationFrame(frameId));
 defineExpose({
   playTalk: () => play("TALK"),
   playStandby: () => play("STANDBY"),
+  playAccent,
   poolOf: () => currentPool,
 });
 </script>
