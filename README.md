@@ -80,6 +80,10 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **胶囊文案状态机修正（web-035，用户反馈）**：初始/待机=「请说“你好，湘小图”唤醒」；
+  唤醒后未检测到声音=「我在听，请说出您的问题…」；检测到说话声（首个 asr_partial）
+  才显示「正在录入语音…」（新增 `speaking` 标志：partial 置位、answer_start/聆听态复位）；
+  播报中=「说话或点按可打断」。去掉首页面板上方的“待机中…”状态行。
 - **页面比例适配重做（web-033/034）**：启动脚本 LF 行尾致 `^` 续行失效（双击没反应）→
   CRLF 重写+单行命令+Edge 兜底；布局从 vh 体系（非 9:16 窗口横向失真）重做
   为 **1080×1920 设计坐标系定版 + 舞台等比缩放**（App.vue `transform: scale(min(w/1080,h/1920))`

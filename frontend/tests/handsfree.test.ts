@@ -67,7 +67,7 @@ describe("useHandsfree", () => {
 
 describe("VoiceBar 打断态", () => {
   it("播报中胶囊显示「说话或点按可打断」", async () => {
-    const w = mount(VoiceBar, { props: { recording: false, interruptible: true } });
+    const w = mount(VoiceBar, { props: { interruptible: true } });
     expect(w.text()).toContain("说话或点按可打断");
     await w.find(".mic-capsule").trigger("click");
     expect(w.emitted("mic")).toHaveLength(1);

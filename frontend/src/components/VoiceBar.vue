@@ -1,7 +1,7 @@
 <template>
   <div class="voice-bar">
     <img class="keyboard-toggle" :src="'img/keyboard.png'" @click.stop.prevent="$emit('toggle-keyboard')" />
-    <div class="mic-capsule" :class="{ recording }" @click.stop.prevent="$emit('mic')">
+    <div class="mic-capsule" :class="{ speaking }" @click.stop.prevent="$emit('mic')">
       <img class="mic-icon" :src="'img/micro.png'" />
       <span>{{ label }}</span>
     </div>
@@ -10,34 +10,29 @@
 
 <script lang="ts" setup>
 /** 语音胶囊条（web-017）：1.1/1.2 设计稿——键盘切换钮 + 麦克风胶囊。
- *  文案双态轮播（参考 Content.vue：5s 一切）；录音中显示录入态。 */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+ *  web-035 文案状态机（用户意图）：待机=唤醒提示；唤醒后未发声=我在听；
+ *  检测到声音=正在录入语音；播报中=可打断。 */
+import { computed } from "vue";
 import { useAppStore } from "../stores/app";
 
 const props = withDefaults(defineProps<{
-  recording?: boolean;
-  interruptible?: boolean;   // 播报中：胶囊变打断按钮
-}>(), { recording: false, interruptible: false });
+  listening?: boolean;      // 已唤醒、聆听中（尚未检测到声音）
+  speaking?: boolean;       // 检测到说话声（asr_partial）
+  interruptible?: boolean;  // 播报中：胶囊变打断按钮
+}>(), { listening: false, speaking: false, interruptible: false });
 defineEmits(["mic", "toggle-keyboard"]);
 const store = useAppStore();
 
 const wakeTip = computed(() => {
   const w = store.config?.wake_words?.[0] ?? "你好湘小图";
   // 展示形态加逗号：你好，湘小图
-  return `唤醒我，请说“${w.replace(/^你好/, "你好，")}”`;
+  return `请说“${w.replace(/^你好/, "你好，")}”唤醒`;
 });
-const labels = computed(() => ["点击与我语音聊天吧~", wakeTip.value]);
-const labelIndex = ref(0);
-let timer = 0;
-onMounted(() => {
-  timer = window.setInterval(() => {
-    labelIndex.value = (labelIndex.value + 1) % labels.value.length;
-  }, 5000);
-});
-onBeforeUnmount(() => clearInterval(timer));
 const label = computed(() => {
   if (props.interruptible) return "说话或点按可打断";   // 1.4 播报中可打断
-  return props.recording ? "正在录入语音..." : labels.value[labelIndex.value];
+  if (props.speaking) return "正在录入语音...";         // 检测到声音才显示（web-035）
+  if (props.listening) return "我在听，请说出您的问题…"; // 唤醒后未发声
+  return wakeTip.value;                                 // 初始/待机
 });
 </script>
 
@@ -61,7 +56,7 @@ const label = computed(() => {
     box-sizing: border-box;
     padding-top: 35px;
     cursor: pointer;
-    &.recording span { color: #b25d3a; }
+    &.speaking span { color: #b25d3a; }
     .mic-icon {
       height: 46px;
       margin-right: 16px;

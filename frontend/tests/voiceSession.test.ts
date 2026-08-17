@@ -23,6 +23,19 @@ function makeDeps() {
 const PCM = (n: number) => new Int16Array(n).buffer;
 
 describe("useVoiceSession", () => {
+  it("speaking 标志（web-035）：partial 置位，answer_start/聆听态复位", () => {
+    const { session } = makeDeps();
+    expect(session.speaking.value).toBe(false);
+    session.onEvent({ type: "asr_partial", text: "你好" });
+    expect(session.speaking.value).toBe(true);
+    session.onEvent({ type: "answer_start", turn: 1 });
+    expect(session.speaking.value).toBe(false);
+    session.onEvent({ type: "asr_partial", text: "在吗" });
+    expect(session.speaking.value).toBe(true);
+    session.onEvent({ type: "state", mode: "listen", status_text: "" });
+    expect(session.speaking.value).toBe(false);
+  });
+
   it("askText：用户气泡 + ask 帧", () => {
     const { session, client } = makeDeps();
     session.askText("  家博会几点开门？ ");

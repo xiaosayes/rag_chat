@@ -15,9 +15,6 @@
         <ChatPanel v-if="mode === 'chat'" :session="session" @back="onBack" />
       </div>
     </div>
-    <div class="home-status" v-if="mode === 'home' && session.statusText.value">
-      {{ session.statusText.value }}
-    </div>
     <SplashScreen :show="!store.modelReady" />
   </div>
 </template>
@@ -167,17 +164,6 @@ onMounted(() => {
         transform: rotate(45deg);
       }
     }
-  }
-  .home-status {
-    position: absolute;
-    bottom: 1010px;
-    left: 0;
-    right: 0;
-    text-align: center;
-    font-size: 26px;
-    color: #fff;
-    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-    z-index: 3;
   }
 }
 </style>

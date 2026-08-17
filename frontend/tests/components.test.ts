@@ -37,18 +37,15 @@ describe("SysMenu", () => {
 });
 
 describe("VoiceBar", () => {
-  it("录音态文案与事件", async () => {
-    const w = mount(VoiceBar, { props: { recording: false } });
-    expect(w.text()).toContain("点击与我语音聊天吧~");
-    await w.setProps({ recording: true });
-    expect(w.text()).toContain("正在录入语音");
+  it("文案状态机（web-035）：待机=唤醒提示→聆听=我在听→有声=正在录入", async () => {
+    const w = mount(VoiceBar);
+    expect(w.text()).toContain("请说“你好，湘小图”唤醒");   // 初始页（web-035）
+    await w.setProps({ listening: true });
+    expect(w.text()).toContain("我在听");                    // 唤醒后未发声
+    await w.setProps({ speaking: true });
+    expect(w.text()).toContain("正在录入语音");              // 检测到声音
     await w.find(".mic-capsule").trigger("click");
     expect(w.emitted("mic")).toHaveLength(1);
-  });
-
-  it("唤醒词提示含 persona 默认", () => {
-    const w = mount(VoiceBar, { props: { recording: false } });
-    expect(w.text()).toMatch(/点击与我语音聊天吧~/);
   });
 });
 

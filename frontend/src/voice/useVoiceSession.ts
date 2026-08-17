@@ -27,6 +27,7 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
   const statusText = ref("");
   const voiceReady = ref(false);
   const recording = ref(false);
+  const speaking = ref(false);   // web-035：检测到说话声（首个 asr_partial）→ 胶囊才显示“正在录入语音”
   const chatHistory = reactive<ChatItem[]>([]);
   const player = deps.player ?? new PcmPlayer(24000);
   /** 当前收集中的轮次 PCM 缓存 */
@@ -45,8 +46,10 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
       case "state":
         mode.value = ev.mode ?? mode.value;
         statusText.value = ev.status_text ?? "";
+        if (ev.mode === "standby" || ev.mode === "listen") speaking.value = false;  // 重新聆听/待机（web-035）
         break;
       case "asr_partial": {
+        speaking.value = true;   // 有声音被识别到（web-035）
         // 边说边上屏：更新/创建用户气泡
         const me = lastMe();
         if (me && me.status === 1 && me.text !== ev.text) {
@@ -59,6 +62,7 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
       case "greet":
         break;                    // 应答语走音频流 + 状态行（不写对话框，对齐后端语义）
       case "answer_start":
+        speaking.value = false;  // 进入作答（web-035）
         // 推入后回取 reactive 代理再持有——直接改原对象不触发视图更新（web-021 实测）
         chatHistory.push({ type: "deer", text: "", status: 0 });
         currentDeer = chatHistory[chatHistory.length - 1];
@@ -169,7 +173,7 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
   }
 
   return {
-    mode, statusText, voiceReady, recording, chatHistory,
+    mode, statusText, voiceReady, recording, speaking, chatHistory,
     onEvent, onAudio,
     connect, askText, barge, replay, setRecording, resetChat,
     client, player,
