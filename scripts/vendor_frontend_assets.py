@@ -85,9 +85,10 @@ def main() -> None:
           f"{len(gltf.get('animations', []))} 个")
     for name in IMG_ROOT_FILES:
         print(copy(f"img/{name}", f"img/{name}"))
-    for f in (REFER / "img" / "v2").iterdir():
-        if f.is_file():
-            print(copy(f"img/v2/{f.name}", f"img/v2/{f.name}"))
+    for ver in ("v1", "v2"):     # web-031：v1=森林主题（设计稿），v2=金色舞台（备用主题）
+        for f in (REFER / "img" / ver).iterdir():
+            if f.is_file():
+                print(copy(f"img/{ver}/{f.name}", f"img/{ver}/{f.name}"))
     for name in FONTS:
         print(copy(f"fonts/{name}", f"fonts/{name}"))
     total = sum(p.stat().st_size for p in FRONT.rglob("*") if p.is_file())

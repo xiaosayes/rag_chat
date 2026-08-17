@@ -35,7 +35,8 @@ class BroadcastSession:
 
     def __init__(self, pipeline, tts_factory: Callable, emit: Callable[[dict], None], *,
                  clock: Callable[[], float] = time.monotonic, tick_s: float = 0.1,
-                 accum_chars: int = 60, watchdog_s: float = 15.0, max_restarts: int = 2):
+                 accum_chars: int = 60, watchdog_s: float = 15.0, max_restarts: int = 2,
+                 first_floor_chars: int = 0):
         self._pipeline = pipeline
         self._tts_factory = tts_factory
         self._emit = emit
@@ -44,6 +45,7 @@ class BroadcastSession:
         self._accum = accum_chars
         self._watchdog_s = watchdog_s
         self._max_restarts = max_restarts
+        self._first_floor = first_floor_chars   # web-030 首播硬地板（0=禁用）
         self._history = []
         self._cancel = threading.Event()
         self._busy = threading.Event()
@@ -71,6 +73,13 @@ class BroadcastSession:
     def ask(self, question: str) -> None:
         if not question or not question.strip():
             return
+        # web-029：新问题永远打断旧问题——串行化：barge 旧轮、等其收尾（有界），
+        # 保证事件严格不乱序（旧 answer_end 先于新 answer_start）
+        if self._busy.is_set():
+            self.barge_in()
+            deadline = time.monotonic() + 5.0
+            while self._busy.is_set() and time.monotonic() < deadline:
+                time.sleep(min(self._tick, 0.05))
         self._cancel.clear()
         self._busy.set()
         self._turn += 1
@@ -185,8 +194,9 @@ class BroadcastSession:
                 emit({"type": "answer_chunk", "turn": turn, "text": payload})
                 if tts is not None and not dead:
                     buf += payload
-                    while not dead:                # 句边界批量喂（首播句末/逗号兜底）
-                        seg, buf = (take_first_unit(buf) if not fed else
+                    while not dead:                # 句边界批量喂（首播句末/逗号/地板兜底）
+                        seg, buf = (take_first_unit(buf, floor_chars=self._first_floor)
+                                    if not fed else
                                     take_feed_unit(buf, self._accum,
                                                    starve=clock() - last_feed_at > 2.5))
                         if not seg:

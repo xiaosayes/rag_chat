@@ -22,6 +22,7 @@ class KioskConfig:
     project_id: str = "jiabohui"           # KIOSK_PROJECT_ID（生产项目）
     idle_home_s: float = 150.0             # KIOSK_IDLE_HOME_S（参考实现 150s 回首页）
     idle_refresh_s: float = 300.0          # KIOSK_IDLE_REFRESH_S（参考实现 300s 自刷新）
+    first_floor_chars: int = 12            # KIOSK_TTS_FIRST_FLOOR_CHARS（web-030 首播硬地板，0=禁用）
 
     @classmethod
     def from_env(cls) -> "KioskConfig":
@@ -39,4 +40,6 @@ class KioskConfig:
             project_id=os.getenv("KIOSK_PROJECT_ID", cls.project_id),
             idle_home_s=float(os.getenv("KIOSK_IDLE_HOME_S", str(cls.idle_home_s))),
             idle_refresh_s=float(os.getenv("KIOSK_IDLE_REFRESH_S", str(cls.idle_refresh_s))),
+            first_floor_chars=int(os.getenv("KIOSK_TTS_FIRST_FLOOR_CHARS",
+                                            str(cls.first_floor_chars))),
         )

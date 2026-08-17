@@ -38,6 +38,7 @@ def _default_session_factory(cfg: KioskConfig):
             greeting_pcm_fn=lambda: services.greeting_pcm(cfg.project_id),
             accum_chars=settings.tts_accum_chars,
             watchdog_s=settings.tts_stream_watchdog_seconds,
+            first_floor_chars=cfg.first_floor_chars,   # web-030 首播硬地板
         )
 
     return make
@@ -102,11 +103,10 @@ def register_voice_ws(app, cfg: KioskConfig, session_factory=None) -> None:
                 elif mtype == "ping":
                     out_q.put_nowait({"type": "pong"})
                 elif mtype == "ask":
-                    if session.busy or (ask_task and not ask_task.done()):
-                        out_q.put_nowait({"type": "error", "code": "busy"})
-                    else:
-                        ask_task = asyncio.create_task(
-                            asyncio.to_thread(session.ask, data.get("text", "")))
+                    # web-029：新问题永远打断旧问题（BroadcastSession 内串行化），
+                    # 不再回 busy 错误
+                    ask_task = asyncio.create_task(
+                        asyncio.to_thread(session.ask, data.get("text", "")))
                 elif mtype == "barge_in":
                     session.barge_in()
                 else:

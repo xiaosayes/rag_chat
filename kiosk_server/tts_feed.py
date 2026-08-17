@@ -19,8 +19,14 @@ def cut_at_last(text: str, chars: str, limit: int) -> int:
     return -1
 
 
-def take_first_unit(buf: str, hard_cap: int = 80):
-    """首播喂入单元：句末优先；≥8 字逗号等宽标点兜底；≥hard_cap 硬切。"""
+def take_first_unit(buf: str, hard_cap: int = 80, floor_chars: int = 0):
+    """首播喂入单元：句末优先；≥8 字逗号等宽标点兜底；≥hard_cap 硬切。
+
+    web-030 首播硬地板（floor_chars>0 时启用）：无标点且 ≥floor_chars 字 →
+    地板处硬切抢首播（唯一例外：切点落在未闭合括号内则放弃——bug-121 教训）。
+    """
+    from src.tts import _unbalanced_parens
+
     text = buf.strip()
     if not text:
         return "", buf
@@ -33,6 +39,10 @@ def take_first_unit(buf: str, hard_cap: int = 80):
             return text[:cut], buf[len(buf) - len(text) + cut:]
     if len(text) >= hard_cap:
         return text[:hard_cap], buf[len(buf) - len(text) + hard_cap:]
+    if floor_chars > 0 and len(text) >= floor_chars:
+        head = text[:floor_chars]
+        if not _unbalanced_parens(head):
+            return head, buf[len(buf) - len(text) + floor_chars:]
     return "", buf
 
 

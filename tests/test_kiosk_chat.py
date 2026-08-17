@@ -25,6 +25,30 @@ class TestTakeFirstUnit:
         assert len(seg) == 80 and rest == text[80:]
 
 
+class TestTakeFirstUnitFloor:
+    """web-030：首播硬地板——无标点时 ≥floor_chars 硬切（括号平衡护栏），抢首音。"""
+
+    def test_floor_cut_without_punct(self):
+        seg, rest = take_first_unit("这是一个非常非常长的没有标点的中文句子用来测试硬地板",
+                                    floor_chars=12)
+        assert seg == "这是一个非常非常长的没有" and len(seg) == 12
+        assert rest.startswith("标点")
+
+    def test_floor_respects_parens_guard(self):
+        # 切点落在未闭合括号内 → 放弃地板硬切（bug-121 教训：孤立括号 invalid text）
+        seg, rest = take_first_unit("中国家博会（广州琶洲展馆）现场配备完善的服务设施齐全",
+                                    floor_chars=10)
+        assert seg == ""
+
+    def test_punct_still_wins_over_floor(self):
+        seg, rest = take_first_unit("你好。世界依然美丽", floor_chars=12)
+        assert seg == "你好。"
+
+    def test_floor_disabled_by_default(self):
+        seg, _ = take_first_unit("这是一个非常非常长的没有标点的中文句子用来测试硬地板")
+        assert seg == ""        # 默认 floor_chars=0：无标点宁等不硬切（语义不变）
+
+
 class TestTakeFeedUnit:
     def test_batch_full_sentences(self):
         seg, rest = take_feed_unit("一" * 30 + "。" + "二" * 40 + "。", min_chars=60)
@@ -255,6 +279,43 @@ class TestBroadcastSession:
         end = [e for e in events if e["type"] == "answer_end"][0]
         assert end["full_text"] == "只有文本。" and end["cancelled"] is False
 
+    def test_new_ask_interrupts_and_serializes(self):
+        # web-029：新问题永远打断旧问题——第二问到达时旧轮 busy，
+        # 服务端串行化：先 barge 旧轮、等其收尾，再答新题（事件不乱序）
+        gate = threading.Event()
+        pipe = FakePipeline(["一。", "二。", "三。"], gate=gate)
+        tts = FakeTTS()
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: tts, emit, clock=AutoClock(), tick_s=0.01)
+        t1 = threading.Thread(target=s.ask, args=("第一问",), daemon=True)
+        t1.start()
+        # 等第一轮进入播报
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(
+                e["type"] == "answer_chunk" for e in events):
+            time.sleep(0.01)
+        assert s.busy
+        # 第二问（不打 gate）：应打断第一轮并完成自身
+        pipe2_tokens = ["新答。"]
+        pipe._tokens = pipe2_tokens
+        t2 = threading.Thread(target=s.ask, args=("第二问",), daemon=True)
+        t2.start()
+        gate.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        types = _event_types(events)
+        # 旧轮被取消；两轮 answer_end 齐全；新轮 answer_start 在旧轮 answer_end 之后
+        ends = [i for i, e in enumerate(events) if e["type"] == "answer_end"]
+        starts = [i for i, e in enumerate(events) if e["type"] == "answer_start"]
+        assert len(ends) == 2 and len(starts) == 2
+        assert starts[1] > ends[0]                      # 严格串行
+        first_end = events[ends[0]]
+        second_end = events[ends[1]]
+        assert first_end["cancelled"] is True           # 旧轮被打断
+        assert second_end["cancelled"] is False
+        assert second_end["full_text"] == "新答。"
+        assert "playback_cancel" in types
+
     def test_tts_feed_failure_degrades_to_text(self):
         pipe = FakePipeline([" degrade 场景一句话。"])
         tts = FakeTTS(feed_raises=True)
@@ -336,26 +397,25 @@ class TestVoiceWs:
         assert events[-1]["full_text"] == "第一句。第二句。"
         assert events[-1]["cancelled"] is False
 
-    def test_ask_busy(self, monkeypatch):
+    def test_second_ask_interrupts_first(self, monkeypatch):
+        # web-029：连续提问——第二问打断第一问并完成（不再回 busy）
         gate = threading.Event()
         pipe = FakePipeline(["一。", "二。"], gate=gate)
         c = _ws_client(monkeypatch, _factory(pipe, FakeTTS()))
         with c.websocket_connect("/ws/voice") as ws:
             ws.send_text(json.dumps({"type": "ask", "text": "q1"}))
-            events, _ = _drain_until(ws, "answer_chunk")
+            _drain_until(ws, "answer_chunk")
+            pipe._tokens = ["新答。"]
             ws.send_text(json.dumps({"type": "ask", "text": "q2"}))
-            # 下一条非音频事件应为 busy 错误
-            while True:
-                msg = ws.receive()
-                if msg.get("bytes") is not None:
-                    continue
-                ev = json.loads(msg["text"])
-                if ev["type"] == "audio_start":
-                    continue
-                assert ev == {"type": "error", "code": "busy"}
-                break
             gate.set()
-            _drain_until(ws, "answer_end")
+            events, _ = _drain_until(ws, "answer_end", max_msgs=400)
+            ends = [e for e in events if e["type"] == "answer_end"]
+            assert ends[0]["cancelled"] is True          # 第一问被打断
+            # 继续收第二问收尾
+            events2, _ = _drain_until(ws, "answer_end", max_msgs=400)
+            ends2 = [e for e in events2 if e["type"] == "answer_end"]
+            assert ends2 and ends2[0]["cancelled"] is False
+            assert ends2[0]["full_text"] == "新答。"
 
     def test_barge_in_over_ws(self, monkeypatch):
         gate = threading.Event()

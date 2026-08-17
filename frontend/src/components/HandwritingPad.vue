@@ -3,7 +3,7 @@
     <div class="canvas-wrap">
       <canvas ref="canvasEl" class="canvas"></canvas>
       <div v-if="!hasStroke" class="placeholder">
-        <img :src="'img/v2/writing.png'" />
+        <img :src="'img/v1/writing.png'" />
         <span>手写区域</span>
       </div>
       <div v-if="recognizing" class="recognizing">识别中…</div>

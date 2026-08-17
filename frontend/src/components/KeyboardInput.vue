@@ -1,10 +1,10 @@
 <template>
   <div class="keyboard-input">
     <div class="input-row">
-      <img class="mic-toggle" :src="'img/v2/key_keyboard.png'" @click.stop.prevent="$emit('toggle-voice')" />
+      <img class="mic-toggle" :src="'img/v1/key_keyboard.png'" @click.stop.prevent="$emit('toggle-voice')" />
       <div class="field" @click.stop.prevent="keyboardShow = true">
         <span class="value">{{ value }}</span>
-        <img v-if="value" class="clear" :src="'img/v2/input_close.png'"
+        <img v-if="value" class="clear" :src="'img/v1/input_close.png'"
              @click.stop.prevent="clear" />
       </div>
       <img class="send" :src="'img/send.png'" @click.stop.prevent="submit" />

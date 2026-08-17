@@ -1,6 +1,6 @@
 <template>
   <div class="preset-panel">
-    <img class="refresh" :src="'img/v2/refresh.png'" @click.stop.prevent="reshuffle" />
+    <img class="refresh" :src="'img/v1/refresh.png'" @click.stop.prevent="reshuffle" />
     <transition-group name="list" tag="div" class="preset-list">
       <p v-for="(q, k) in shown" :key="q" :class="`preset-item item-${k}`"
          @click.stop.prevent="$emit('select', q)">{{ q }}</p>

@@ -4,15 +4,13 @@
     <DeerAvatar ref="deer" />
     <SysMenu />
     <div class="panel">
-      <img class="panel-bg" :src="'img/v2/content_bg.png'" />
+      <img class="panel-bg" :src="'img/v1/content_bg.png'" />
       <div class="panel-inner">
         <VoiceBar v-if="inputMode === 'voice'" :recording="session.recording.value"
                   :interruptible="session.mode.value === 'broadcast'"
                   @mic="onMic" @toggle-keyboard="inputMode = 'keyboard'" />
         <KeyboardInput v-else @toggle-voice="inputMode = 'voice'" @send="onTypedSend" />
-        <div class="divider">
-          <img :src="'img/v2/arrow_left.png'" /><i></i><img :src="'img/v2/arrow_right.png'" />
-        </div>
+        <div class="divider"><i></i><span class="leaf"></span><i></i></div>
         <PresetPanel v-if="mode === 'home' && inputMode === 'voice'" @select="onPreset" />
         <ChatPanel v-if="mode === 'chat'" :session="session" @back="onBack" />
       </div>
@@ -114,7 +112,7 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   position: relative;
-  background: url("../../public/img/v2/bg.png") 100% 100% no-repeat;
+  background: url("../../public/img/v1/bg.png") 100% 100% no-repeat;
   background-size: 100% 100%;
   overflow: hidden;
   .logo {
@@ -159,9 +157,15 @@ onMounted(() => {
         flex: 1;
         height: 1px;
         background: rgba(109, 90, 66, 0.35);
-        margin: 0 1vh;
       }
-      img { height: 1.6vh; opacity: 0.7; }
+      .leaf {   // 设计稿分隔线叶饰（纯 CSS，去掉碎图引用 web-031）
+        width: 1.1vh;
+        height: 1.1vh;
+        margin: 0 1.2vh;
+        background: #b7a88f;
+        border-radius: 0 60% 0 60%;
+        transform: rotate(45deg);
+      }
     }
   }
   .home-status {

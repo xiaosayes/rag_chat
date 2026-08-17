@@ -5,7 +5,7 @@
       <div v-for="(item, k) in session.chatHistory" :key="k"
            :class="`chat-item chat-${item.type}`">
         <template v-if="item.type === 'deer'">
-          <div class="avatar"><img :src="'img/v2/avatar.png'" /></div>
+          <div class="avatar"><img :src="'img/v1/avatar.png'" /></div>
           <div class="bubble">
             <WaveLoading v-if="item.status === 0" />
             <template v-else>
@@ -20,7 +20,7 @@
         </template>
         <template v-else>
           <div class="bubble me"><p class="text">{{ item.text }}</p></div>
-          <div class="avatar"><img :src="'img/v2/avatar_me.png'" /></div>
+          <div class="avatar"><img :src="'img/v1/avatar_me.png'" /></div>
         </template>
       </div>
     </div>

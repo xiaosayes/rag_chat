@@ -80,6 +80,12 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **PC 体验反馈修复（web-029~032）**：①连续问答打断串行化——新问题永远打断旧问题
+  （`BroadcastSession.ask` 内 barge+收尾等待，事件严格不乱序；WS 不再回 busy 错误）；
+  ②首播提速——首播硬地板 `KIOSK_TTS_FIRST_FLOOR_CHARS=12`（无标点时 12 字硬切抢首播，
+  括号平衡护栏；实测首音频帧 2.06~2.91s，达成 2-3s 目标）；③主题修正 v2(金色舞台)→v1(森林，
+  设计稿原版)+碎图（不存在的箭头引用）改纯 CSS 叶饰分隔线+字体加载实证（Source Han Serif 已加载生效）；
+  ④PC 竖屏预览 `deploy/kiosk/start-pc-preview.bat`（540×960 应用窗 + 免麦弹窗）。
 - 设计与计划：`docs/superpowers/specs|plans/2026-08-14-digital-human-frontend*`。
 
 ### v1.5.0 (2026-08-12) — 语音助手：唤醒 + VAD + 双计时 + 打断（第十四轮 audit-ASR）
