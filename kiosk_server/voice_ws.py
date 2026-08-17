@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 def _default_session_factory(cfg: KioskConfig):
     def make(emit) -> VoiceSession:
-        pipe = services.get_pipeline(cfg.project_id)
+        # web-036：联网搜索兜底包装（知识库拒答→百炼联网作答；开关关闭=原内核行为）
+        from .web_fallback import WebFallbackPipeline
+        pipe = WebFallbackPipeline(services.get_pipeline(cfg.project_id),
+                                   enabled=cfg.web_fallback)
 
         def tts_factory():
             try:

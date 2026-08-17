@@ -80,6 +80,14 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **问答联网兜底（web-036，用户反馈）**：知识库无确切信息的事实类问题不再拒答——
+  根因：冻结内核「相关度低降级」中事实类 `_should_enable_search`=False，即使
+  LLM_ENABLE_SEARCH=true 也只回固定话术。薄层 `web_fallback.WebFallbackPipeline`
+  在 query_stream 出口识别拒答模板（前缀累积判定，分段亦可识别），接管为百炼
+  enable_search 流式作答（湘小图人设提示词、去 emoji、增量输出；失败回退原话术）；
+  meta/正常回答原样透传，开关 `KIOSK_WEB_FALLBACK=false` 时与内核行为完全一致。
+  src/ 零改动、其他模块零影响。实测：图书馆简介拒答→165字联网简介（首音频3.90s）；
+  KB 问题（家博会开门）与闲聊（天气）路径回归不变。
 - **胶囊文案状态机修正（web-035，用户反馈）**：初始/待机=「请说“你好，湘小图”唤醒」；
   唤醒后未检测到声音=「我在听，请说出您的问题…」；检测到说话声（首个 asr_partial）
   才显示「正在录入语音…」（新增 `speaking` 标志：partial 置位、answer_start/聆听态复位）；

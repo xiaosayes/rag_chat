@@ -23,6 +23,7 @@ class KioskConfig:
     idle_home_s: float = 150.0             # KIOSK_IDLE_HOME_S（参考实现 150s 回首页）
     idle_refresh_s: float = 300.0          # KIOSK_IDLE_REFRESH_S（参考实现 300s 自刷新）
     first_floor_chars: int = 12            # KIOSK_TTS_FIRST_FLOOR_CHARS（web-030 首播硬地板，0=禁用）
+    web_fallback: bool = True              # KIOSK_WEB_FALLBACK（web-036 知识库拒答→联网搜索兜底）
 
     @classmethod
     def from_env(cls) -> "KioskConfig":
@@ -42,4 +43,5 @@ class KioskConfig:
             idle_refresh_s=float(os.getenv("KIOSK_IDLE_REFRESH_S", str(cls.idle_refresh_s))),
             first_floor_chars=int(os.getenv("KIOSK_TTS_FIRST_FLOOR_CHARS",
                                             str(cls.first_floor_chars))),
+            web_fallback=os.getenv("KIOSK_WEB_FALLBACK", "true").lower() in ("1", "true", "yes"),
         )
