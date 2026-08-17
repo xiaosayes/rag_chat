@@ -43,6 +43,7 @@ defineExpose({ reshuffle, shown: computed(() => shown.value) });
 
 <style lang="scss" scoped>
 .preset-panel {
+  flex: none;   /* web-038 */
   position: relative;
   width: 100%;
   .refresh {

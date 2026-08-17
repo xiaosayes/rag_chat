@@ -1,6 +1,8 @@
 <template>
   <div class="chat-panel">
-    <img class="back" :src="'img/back.png'" @click.stop.prevent="onBack" />
+    <div class="chat-header">
+      <img class="back" :src="'img/back.png'" @click.stop.prevent="onBack" />
+    </div>
     <div class="chat-scroll" ref="scrollEl">
       <div v-for="(item, k) in session.chatHistory" :key="k"
            :class="`chat-item chat-${item.type}`">
@@ -99,19 +101,28 @@ watch(
 .chat-panel {
   position: relative;
   width: 100%;
-  height: 100%;
+  flex: 1;                   /* web-038：面板剩余空间全部给聊天区（固定窗口） */
+  min-height: 0;             /* flex 子项可收缩，内部滚动生效的前提 */
+  display: flex;
+  flex-direction: column;
+  .chat-header {             /* web-038：返回钮独立头行（文档流内），不再遮挡气泡 */
+    flex: none;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    height: 88px;
+    padding: 0 42px;
+    box-sizing: border-box;
+  }
   .back {
-    position: absolute;
-    right: 42px;
-    top: 19px;
-    height: 104px;
+    height: 80px;
     cursor: pointer;
-    z-index: 5;
   }
   .chat-scroll {
-    height: calc(100% - 77px);
-    overflow-y: auto;
-    padding: 38px 58px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;        /* 内容长时内部上下滑动浏览 */
+    padding: 10px 58px 96px; /* 底部预留状态行高度 */
     box-sizing: border-box;
     &::-webkit-scrollbar { display: none; }
   }

@@ -79,6 +79,7 @@ defineExpose({ value, keyboardShow, handwriting });
 
 <style lang="scss" scoped>
 .keyboard-input {
+  flex: none;   /* web-038 */
   width: 100%;
   .input-row {
     display: flex;

@@ -38,6 +38,7 @@ const label = computed(() => {
 
 <style lang="scss" scoped>
 .voice-bar {
+  flex: none;   /* web-038：面板 flex 布局中保持自然高度，把剩余空间让给聊天区 */
   display: flex;
   align-items: center;
   justify-content: center;

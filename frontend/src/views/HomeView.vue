@@ -125,6 +125,7 @@ onMounted(() => {
     left: 0;
     right: 0;
     height: 985px;
+    overflow: hidden;        /* web-038：固定窗口，内容不外溢 */
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -140,12 +141,14 @@ onMounted(() => {
       z-index: 1;
       width: 100%;
       height: 100%;
+      box-sizing: border-box;  /* web-038：padding 计入 985px 内，子项 flex 精确分配 */
       padding-top: 61px;
       display: flex;
       flex-direction: column;
       align-items: center;
     }
     .divider {
+      flex: none;   /* web-038 */
       display: flex;
       align-items: center;
       margin: 27px 0 12px;

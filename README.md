@@ -80,6 +80,11 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **聊天区布局修正（web-038，用户反馈）**：①长回答不再超出屏幕——panel-inner 补
+  `box-sizing:border-box`、聊天区改 flex 填充剩余空间（`flex:1;min-height:0`）+
+  内部滚动（实测容器底边与面板底边对齐、合成 2530px 内容可正常滑动浏览）；
+  ②「返回」钮移入独立头行（文档流内），不再遮挡用户提问气泡；
+  ③MusicBar 宽度随气泡收缩（波形区 flex:1+overflow 裁剪），播放钮不再顶出对话框。
 - **聊天区观感修正（web-037，用户反馈）**：头像去强压方框+圆裁，恢复参考自然宽高比
   `width:115px; height:auto`（avatar_me 295×157 不再失真）；底部状态行剥前导图标
   （冻结 FSM 文本含 emoji，客户端正则剥离）、上移 12→30px 不压底框线、字号 24→26。

@@ -56,12 +56,16 @@ function fmt(s: number): string {
 .music-bar {
   display: flex;
   align-items: center;
-  gap: 23px;
-  padding: 15px 19px;
+  gap: 16px;
+  padding: 12px 0;           /* web-038：气泡已有内边距；整体宽度随气泡收缩 */
+  width: 100%;
+  box-sizing: border-box;
   .bar-list {
     display: flex;
     align-items: flex-end;
-    min-width: 384px;
+    flex: 1;
+    min-width: 0;            /* web-038：波形区可压缩裁剪，播放钮不再顶出气泡 */
+    overflow: hidden;
   }
   .bar {
     width: 5px;
