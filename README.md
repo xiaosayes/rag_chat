@@ -80,6 +80,9 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **聊天区观感修正（web-037，用户反馈）**：头像去强压方框+圆裁，恢复参考自然宽高比
+  `width:115px; height:auto`（avatar_me 295×157 不再失真）；底部状态行剥前导图标
+  （冻结 FSM 文本含 emoji，客户端正则剥离）、上移 12→30px 不压底框线、字号 24→26。
 - **问答联网兜底（web-036，用户反馈）**：知识库无确切信息的事实类问题不再拒答——
   根因：冻结内核「相关度低降级」中事实类 `_should_enable_search`=False，即使
   LLM_ENABLE_SEARCH=true 也只回固定话术。薄层 `web_fallback.WebFallbackPipeline`

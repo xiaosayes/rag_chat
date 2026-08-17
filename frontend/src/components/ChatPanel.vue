@@ -24,13 +24,13 @@
         </template>
       </div>
     </div>
-    <div class="status-line" v-if="session.statusText.value">{{ session.statusText.value }}</div>
+    <div class="status-line" v-if="displayStatus">{{ displayStatus }}</div>
   </div>
 </template>
 
 <script lang="ts" setup>
 /** 聊天面板（web-021）：1.3/1.4 设计稿——鹿左用户右、波形 loading、MusicBar 重播。 */
-import { nextTick, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import MusicBar from "./MusicBar.vue";
 import WaveLoading from "./WaveLoading.vue";
 import type { ChatItem, useVoiceSession } from "../voice/useVoiceSession";
@@ -38,6 +38,11 @@ import type { ChatItem, useVoiceSession } from "../voice/useVoiceSession";
 const props = defineProps<{ session: ReturnType<typeof useVoiceSession> }>();
 const emit = defineEmits(["back"]);
 const scrollEl = ref<HTMLDivElement>();
+
+// web-037：状态行去开头小图标（冻结 FSM 状态文本含前导 emoji，客户端剥离）
+const displayStatus = computed(() =>
+  (props.session.statusText.value ?? "").replace(/^[^\u4e00-\u9fa5\w]+\s*/u, ""),
+);
 
 const replayState = reactive({ k: -1, s: 0, playing: false });
 let replayTimer = 0;
@@ -116,9 +121,9 @@ watch(
     margin-bottom: 42px;
     &.chat-me { flex-direction: row-reverse; }
     .avatar img {
-      width: 123px;
-      height: 123px;
-      border-radius: 50%;
+      width: 115px;      /* web-037：对齐参考 6.013vh + height:auto 保自然宽高比，
+                            去掉强压方框+圆裁（avatar_me 295×157 被压失真） */
+      height: auto;
     }
     .bubble {
       max-width: 62%;
@@ -139,11 +144,11 @@ watch(
   }
   .status-line {
     position: absolute;
-    bottom: 12px;
+    bottom: 30px;        /* web-037：上移不压底框线；字号 24→26 增大一号 */
     left: 0;
     right: 0;
     text-align: center;
-    font-size: 24px;
+    font-size: 26px;
     color: #897967;
   }
 }

@@ -17,6 +17,17 @@ function makeSession() {
 beforeEach(() => setActivePinia(createPinia()));
 
 describe("ChatPanel", () => {
+  it("状态行剥前导图标（web-037）", async () => {
+    const session = makeSession();
+    const w = mount(ChatPanel, { props: { session } });
+    session.onEvent({ type: "state", mode: "broadcast", status_text: "🔊 播报中｜说话可随时打断" });
+    await w.vm.$nextTick();
+    expect(w.find(".status-line").text()).toBe("播报中｜说话可随时打断");
+    session.onEvent({ type: "state", mode: "listen", status_text: "未检测到提问，已回待机" });
+    await w.vm.$nextTick();
+    expect(w.find(".status-line").text()).toBe("未检测到提问，已回待机");  // 无图标原样
+  });
+
   it("鹿左用户右气泡 + loading 波形", async () => {
     const session = makeSession();
     session.askText("家博会几点开门？");
