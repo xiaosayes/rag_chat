@@ -47,9 +47,9 @@ defineExpose({ reshuffle, shown: computed(() => shown.value) });
   width: 100%;
   .refresh {
     position: absolute;
-    right: 4vh;
-    top: -4.6vh;
-    height: 3.4vh;
+    right: 77px;
+    top: -88px;
+    height: 65px;
     cursor: pointer;
     display: none; /* 设计稿换一批为竖排文字钮，refresh 图标留作扩展位 */
   }
@@ -57,28 +57,28 @@ defineExpose({ reshuffle, shown: computed(() => shown.value) });
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 2vh 12vh 0;
+    padding: 38px 230px 0;
   }
   .preset-item {
     font-family: "Source Han Serif CN", serif;
     font-size: 34px;
     color: #6d5a42;
-    margin: 1.35vh 0;
+    margin: 26px 0;
     cursor: pointer;
-    &:nth-child(odd) { transform: translateX(-3vh); opacity: 0.92; }
-    &:nth-child(even) { transform: translateX(3vh); }
+    &:nth-child(odd) { transform: translateX(-58px); opacity: 0.92; }
+    &:nth-child(even) { transform: translateX(58px); }
     &:active { opacity: 0.6; }
   }
   .reshuffle-text {
     position: absolute;
-    right: 2.2vh;
-    top: 8vh;
+    right: 42px;
+    top: 154px;
     font-family: "Source Han Serif CN", serif;
     font-size: 30px;
     color: #6d5a42;
     background: rgba(255, 250, 235, 0.85);
-    border-radius: 1vh;
-    padding: 1.2vh 0.8vh;
+    border-radius: 19px;
+    padding: 23px 15px;
     text-align: center;
     line-height: 1.5;
     cursor: pointer;
@@ -86,5 +86,5 @@ defineExpose({ reshuffle, shown: computed(() => shown.value) });
   }
 }
 .list-enter-active { transition: all 0.4s ease; }
-.list-enter-from { opacity: 0; transform: translateX(-6vh); }
+.list-enter-from { opacity: 0; transform: translateX(-115px); }
 </style>

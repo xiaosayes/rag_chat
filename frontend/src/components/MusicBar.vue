@@ -3,7 +3,7 @@
     <div class="bar-list" ref="barListEl" @click.stop.prevent="onSeek">
       <div v-for="(bar, i) in bars" :key="i"
            :class="['bar', { finished: i < playedBars }]"
-           :style="{ height: bar.height + 'vh', animationDuration: bar.duration + 's' }"></div>
+           :style="{ height: bar.height + 'px', animationDuration: bar.duration + 's' }"></div>
     </div>
     <span class="time">{{ fmt(currentS) }}/{{ fmt(durationS) }}</span>
     <img class="state" :src="playing ? 'img/audio_stop.png' : 'img/audio_play.png'"
@@ -36,7 +36,7 @@ const BAR_COUNT = 32;
 const bars = ref<{ height: number; duration: number }[]>([]);
 onMounted(() => {
   bars.value = Array.from({ length: BAR_COUNT }, () => ({
-    height: Math.random() * 1.2916 + 1,
+    height: Math.random() * 24.8 + 19.2,   // px（1080×1920 设计坐标，web-034）
     duration: Math.random() * 0.6 + 0.7,
   }));
 });
@@ -56,17 +56,17 @@ function fmt(s: number): string {
 .music-bar {
   display: flex;
   align-items: center;
-  gap: 1.2vh;
-  padding: 0.8vh 1vh;
+  gap: 23px;
+  padding: 15px 19px;
   .bar-list {
     display: flex;
     align-items: flex-end;
-    min-width: 20vh;
+    min-width: 384px;
   }
   .bar {
-    width: 0.2401vh;
+    width: 5px;
     background-color: #c8bbab;
-    margin-right: 0.32vh;
+    margin-right: 6px;
     border-radius: 4px;
     &.finished { background-color: #897967; }
   }
@@ -76,7 +76,7 @@ function fmt(s: number): string {
     white-space: nowrap;
   }
   .state {
-    height: 3.6vh;
+    height: 69px;
     cursor: pointer;
   }
 }

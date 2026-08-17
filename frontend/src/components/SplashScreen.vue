@@ -41,17 +41,17 @@ const done = computed(() => progress.value >= 100);
   align-items: center;
   transition: opacity 0.5s;
   &.fade { opacity: 0; pointer-events: none; }
-  .logo { width: 17.8125vh; margin-bottom: 4vh; }
-  .deer { width: 26vh; margin-bottom: 3vh; }
+  .logo { width: 342px; margin-bottom: 77px; }
+  .deer { width: 499px; margin-bottom: 58px; }
   .progress-bg {
-    width: 34vh;
-    height: 2.2vh;
-    border-radius: 2vh;
+    width: 653px;
+    height: 42px;
+    border-radius: 38px;
     background: rgba(255, 255, 255, 0.55);
     overflow: hidden;
     .progress {
       height: 100%;
-      border-radius: 2vh;
+      border-radius: 38px;
       background: linear-gradient(180deg, #6db3f2 0%, #1a76d2 100%);
       transition: width 0.2s;
       .stripes {
@@ -63,7 +63,7 @@ const done = computed(() => progress.value >= 100);
     }
   }
   .tip {
-    margin-top: 1.6vh;
+    margin-top: 31px;
     font-size: 30px;
     color: #4a6a8a;
     letter-spacing: 1px;

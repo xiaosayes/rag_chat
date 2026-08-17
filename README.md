@@ -80,6 +80,11 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **页面比例适配重做（web-033/034）**：启动脚本 LF 行尾致 `^` 续行失效（双击没反应）→
+  CRLF 重写+单行命令+Edge 兜底；布局从 vh 体系（非 9:16 窗口横向失真）重做
+  为 **1080×1920 设计坐标系定版 + 舞台等比缩放**（App.vue `transform: scale(min(w/1080,h/1920))`
+  + letterbox 居中）——一体机 1080×1920 下 1:1 像素级精确，任意 PC/大屏窗口比例永不变形；
+  移除 postcss-px-to-viewport（防双重缩放）。三档窗口截图实证（540×960 / 917×1009 / 1080×1920）。
 - **PC 体验反馈修复（web-029~032）**：①连续问答打断串行化——新问题永远打断旧问题
   （`BroadcastSession.ask` 内 barge+收尾等待，事件严格不乱序；WS 不再回 busy 错误）；
   ②首播提速——首播硬地板 `KIOSK_TTS_FIRST_FLOOR_CHARS=12`（无标点时 12 字硬切抢首播，

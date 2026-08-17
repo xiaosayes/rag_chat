@@ -117,9 +117,9 @@ onMounted(() => {
   overflow: hidden;
   .logo {
     position: absolute;
-    left: 2.4vh;
-    top: 2.4vh;
-    height: 6vh;
+    left: 46px;
+    top: 46px;
+    height: 115px;
     z-index: 2;
   }
   .panel {
@@ -127,7 +127,7 @@ onMounted(() => {
     bottom: 0;
     left: 0;
     right: 0;
-    height: 51.3vh;
+    height: 985px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -143,7 +143,7 @@ onMounted(() => {
       z-index: 1;
       width: 100%;
       height: 100%;
-      padding-top: 3.2vh;
+      padding-top: 61px;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -151,7 +151,7 @@ onMounted(() => {
     .divider {
       display: flex;
       align-items: center;
-      margin: 1.4vh 0 0.6vh;
+      margin: 27px 0 12px;
       width: 60%;
       i {
         flex: 1;
@@ -159,9 +159,9 @@ onMounted(() => {
         background: rgba(109, 90, 66, 0.35);
       }
       .leaf {   // 设计稿分隔线叶饰（纯 CSS，去掉碎图引用 web-031）
-        width: 1.1vh;
-        height: 1.1vh;
-        margin: 0 1.2vh;
+        width: 21px;
+        height: 21px;
+        margin: 0 23px;
         background: #b7a88f;
         border-radius: 0 60% 0 60%;
         transform: rotate(45deg);
@@ -170,7 +170,7 @@ onMounted(() => {
   }
   .home-status {
     position: absolute;
-    bottom: 52.5vh;
+    bottom: 1010px;
     left: 0;
     right: 0;
     text-align: center;

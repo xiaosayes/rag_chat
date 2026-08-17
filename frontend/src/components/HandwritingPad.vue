@@ -84,20 +84,20 @@ defineExpose({ recognize });
 
 <style lang="scss" scoped>
 .handwriting-pad {
-  margin-top: 1.6vh;
+  margin-top: 31px;
   background: rgba(255, 250, 235, 0.95);
-  border-radius: 1.6vh;
-  padding: 1.6vh;
-  width: 62vh;
+  border-radius: 31px;
+  padding: 31px;
+  width: 960px;   // web-034：原 62vh(=1190px) 超设计宽，收敛到设计内
   .canvas-wrap {
     position: relative;
-    height: 24vh;
+    height: 461px;
     background: #fff;
-    border-radius: 1vh;
+    border-radius: 19px;
     .canvas {
       width: 100%;
       height: 100%;
-      border-radius: 1vh;
+      border-radius: 19px;
       touch-action: none;
     }
     .placeholder {
@@ -109,13 +109,13 @@ defineExpose({ recognize });
       justify-content: center;
       pointer-events: none;
       color: #b7a88f;
-      img { height: 4vh; margin-bottom: 0.8vh; opacity: 0.7; }
+      img { height: 77px; margin-bottom: 15px; opacity: 0.7; }
       span { font-size: 28px; }
     }
     .recognizing, .error-tip {
       position: absolute;
-      right: 1vh;
-      top: 1vh;
+      right: 19px;
+      top: 19px;
       font-size: 24px;
       color: #897967;
     }
@@ -124,14 +124,14 @@ defineExpose({ recognize });
   .actions {
     display: flex;
     justify-content: space-between;
-    margin-top: 1.4vh;
+    margin-top: 27px;
     .btn {
       font-family: "Source Han Serif CN", serif;
       font-size: 30px;
       color: #6d5a42;
       background: rgba(230, 218, 196, 0.8);
-      border-radius: 1vh;
-      padding: 1vh 4vh;
+      border-radius: 19px;
+      padding: 19px 77px;
       cursor: pointer;
       &:active { opacity: 0.6; }
     }

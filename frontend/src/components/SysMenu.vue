@@ -34,27 +34,27 @@ onBeforeUnmount(() => clearTimeout(timer));
 
 <style lang="scss" scoped>
 .sys-zone {
-  position: fixed;
+  position: absolute;   /* web-034：随舞台缩放（原 fixed 会脱离设计坐标系） */
   left: 0;
   top: 0;
-  width: 10vh;
-  height: 8vh;
+  width: 192px;
+  height: 154px;
   z-index: 50;
   background: transparent;
 }
 .sys-menu {
-  position: fixed;
-  top: 1.5vh;
+  position: absolute;   /* web-034：随舞台缩放 */
+  top: 29px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
   display: flex;
-  gap: 2vh;
+  gap: 38px;
   background: rgba(255, 250, 235, 0.9);
-  border-radius: 2vh;
-  padding: 1vh 2vh;
+  border-radius: 38px;
+  padding: 19px 38px;
   .sys-item {
-    height: 4.166vh;
+    height: 80px;
     cursor: pointer;
   }
 }

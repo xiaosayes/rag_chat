@@ -56,8 +56,8 @@ function tick() {
 
 async function init() {
   const el = container.value!;
-  const width = window.innerHeight * 0.39375;
-  const height = window.innerHeight * 0.50375;
+  const width = 756;    // web-034：1080×1920 设计坐标（原 39.375vh×50.375vh）
+  const height = 967;
   scene = new THREE.Scene();
   mixer = new THREE.AnimationMixer(scene);
   clock = new THREE.Clock();
@@ -119,18 +119,18 @@ defineExpose({
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  top: -1vh;
-  width: 39.375vh;
-  height: 50.375vh;
+  top: -19px;
+  width: 756px;
+  height: 967px;
   z-index: 1;
   background: transparent;
   pointer-events: none; /* 触屏事件穿透到下层（一体机） */
 }
 .deer-shadow {
   position: absolute;
-  bottom: 0.8vh;
+  bottom: 15px;
   left: 50%;
   transform: translateX(-50%);
-  height: 4.4vh;
+  height: 84px;
 }
 </style>

@@ -1,7 +1,7 @@
 <template>
   <div class="waveform">
     <div v-for="(bar, i) in bars" :key="i" class="bar"
-         :style="{ height: bar.height + 'vh', animationDuration: bar.duration + 's' }"></div>
+         :style="{ height: bar.height + 'px', animationDuration: bar.duration + 's' }"></div>
   </div>
 </template>
 
@@ -14,7 +14,7 @@ const bars = ref<{ height: number; duration: number }[]>([]);
 
 onMounted(() => {
   bars.value = Array.from({ length: props.count }, () => ({
-    height: Math.random() * 1.2916 + 1,
+    height: Math.random() * 24.8 + 19.2,   // px（1080×1920 设计坐标，web-034）
     duration: Math.random() * 0.6 + 0.7,
   }));
 });
@@ -25,13 +25,13 @@ onMounted(() => {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  min-height: 3vh;
-  padding: 1vh 2vh;
+  min-height: 58px;
+  padding: 19px 38px;
 }
 .bar {
-  width: 0.2401vh;
+  width: 5px;
   background-color: #897967;
-  margin-right: 0.40052vh;
+  margin-right: 8px;
   border-radius: 4px;
   animation: bounce infinite ease-in-out;
   transform-origin: bottom;

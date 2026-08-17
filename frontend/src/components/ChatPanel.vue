@@ -97,35 +97,35 @@ watch(
   height: 100%;
   .back {
     position: absolute;
-    right: 2.2vh;
-    top: 1vh;
-    height: 5.4vh;
+    right: 42px;
+    top: 19px;
+    height: 104px;
     cursor: pointer;
     z-index: 5;
   }
   .chat-scroll {
-    height: calc(100% - 4vh);
+    height: calc(100% - 77px);
     overflow-y: auto;
-    padding: 2vh 3vh;
+    padding: 38px 58px;
     box-sizing: border-box;
     &::-webkit-scrollbar { display: none; }
   }
   .chat-item {
     display: flex;
     align-items: flex-start;
-    margin-bottom: 2.2vh;
+    margin-bottom: 42px;
     &.chat-me { flex-direction: row-reverse; }
     .avatar img {
-      width: 6.4vh;
-      height: 6.4vh;
+      width: 123px;
+      height: 123px;
       border-radius: 50%;
     }
     .bubble {
       max-width: 62%;
-      margin: 0 1.6vh;
+      margin: 0 31px;
       background: rgba(255, 250, 235, 0.92);
-      border-radius: 1.6vh;
-      padding: 1.2vh 1.8vh;
+      border-radius: 31px;
+      padding: 23px 35px;
       &.me { background: rgba(255, 255, 255, 0.95); }
       .text {
         font-family: "Source Han Serif CN", serif;
@@ -139,7 +139,7 @@ watch(
   }
   .status-line {
     position: absolute;
-    bottom: 0.6vh;
+    bottom: 12px;
     left: 0;
     right: 0;
     text-align: center;

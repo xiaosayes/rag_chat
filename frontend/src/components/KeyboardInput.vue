@@ -84,16 +84,16 @@ defineExpose({ value, keyboardShow, handwriting });
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 1.6vh;
-    .mic-toggle { height: 6.77vh; cursor: pointer; }
+    gap: 31px;
+    .mic-toggle { height: 130px; cursor: pointer; }
     .field {
-      width: 26vh;
-      height: 6.77vh;
+      width: 499px;
+      height: 130px;
       background: url("../assets/input_bg.png") 100% 100% no-repeat;
       background-size: 100% 100%;
       display: flex;
       align-items: center;
-      padding: 0 2vh;
+      padding: 0 38px;
       box-sizing: border-box;
       cursor: pointer;
       .value {
@@ -104,15 +104,15 @@ defineExpose({ value, keyboardShow, handwriting });
         overflow: hidden;
         white-space: nowrap;
       }
-      .clear { height: 3vh; }
+      .clear { height: 58px; }
     }
-    .send { height: 6.77vh; cursor: pointer; }
+    .send { height: 130px; cursor: pointer; }
   }
   .keyboard-panel {
-    margin-top: 1.6vh;
+    margin-top: 31px;
     background: rgba(255, 250, 235, 0.95);
-    border-radius: 1.6vh;
-    padding: 1.6vh;
+    border-radius: 31px;
+    padding: 31px;
   }
 }
 .zoom-enter-active { animation: zoomIn 0.25s; }

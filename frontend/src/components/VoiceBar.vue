@@ -47,24 +47,24 @@ const label = computed(() => {
   align-items: center;
   justify-content: center;
   .keyboard-toggle {
-    height: 6.77vh;
+    height: 130px;
     cursor: pointer;
   }
   .mic-capsule {
-    width: 35.933vh;
-    height: 6.77vh;
+    width: 690px;
+    height: 130px;
     background: url("../assets/input_micro_bg.png") 100% 100% no-repeat;
     background-size: 100% 100%;
     display: flex;
     justify-content: center;
     align-items: flex-start;
     box-sizing: border-box;
-    padding-top: 1.8vh;
+    padding-top: 35px;
     cursor: pointer;
     &.recording span { color: #b25d3a; }
     .mic-icon {
-      height: 2.3958vh;
-      margin-right: 0.833vh;
+      height: 46px;
+      margin-right: 16px;
     }
     span {
       font-family: "Source Han Serif CN", serif;
