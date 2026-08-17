@@ -50,6 +50,13 @@ Chrome 关键参数：`--kiosk`（全屏无边框）、`--use-fake-ui-for-media-
 **免提常开收音必需**）、`--autoplay-policy=no-user-gesture-required`（免手势自动播音）、
 `--disable-pinch`（禁双指缩放）、`--incognito`（无恢复气泡）。
 
+### 3.1 PC 竖屏预览（联调/演示用，web-032/033）
+
+双击 `deploy/kiosk/start-pc-preview.bat`：540×960（9:16，恰为设计稿 0.5 倍）应用窗，
+免麦弹窗 + 自动播放；可 `start-pc-preview.bat http://主机:端口` 指定前端地址。
+页面为 1080×1920 设计坐标等比缩放（web-034），任意窗口比例均不变形（非 9:16 时两侧留边）。
+脚本找 Chrome 失败时自动回退 Edge。
+
 ## 4. 验收清单（现场）
 
 1. 启动页进度 0→100 后进首页，小鹿待机动作循环；

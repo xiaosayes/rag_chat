@@ -55,9 +55,10 @@
   倾听态 → wpgs 上屏 → 2s 静默自动提交「家博会几点开门？」→ 回答 80 字 + 播报 14.8s。
   **已知内核契约**：FSM 双计时由上行帧驱动（无帧不计时）——客户端须常开推流（一体机常开麦天然满足）；
   FSM 个别状态文案硬编码「小虎」（冻结内核，词面问题不影响功能）。
-- **M4 前端骨架（web-013~017）**：`frontend/`（Vue3+Vite+TS+Pinia+three 0.154，竖屏 1080
-  设计稿 px→vmin 适配）。资产全本地化（70MB）：小鹿 gltf/bin/7 贴图/EXR（CDN vendor，
-  `scripts/vendor_frontend_assets.py` 幂等）+ v2 切图/字体（只读复制自参考，参考目录零改动）。
+- **M4 前端骨架（web-013~017）**：`frontend/`（Vue3+Vite+TS+Pinia+three 0.154；
+  后于 web-034 重做适配：1080×1920 设计坐标定版 + 舞台等比缩放）。资产全本地化（70MB）：
+  小鹿 gltf/bin/7 贴图/EXR（CDN vendor，`scripts/vendor_frontend_assets.py` 幂等）
+  + v1 森林主题切图（设计稿原版；v2 金色舞台备用）+ 字体（只读复制自参考，参考目录零改动）。
   启动页（真实加载进度 + 条纹进度条 + 小鹿视频）、首页（3D 小鹿 STANDBY 动画池随机轮播、
   预设问题随机抽 8/换一批重抽、语音胶囊双态文案、隐藏系统菜单连点 3 次）。`vite build` 通过；
   `vite preview` 冒烟 index/model/img/font 全 200。前端 vitest 独立计数（10 项）。
