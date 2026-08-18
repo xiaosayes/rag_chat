@@ -81,6 +81,11 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **聊天态体验三修（web-042，用户反馈）**：①返回钮加大 80→104px + drop-shadow 与底色分离；
+  ②答案区收进屏幕内——滚动视口 bottom 上移 84px 让出状态行区 + 底部 44px 渐隐遮罩
+  （流式中段长文不再硬切顶到屏幕边缘，实测滚动区底 1836 < 状态行顶 1855 < 屏幕底 1920）；
+  ③语音提问自动跳聊天态——`useAutoChat` 在 await_broadcast/broadcast 沿切 chat
+  （listen 不跳、手动返回不回弹），组合件单测 + 真实页面沿注入实证。
 - **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
   薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
   （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，

@@ -144,3 +144,23 @@ describe("useVoiceSession", () => {
     expect(session.statusText.value).toBe("忙");
   });
 });
+
+describe("useAutoChat 语音提问自动跳聊天态（web-042）", () => {
+  it("await_broadcast/broadcast 触发跳转；standby/listen 不跳", async () => {
+    const { ref, nextTick } = await import("vue");
+    const { useAutoChat } = await import("../src/voice/useAutoChat");
+    const sessionMode = ref("standby");
+    const viewMode = ref("home");
+    useAutoChat(sessionMode as any, viewMode);
+    sessionMode.value = "listen";            // 唤醒聆听：不跳
+    await nextTick();
+    expect(viewMode.value).toBe("home");
+    sessionMode.value = "await_broadcast";   // 语音提交 → 跳聊天
+    await nextTick();
+    expect(viewMode.value).toBe("chat");
+    viewMode.value = "home";                 // 用户手动返回
+    sessionMode.value = "broadcast";         // 新一轮播报 → 再跳
+    await nextTick();
+    expect(viewMode.value).toBe("chat");
+  });
+});

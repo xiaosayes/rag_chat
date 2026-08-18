@@ -110,20 +110,25 @@ watch(
     display: flex;
     justify-content: flex-end;
     align-items: center;
-    height: 88px;
-    padding: 0 42px;
+    height: 116px;           /* web-042：返回钮加大更醒目 */
+    padding: 0 30px;
     box-sizing: border-box;
   }
   .back {
-    height: 80px;
+    height: 104px;           /* 80→104px（web-042） */
     cursor: pointer;
+    filter: drop-shadow(0 3px 6px rgba(74, 63, 48, 0.35));  /* 与羊皮纸底色分离 */
   }
   .chat-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;        /* 内容长时内部上下滑动浏览 */
-    padding: 10px 58px 96px; /* 底部预留状态行高度 */
+    margin-bottom: 84px;     /* web-042：视口收进屏幕内，下方留状态行区 */
+    padding: 10px 58px 48px; /* 末条气泡停在渐隐带之上 */
     box-sizing: border-box;
+    /* web-042：底部渐隐——长内容流式中段不再硬切顶到屏幕边缘（美化） */
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
     &::-webkit-scrollbar { display: none; }
   }
   .chat-item {

@@ -29,6 +29,7 @@ import SplashScreen from "../components/SplashScreen.vue";
 import SysMenu from "../components/SysMenu.vue";
 import KeyboardInput from "../components/KeyboardInput.vue";
 import VoiceBar from "../components/VoiceBar.vue";
+import { useAutoChat } from "../voice/useAutoChat";
 import { useHandsfree } from "../voice/useHandsfree";
 import { useIdleTimer } from "../voice/useIdleTimer";
 import { useVoiceSession } from "../voice/useVoiceSession";
@@ -59,6 +60,8 @@ const session = useVoiceSession({
   onActivity: () => idle.reset(),
   onClose: () => { session.statusText.value = "连接已断开，重连中…"; },
 });
+// web-042：语音提问自动跳聊天态（await_broadcast/broadcast 沿触发，手动返回不回弹）
+useAutoChat(session.mode, mode);
 
 // 免提闭环（web-025）：模型就绪自动开麦常开推流；失败降级手动
 const handsfree = useHandsfree({
