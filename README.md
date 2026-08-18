@@ -81,6 +81,11 @@
   免提链浏览器 E2E（`scripts/e2e_frontend_voice.py`）：自动开麦 + PCM 推流 + FSM 待机活跃全过；
   **留档：Chrome fake-file 音频注入在本 Chromium 无效（mic RMS 静音底实证）**，内容级语音链以
   `scripts/smoke_kiosk_voice.py` 服务端真链路为准。前端 vitest 47 项（独立计数）。
+- **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
+  薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
+  （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，
+  **Gradio 控制台不受影响**（长回答对管理调试有价值）。实测「有什么电影推荐」
+  992→431 字、总耗时 102.7→48.3s、音频 158→64.6s；KB 路径（80 字）回归不变。
 - **慢流播报死亡修复（web-040，用户反馈「播几个字后全哑」）**：根因=看门狗误伤——
   联网搜索长流 chunk 间隙 >15s 时，旧 `_broken()` 把「LLM 间隙静默」误判 TTS 卡死，
   误重建×2 后 dead 放弃整轮播报（服务端日志实证 重建(1/2)(2/2)→放弃）。

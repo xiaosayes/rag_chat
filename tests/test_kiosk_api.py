@@ -195,3 +195,27 @@ class TestApp:
         assert c.get("/api/config", headers={"X-Kiosk-Token": "wrong"}).status_code == 401
         assert c.get("/api/config", headers={"X-Kiosk-Token": "s3cret"}).status_code == 200
         assert c.get("/api/health").status_code == 200   # 免鉴权
+
+
+class TestKioskLlmCaps:
+    """web-041：一体机进程级回答限长（幂等、只降不升、不动低值配置）。"""
+
+    def test_clamp_idempotent(self, monkeypatch):
+        import kiosk_server.services as svc
+
+        fake = types.SimpleNamespace(llm_max_tokens=4096)
+        monkeypatch.setattr(svc, "settings", fake)
+        monkeypatch.setattr(svc, "_caps_applied", False)
+        svc.apply_kiosk_llm_caps()
+        assert fake.llm_max_tokens == svc.KIOSK_ANSWER_MAX_TOKENS == 320
+        svc.apply_kiosk_llm_caps()                       # 幂等
+        assert fake.llm_max_tokens == 320
+
+    def test_lower_value_untouched(self, monkeypatch):
+        import kiosk_server.services as svc
+
+        fake = types.SimpleNamespace(llm_max_tokens=256)  # 部署已更低 → 不动
+        monkeypatch.setattr(svc, "settings", fake)
+        monkeypatch.setattr(svc, "_caps_applied", False)
+        svc.apply_kiosk_llm_caps()
+        assert fake.llm_max_tokens == 256

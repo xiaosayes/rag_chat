@@ -17,6 +17,24 @@ _pipeline_project: str = ""
 _pipeline_status = "not_loaded"          # not_loaded / ready / error:<msg>
 _lock = threading.Lock()
 
+# web-041：一体机语音播报场景回答限长（用户拍板 320）。进程级钳制 settings.llm_max_tokens，
+# 仅影响本薄层进程（Gradio 控制台不受影响，长回答对管理/调试仍有价值）；内核 LLM 实例在
+# pipeline 装配时捕获该值 → 必须在任何 pipeline 加载之前调用（__main__ 生产入口保证）。
+KIOSK_ANSWER_MAX_TOKENS = 320
+_caps_applied = False
+
+
+def apply_kiosk_llm_caps() -> None:
+    """幂等：仅当现值高于上限时钳制（低于上限的部署配置不动）。"""
+    global _caps_applied
+    if _caps_applied:
+        return
+    _caps_applied = True
+    if settings.llm_max_tokens > KIOSK_ANSWER_MAX_TOKENS:
+        logger.info("kiosk 回答限长: llm_max_tokens %s → %s（仅本进程，Gradio 不受影响）",
+                    settings.llm_max_tokens, KIOSK_ANSWER_MAX_TOKENS)
+        settings.llm_max_tokens = KIOSK_ANSWER_MAX_TOKENS
+
 
 def _load_pipeline(project_id: str):
     """真实加载路径（测试 monkeypatch 此函数注入假件）。"""
@@ -79,13 +97,14 @@ def make_tts():
 def _reset_cache() -> None:
     """测试/关停用：清空单例缓存与语音探针状态。"""
     global _pipeline, _pipeline_project, _pipeline_status
-    global _voice_init_error, _voice_probed
+    global _voice_init_error, _voice_probed, _caps_applied
     with _lock:
         _pipeline = None
         _pipeline_project = ""
         _pipeline_status = "not_loaded"
         _voice_init_error = ""
         _voice_probed = False
+        _caps_applied = False
         _greeting_mem.clear()
 
 

@@ -7,6 +7,7 @@ import uvicorn
 
 from .app import create_app
 from .config import KioskConfig
+from .services import apply_kiosk_llm_caps
 
 
 def main() -> None:
@@ -15,6 +16,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
     cfg = KioskConfig.from_env()
+    apply_kiosk_llm_caps()   # web-041：回答限长 320 tokens（须在任何 pipeline 加载之前）
     uvicorn.run(
         create_app(cfg),
         host=args.host or cfg.host,
