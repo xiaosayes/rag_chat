@@ -66,6 +66,20 @@ describe("ChatPanel", () => {
     expect(session.chatHistory).toHaveLength(0);
     expect(w.emitted("back")).toHaveLength(1);
   });
+
+  // web-047：返回首页必须中断播报——本地立即静音 + 通知服务端取消本轮
+  it("返回：播报中点返回 → 本地停播 + 服务端取消", async () => {
+    const session = makeSession();
+    session.askText("q");
+    session.onEvent({ type: "answer_start", turn: 1 });
+    session.onEvent({ type: "audio_start", turn: 1 });          // 播报中
+    const w = mount(ChatPanel, { props: { session } });
+    await w.find(".back").trigger("click");
+    expect((session as any).player.stop).toHaveBeenCalled();     // 本地立即静音
+    expect((session as any).client.bargeIn).toHaveBeenCalled();  // 服务端取消生成/播报
+    expect(session.chatHistory).toHaveLength(0);
+    expect(w.emitted("back")).toHaveLength(1);
+  });
 });
 
 describe("useIdleTimer", () => {

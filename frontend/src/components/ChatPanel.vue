@@ -85,6 +85,9 @@ function stopReplayTracker() {
 
 function onBack() {
   stopReplayTracker();
+  // web-047：返回即中断播报——本地立即静音（不等服务端回包），并通知服务端取消本轮
+  props.session.player.stop();
+  props.session.barge();
   props.session.resetChat();
   emit("back");
 }
