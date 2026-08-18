@@ -600,3 +600,8 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
     BailianLLM、chat 1.49s、首字 0.56s。离线测试 29 项全绿。
 - **测试**：pytest **738 passed**（+29：config/工厂/chat/stream/重试/4xx/钳制/管线接线/
   兜底分支）；前端 vitest **55 passed** 无回归。
+- **配套文档/配置（web-044 收尾）**：`deploy/OPERATIONS.md` 运维手册（三端启停 + 双通道
+  切换标准三步 + SSH 隧道联调 + 故障速查）；`.env.development→127.0.0.1:7862`
+  （实测定位：本机与服务器唯一通道是 SSH 隧道——防火墙只放 22 且 ub-server 主机名
+  本机不解析，preview 无预设/无响应即此因）；单元模板按 ub-server 实录修正。
+  服务器部署实证：百炼通道全链 OK（首文本 3.88s/首音频 4.68s）、local 通道冒烟 OK。

@@ -106,6 +106,12 @@
   既有约束（100 字以内/禁 Markdown/不编造/不提实现细节）保留。提示词内容回归测试 3 项。
   记录在案（本轮不实施）：路径 A/B 答案 Markdown 清洗位置定为**前端展示层**；
   内核 chitchat/RAG 提示词人设（小虎/家博会）本轮不处理。
+- **运维手册与联调地址修正（web-044 配套）**：新增 `deploy/OPERATIONS.md`——三端
+  （服务器/本机/一体机）启停操作、本地/在线双通道切换标准三步、SSH 隧道联调法
+  （本机与服务器唯一通道：防火墙只放 22，`ub-server` 主机名本机不解析）、故障速查；
+  `frontend/.env.development` 指向 `127.0.0.1:7862`（经隧道连服务器后端；
+  `.env.production` 保持 `ub-server:7862` 供局域网一体机）；
+  `deploy/server/kiosk-server.service` 按 ub-server 实录修正（conda 路径 + 7862 端口）。
 - **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
   薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
   （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，
