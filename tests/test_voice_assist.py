@@ -1156,3 +1156,102 @@ class TestSpeedConfig:
         import app as app_mod
         head = app_mod._voice_assist_head()
         assert "/__voice_greeting" in head and "已唤醒" in head
+
+
+class TestLatePartialWakeInEndpointWindow:
+    """web-048：说完后迟到的部分结果（VAD 端点窗内、segment 之前）也参与唤醒匹配。
+
+    实测（服务器，真实讯飞）：完整部分结果多数在 in_speech 翻 False 后的端点窗内
+    才到齐 → 旧窗口（仅 in_speech 期间评估）必然落入「端点 500ms + finish 往返」
+    慢通道（实测 +1.22s）；放宽到「ASR 会话存活期间」后稳定 +0.3~0.5s。
+    匹配规则不变——同样文本早晚都会命中，只是提前，不产生新的误唤醒类别。
+    """
+
+    class _WindowVAD:
+        """可表达「in_speech=False 但 segment 未发（端点窗）」状态的假 VAD。"""
+
+        def __init__(self, steps):
+            self._steps = list(steps)
+            self.in_speech = False
+            self._pending = b""
+
+        def feed(self, pcm):
+            step = self._steps.pop(0) if self._steps else {}
+            self.in_speech = step.get("in_speech", False)
+            self._pending = step.get("pending", b"")
+            return step.get("events", [])
+
+        def take_pending(self):
+            b, self._pending = self._pending, b""
+            return b
+
+    class _LatePartialASR:
+        """语音期间部分结果不完整；端点窗内（再喂一帧）才补全唤醒词。"""
+
+        def __init__(self):
+            self._partials = ["你好，", "你好，小"]
+            self._late = "你好，小虎"
+            self._cur = ""
+            self.closed = False
+
+        def feed(self, b):
+            self._cur = self._partials.pop(0) if self._partials else self._late
+
+        @property
+        def current_text(self):
+            return self._cur
+
+        def finish(self):
+            return "你好，小虎"
+
+        def close(self):
+            self.closed = True
+
+    def test_late_partial_in_endpoint_window_wakes_early(self):
+        from src.voice_assistant import VoiceAssistant
+        asr = self._LatePartialASR()
+        steps = [
+            {"events": [("confirmed_start", None)], "in_speech": True, "pending": b"a"},
+            {"in_speech": True, "pending": b"b"},       # 语音中，部分结果不完整
+            {"in_speech": False, "pending": b"c"},      # 端点窗：迟到部分结果此帧补全
+            {"events": [("segment", b"")]},             # 端点闭合（旧逻辑的慢通道）
+        ]
+        va = VoiceAssistant(self._WindowVAD(steps), lambda: asr,
+                            wake_words=["你好小虎"], greeting="g")
+        va.process_chunk(_PCM)          # confirmed_start 开会话
+        va.process_chunk(_PCM)          # partial "你好，小" 未命中
+        a3 = va.process_chunk(_PCM)     # 端点窗：迟到 partial 补全 → 应立即命中
+        assert "greet" in _kinds(a3)    # 旧逻辑此处无 greet（要等到 segment+finish）
+        assert va.mode == "await_broadcast"
+        assert asr.closed               # 提前命中即关闭会话（同既有提前唤醒语义）
+
+    def test_endpoint_window_late_partial_no_false_wake(self):
+        """端点窗内迟到部分结果仍不含唤醒词 → 不唤醒（不误伤）。"""
+        from src.voice_assistant import VoiceAssistant
+
+        class _ASR(self._LatePartialASR.__bases__[0] if False else object):
+            def __init__(self):
+                self._cur = ""
+                self.closed = False
+            def feed(self, b):
+                self._cur = "今天天气"
+            @property
+            def current_text(self):
+                return self._cur
+            def finish(self):
+                return "今天天气"
+            def close(self):
+                self.closed = True
+
+        asr = _ASR()
+        steps = [
+            {"events": [("confirmed_start", None)], "in_speech": True, "pending": b"a"},
+            {"in_speech": False, "pending": b"b"},      # 端点窗：迟到 partial 非唤醒词
+            {"events": [("segment", b"")]},
+        ]
+        va = VoiceAssistant(self._WindowVAD(steps), lambda: asr,
+                            wake_words=["你好小虎"], greeting="g")
+        va.process_chunk(_PCM)
+        a2 = va.process_chunk(_PCM)
+        assert "greet" not in _kinds(a2)                # 不误唤醒
+        assert va.mode == "standby"

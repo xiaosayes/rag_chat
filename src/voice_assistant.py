@@ -173,8 +173,13 @@ class VoiceAssistant:
                     actions.append(VoiceAction("msg", self._question))
                     actions.append(VoiceAction("status", "🎙 可继续补充，稍候自动提交…"))
 
-        # 语音进行中：增量喂 ASR + 部分结果实时上屏（需求5：边说边出字）
-        if self._asr is not None and self._vad.in_speech:
+        # 增量喂 ASR + 部分结果实时上屏（需求5：边说边出字）
+        # web-048：评估窗口从「in_speech 期间」放宽到「ASR 会话存活期间」——
+        # 讯飞完整部分结果多数在说话结束后、VAD 端点闭合前的窗口内才到齐，
+        # 旧窗口使待机唤醒必然落入「端点 500ms + finish 往返」慢通道（实测 +1.22s）；
+        # 放宽后部分结果一到齐即命中（实测 +0.3~0.5s）。匹配规则不变——
+        # 同样文本早晚都会命中，只是提前，不产生新的误唤醒类别。
+        if self._asr is not None:
             pending = self._vad.take_pending()
             if pending:
                 self._asr.feed(pending)
