@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from src.utils import clean_text_for_tts
+from .tts_clean import clean_for_broadcast   # web-046：内核清洗+薄层补充（未配对 **/列表前缀）
 
 from .tts_feed import PauseCompressor, take_feed_unit, take_first_unit
 
@@ -208,7 +208,7 @@ class BroadcastSession:
                                                    starve=clock() - last_feed_at > 2.5))
                         if not seg:
                             break
-                        seg_clean = clean_text_for_tts(seg)
+                        seg_clean = clean_for_broadcast(seg)
                         if not seg_clean:
                             continue
                         last_feed_at = clock()     # web-040：先记喂入时刻——
@@ -239,7 +239,7 @@ class BroadcastSession:
                 emit({"type": "playback_cancel"})
         else:
             if tts is not None and not dead:
-                tail = clean_text_for_tts(buf.strip()) if buf.strip() else ""
+                tail = clean_for_broadcast(buf.strip()) if buf.strip() else ""
                 if tail and not _feed(tail):
                     _restart()
                 if handle is not None:

@@ -121,6 +121,13 @@
   证据：同一超长 prompt 复现脚本由 FatalAPIError → 流式完整作答；真实管线副本 KB
   两路径实测——相关度不足走拒答→兑底（无崩溃）、命中路径 96 chunk 流式作答；
   离线测试 +4。pytest 742 passed / vitest 55 passed。
+- **Markdown 残留完整修复（web-046，用户反馈截图实证）**：内核推荐提示词主动输出
+  `**` 结构化文本（冻结区不可改）→ 双侧清洗。展示侧：前端 `cleanForDisplay` 渲染时
+  剥 Markdown 语法（跨 chunk 未配对 `**` 天然覆盖），硬约束不误伤小数/日期区间/百分比/
+  货币/列表序号/乘法式；播报侧：薄层 `clean_for_broadcast`（内核清洗后补充）剥未配对
+  `**`、有序列表前缀「1. 」「2、」（护小数）、条目分隔横杠→逗号、仅剩标点判空。
+  真实截图文本双侧 before/after 实证 + npm run build 通过。
+  pytest 763 passed（+21）/ vitest 73 passed（+18）。
 - **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
   薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
   （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，

@@ -16,7 +16,8 @@
                         :playing="replayState.k === k && replayState.playing"
                         @toggle="onReplayToggle(k, item)"
                         @seek="(s: number) => onSeek(k, item, s)" />
-              <p class="text">{{ item.text }}</p>
+              <!-- web-046：展示层剥 Markdown 语法符号（原文不动，渲染时清洗） -->
+              <p class="text">{{ cleanForDisplay(item.text) }}</p>
             </template>
           </div>
         </template>
@@ -35,6 +36,7 @@
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import MusicBar from "./MusicBar.vue";
 import WaveLoading from "./WaveLoading.vue";
+import { cleanForDisplay } from "../utils/textClean";
 import type { ChatItem, useVoiceSession } from "../voice/useVoiceSession";
 
 const props = defineProps<{ session: ReturnType<typeof useVoiceSession> }>();
