@@ -93,3 +93,33 @@ class TestPassthrough:
     def test_prefix_constant_sane(self):
         assert REFUSAL_PREFIX
         assert KB_NO_INFO_REPLY.startswith(REFUSAL_PREFIX)
+
+
+class TestWebSearchStreamParams:
+    """web-040：兜底流参数——max_tokens 硬限长、历史裁剪、Markdown ** 剥离（离线假 Generation）。"""
+
+    def test_params_history_trim_and_strip(self, monkeypatch):
+        import types
+
+        captured = {}
+
+        def fake_call(**kw):
+            captured.update(kw)
+            msg = types.SimpleNamespace(content="你好**世界**")
+            choice = types.SimpleNamespace(message=msg)
+            resp = types.SimpleNamespace(status_code=200,
+                                         output=types.SimpleNamespace(choices=[choice]))
+            return iter([resp])
+        monkeypatch.setattr("dashscope.Generation.call", fake_call)
+
+        from kiosk_server.web_fallback import (FALLBACK_HISTORY, FALLBACK_MAX_TOKENS,
+                                               _web_search_stream)
+        hist = [{"role": "user", "content": f"h{i}"} for i in range(6)]
+        out = list(_web_search_stream("问题", hist))
+        assert captured["max_tokens"] == FALLBACK_MAX_TOKENS      # 硬限长
+        assert captured["enable_search"] is True
+        # system + 裁剪后历史 + 当前问题
+        assert len(captured["messages"]) == 1 + min(len(hist), FALLBACK_HISTORY) + 1
+        assert captured["messages"][-2:] == [
+            {"role": "user", "content": "h5"}, {"role": "user", "content": "问题"}]
+        assert out == ["你好世界"]                                # ** 剥离

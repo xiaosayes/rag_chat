@@ -18,6 +18,8 @@ from src.rag_pipeline import KB_NO_INFO_REPLY
 logger = logging.getLogger(__name__)
 
 REFUSAL_PREFIX = KB_NO_INFO_REPLY[:12]   # 前缀累积判定（拒答模板可能被分段 yield）
+FALLBACK_MAX_TOKENS = 320                # 硬上限（兑底回答须短小；实测模型会无提示 875 字长文）
+FALLBACK_HISTORY = 2                     # 仅带最近 1 轮（多带会被内核闲聊人设「小虎/家博会」带偏）
 
 # 兜底专用系统提示词（薄层自有，不复用内核家博会默认主体提示词，避免带偏）
 FALLBACK_SYSTEM_PROMPT = (
@@ -37,7 +39,7 @@ def _web_search_stream(question: str,
 
     from src.utils import strip_emoji   # bug-114 同款：逐 token 去 emoji
 
-    messages = list(history or [])[-6:]
+    messages = list(history or [])[-FALLBACK_HISTORY:]
     messages.append({"role": "user", "content": question})
     full_messages = [{"role": "system", "content": FALLBACK_SYSTEM_PROMPT}] + messages
     responses = Generation.call(
@@ -45,7 +47,7 @@ def _web_search_stream(question: str,
         messages=full_messages,
         api_key=settings.dashscope_api_key,
         temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
+        max_tokens=min(settings.llm_max_tokens, FALLBACK_MAX_TOKENS),  # web-040 硬限长
         top_p=settings.llm_top_p,
         stream=True,
         result_format="message",
@@ -57,7 +59,7 @@ def _web_search_stream(question: str,
             raise RuntimeError(f"联网兜底 LLM 调用失败: {resp.code} {resp.message}")
         content = resp.output.choices[0].message.content
         if content:
-            yield strip_emoji(content)
+            yield strip_emoji(content).replace("**", "")   # web-040：剥 Markdown 粗体残留
 
 
 class WebFallbackPipeline:

@@ -156,8 +156,15 @@ class BroadcastSession:
                 return False
             if handle.error:
                 return True
-            return (fed and not handle.done.is_set()
-                    and clock() - last_audio_at > self._watchdog_s)
+            # web-040：只在「有已喂未合成的积压」时才判定异常。
+            # 音频已追上喂入（last_audio_at >= last_feed_at）后的静默 = LLM 流式间隙
+            # （联网搜索长流 chunk 间隔可达数十秒），不是 TTS 卡死——旧逻辑在此误重建
+            # ×2 后放弃播报（用户实测：播几个字后全哑）。
+            if not fed or handle.done.is_set():
+                return False
+            if last_audio_at >= last_feed_at:      # 无积压：最新喂入的音频已到达
+                return False
+            return clock() - last_audio_at > self._watchdog_s
 
         def _restart() -> None:                    # 重建并只重喂最后片段（有界重复）
             nonlocal handle, restarts, dead
@@ -204,8 +211,9 @@ class BroadcastSession:
                         seg_clean = clean_text_for_tts(seg)
                         if not seg_clean:
                             continue
-                        if _feed(seg_clean):
-                            last_feed_at = clock()
+                        last_feed_at = clock()     # web-040：先记喂入时刻——
+                        if _feed(seg_clean):       # 随后到达的音频即视为「已追上喂入」
+                            pass
                         else:
                             _restart()
             elif kind == "error":

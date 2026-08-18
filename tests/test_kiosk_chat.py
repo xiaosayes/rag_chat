@@ -246,6 +246,24 @@ class TestBroadcastSession:
         assert end["cancelled"] is True
         assert tts.handles and tts.handles[0].cancelled is True
 
+    def test_watchdog_not_fired_when_audio_caught_up(self):
+        # web-040：LLM 流式间隙（TTS 音频已追上喂入）不算 TTS 异常——慢流不触发重建。
+        # 回归：旧逻辑在间隙 >watchdog_s 时误重建×2后放弃播报（用户实测「播几个字后全哑」）。
+        gate = threading.Event()
+        pipe = FakePipeline(["第一句长一点的话。", "第二句。"], gate=gate)
+        tts = FakeTTS()                       # 喂入即产音频（追上喂入）
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: tts, emit, tick_s=0.01, watchdog_s=0.15)
+        t = threading.Thread(target=lambda: s.ask("q"))
+        t.start()
+        time.sleep(0.4)                       # 首句已喂已产音频；泵卡在 gate（LLM 间隙 >watchdog）
+        gate.set()
+        t.join(timeout=10)
+        assert len(tts.handles) == 1          # 旧逻辑此处 ≥2（误重建）
+        assert "audio_start" in _event_types(events)
+        end = [e for e in events if e["type"] == "answer_end"][0]
+        assert end["full_text"] == "第一句长一点的话。第二句。" and end["cancelled"] is False
+
     def test_watchdog_restart_then_dead(self):
         # mute+hang：从不产音频、finish 不完 → 看门狗重建 ≤2 次后放弃，回答仍完整交付
         pipe = FakePipeline(["一句。"])
