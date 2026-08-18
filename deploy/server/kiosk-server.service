@@ -1,6 +1,11 @@
 # kiosk_server systemd 单元（web-027）——/etc/systemd/system/kiosk-server.service
 # 与 Gradio app.py（:7860）互斥运行：Qdrant 本地嵌入模式文件锁（已实证），
 #   同库同时只能一个进程持有。本单元与 ragchat-gradio.service 不应同时 enabled。
+# web-044 部署实录（ub-server，2026-08-18）：
+#   ① conda 路径以实际安装为准——ub-server 为 /data/conda_envs/cultural-relics-rag
+#     （其他机器若不同，sed 's|/data/conda_envs|<实际前缀>|g' 替换）；
+#   ② 端口 7861 被 Langchain-Chatchat（chatchat/cli.py）占用 → 本机实例改用 7862，
+#     前端 VITE_API_URL 同步指向 http://<服务器IP>:7862。
 [Unit]
 Description=Digital human kiosk thin API (RAG/ASR/TTS/OCR)
 After=network-online.target
@@ -9,12 +14,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/data/codes/rag_chat
-Environment=PATH=/data/miniconda3/envs/cultural-relics-rag/bin:/usr/local/bin:/usr/bin
+Environment=PATH=/data/conda_envs/cultural-relics-rag/bin:/usr/local/bin:/usr/bin
 # 可选：KIOSK_API_TOKEN=<内网令牌>（设置后前端须经 query 参数携带）
-ExecStart=/data/miniconda3/envs/cultural-relics-rag/bin/python -m kiosk_server --host 0.0.0.0 --port 7861
+ExecStart=/data/conda_envs/cultural-relics-rag/bin/python -m kiosk_server --host 0.0.0.0 --port 7862
 Restart=always
 RestartSec=3
-# 资源水位：薄层 + 内核缓存 ~1.5GB 内存量级（与 Gradio 进程相当）
+# 资源水位：薄层 + 内核缓存 ~1.5GB 内存量级（与 Gradio 进程相当）；生成/检索全走 API，不占 GPU
 
 [Install]
 WantedBy=multi-user.target

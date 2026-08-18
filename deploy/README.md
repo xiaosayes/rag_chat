@@ -8,7 +8,7 @@
 | 组件 | 位置 | 端口 | 说明 |
 |---|---|---|---|
 | `frontend/dist` 静态前端 | 一体机本地 | 8080（`serve-dist.py`） | Chrome kiosk 全屏加载 |
-| `kiosk_server` 薄层 API | 服务器 | **7861** | `WS /ws/voice` + `GET /api/*` + `POST /api/ocr` |
+| `kiosk_server` 薄层 API | 服务器 | **7861**（ub-server 实例用 **7862**，7861 被 Langchain-Chatchat 占用） | `WS /ws/voice` + `GET /api/*` + `POST /api/ocr` |
 | Gradio Web UI（调试用） | 服务器 | 7860 | **与 kiosk_server 互斥**（Qdrant 本地锁，已实证） |
 | 讯飞 IAT / 百炼 | 云端 | — | 仅服务器持有密钥 |
 
@@ -17,8 +17,9 @@
 ```bash
 cd /data/codes/rag_chat
 conda activate cultural-relics-rag
-python -m kiosk_server --host 0.0.0.0 --port 7861     # 前台
+python -m kiosk_server --host 0.0.0.0 --port 7862     # 前台（端口以实际空闲为准）
 # 或 systemd：sudo cp deploy/server/kiosk-server.service /etc/systemd/system/
+#   （模板已按 ub-server 实录修正 conda 路径与 7862 端口，见文件头注释）
 #   sudo systemctl enable --now kiosk-server
 ```
 
@@ -32,6 +33,10 @@ python -m kiosk_server --host 0.0.0.0 --port 7861     # 前台
 - 薄层（可选）：`KIOSK_API_TOKEN`（设置后前端须带 `?token=`）、`KIOSK_CORS_ORIGINS`、
   `KIOSK_OCR_MODEL`（默认 qwen-vl-ocr-latest）、`KIOSK_PRESETS_PATH`（默认 data/kiosk/preset_questions.json）、
   `KIOSK_PROJECT_ID`（默认 jiabohui）
+- LLM 双通道（web-044）：`LLM_PROVIDER=dashscope|local`（默认 dashscope）、
+  `LOCAL_LLM_BASE_URL`（ub-server 本机 vLLM `http://127.0.0.1:18081/v1`）、
+  `LOCAL_LLM_API_KEY`、`LOCAL_LLM_MODEL=qwen25-14b`、可选 `LOCAL_LLM_CONTEXT_TOKENS=4096`；
+  切 local 后联网搜索失效（模型自有知识+知识库检索作答），embedding/rerank/ASR/TTS/OCR 仍走云端
 
 **预设问题**：服务器编辑 `data/kiosk/preset_questions.json`（`{"questions": [...]}`）即生效，前端随机抽 8 条展示。
 
