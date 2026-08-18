@@ -28,7 +28,15 @@ psd_files/
 docs/
 data/
 web/
+precheck/
 
-# 数字人前端（web-014）
-frontend/node_modules/
-frontend/dist/
+# 数字人前端
+frontend/
+
+#工具相关
+.pytest_cache/
+.pi/
+.superpowers/
+
+#测试
+tests/
