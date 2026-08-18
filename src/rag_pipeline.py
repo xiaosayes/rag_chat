@@ -21,7 +21,7 @@ from src.embeddings import BailianEmbedding
 from src.vector_store import VectorStore
 from src.retriever import BM25Retriever, HybridRetriever
 from src.reranker import BailianReranker
-from src.llm import BailianLLM
+from src.llm import BailianLLM, create_llm
 from src.utils import save_json, load_json
 from src.document_loader import DocumentLoader
 from src.project import project_manager, ProjectConfig
@@ -240,14 +240,8 @@ class RAGPipeline:
             model=settings.reranker_model,
             top_k=settings.reranker_top_k,
         )
-        self.llm = BailianLLM(
-            model=llm_model or settings.llm_model_name,
-            # P1-3 修复：接线生成参数配置
-            temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
-            top_p=settings.llm_top_p,
-            use_cache=enable_cache,
-        )
+        # web-044：经 create_llm 工厂按 llm_provider 切换（默认百炼，行为不变）
+        self.llm = create_llm(model=llm_model, use_cache=enable_cache)
         # L1 语义意图分类器（分层意图理解：L0 规则 is_kb_related → L1 语义 → L2 LLM 兜底）
         self.intent_classifier = SemanticIntentClassifier(
             embedding=self.embedding,

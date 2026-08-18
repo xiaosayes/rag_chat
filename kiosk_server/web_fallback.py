@@ -14,6 +14,7 @@ from typing import Generator, Iterable, Optional
 
 from src.config import settings
 from src.rag_pipeline import KB_NO_INFO_REPLY
+from src.utils import strip_emoji   # bug-114 同款：逐 token 去 emoji
 
 logger = logging.getLogger(__name__)
 
@@ -22,22 +23,32 @@ FALLBACK_MAX_TOKENS = 320                # 硬上限（兑底回答须短小；�
 FALLBACK_HISTORY = 2                     # 仅带最近 1 轮（多带会被内核闲聊人设「小虎/家博会」带偏）
 
 # 兜底专用系统提示词（薄层自有，不复用内核家博会默认主体提示词，避免带偏）
+# web-043：强化播报友好度约束——连贯单段叙述、禁列表/编号/项目符号、避免英文术语，
+# 句子简短顺口适合语音朗读（痛点：答案带列表符号/英文术语时 TTS 朗读生硬）。
 FALLBACK_SYSTEM_PROMPT = (
     "你是“湘小图”，一位友好、可靠的智能问答助手。"
     "用户的问题在本地知识库中没有确切资料，请结合公开信息作答。"
     "要求："
-    "1. 回答简洁口语化（用于语音播报），一般控制在100字以内，不使用 Markdown 标记与表情符号；"
-    "2. 信息务必准确，不确定就明说暂未查到确切信息，不要编造；"
-    "3. 不要提及“联网”“搜索”等实现细节。"
+    "1. 回答简洁口语化（用于语音播报），一般控制在100字以内；"
+    "2. 用连贯的一段话讲述，不使用 Markdown 标记、表情符号、列表、编号或项目符号；"
+    "3. 句子简短顺口，适合语音朗读；避免英文术语与缩写，必须使用时请用中文说法；"
+    "4. 信息务必准确，不确定就明说暂未查到确切信息，不要编造；"
+    "5. 不要提及“联网”“搜索”等实现细节。"
 )
 
 
 def _web_search_stream(question: str,
                        history: Optional[list]) -> Generator[str, None, None]:
-    """百炼 enable_search 流式回答（与 src/llm.py 同 SDK 路径与参数；密钥仅在服务端）。"""
-    from dashscope import Generation
+    """百炼 enable_search 流式回答（与 src/llm.py 同 SDK 路径与参数；密钥仅在服务端）。
 
-    from src.utils import strip_emoji   # bug-114 同款：逐 token 去 emoji
+    web-044：provider=local 时改走本地 OpenAI 兼容模型（无实时联网能力，
+    按模型自有知识作答；提示词/限长/裁历史不变）。
+    """
+    if settings.llm_provider == "local":
+        yield from _local_answer_stream(question, history)
+        return
+
+    from dashscope import Generation
 
     messages = list(history or [])[-FALLBACK_HISTORY:]
     messages.append({"role": "user", "content": question})
@@ -60,6 +71,33 @@ def _web_search_stream(question: str,
         content = resp.output.choices[0].message.content
         if content:
             yield strip_emoji(content).replace("**", "")   # web-040：剥 Markdown 粗体残留
+
+
+def _local_answer_stream(question: str,
+                         history: Optional[list]) -> Generator[str, None, None]:
+    """web-044：本地模型兜底流式回答（provider=local 时启用）。
+
+    本地服务无私有联网能力 → 按模型自有知识作答（LocalOpenAILLM 对
+    enable_search=True 仅告警并忽略）；FALLBACK_SYSTEM_PROMPT 湘小图人设、
+    FALLBACK_MAX_TOKENS 硬限、FALLBACK_HISTORY 裁历史均与百炼路径一致。
+    """
+    from src.llm import LocalOpenAILLM
+
+    llm = LocalOpenAILLM(
+        model=settings.local_llm_model,
+        base_url=settings.local_llm_base_url,
+        api_key=settings.local_llm_api_key,
+        temperature=settings.llm_temperature,
+        max_tokens=min(settings.llm_max_tokens, FALLBACK_MAX_TOKENS),  # web-040 硬限长
+        top_p=settings.llm_top_p,
+        use_cache=False,           # 与百炼兜底路径一致：不写 LLM 缓存
+    )
+    messages = list(history or [])[-FALLBACK_HISTORY:]
+    messages.append({"role": "user", "content": question})
+    for token in llm.chat_stream(messages, system_prompt=FALLBACK_SYSTEM_PROMPT,
+                                 enable_search=True):
+        # 与百炼路径同款出口清洗契约（emoji + ** 剥离），不依赖下游实现
+        yield strip_emoji(token).replace("**", "")
 
 
 class WebFallbackPipeline:

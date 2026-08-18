@@ -80,6 +80,31 @@ class Settings(BaseSettings):
         description="是否启用联网搜索总开关（enable_search，按需自动启用；需百炼账号开通搜索能力）",
     )
 
+    # web-044：LLM 提供方切换——百炼 DashScope 与本地 OpenAI 兼容服务并存、可切换。
+    # 默认 dashscope（零行为变化）；provider=local 时生成走本地服务，
+    # 联网搜索能力本地不可用（自动忽略并告警），embedding/rerank 仍走百炼。
+    llm_provider: str = Field(
+        default="dashscope",
+        description="LLM 提供方：dashscope=阿里云百炼（默认）| local=本地 OpenAI 兼容服务",
+    )
+    local_llm_base_url: str = Field(
+        default="http://127.0.0.1:18081/v1",
+        description="本地 LLM OpenAI 兼容接口地址（vLLM 等 serving）",
+    )
+    local_llm_api_key: str = Field(
+        default="",
+        description="本地 LLM 接口密钥（仅服务端，永不进前端；空则以占位值代替）",
+    )
+    local_llm_model: str = Field(
+        default="qwen25-14b",
+        description="本地 LLM 模型名（serving 侧 served model name）",
+    )
+    local_llm_context_tokens: int = Field(
+        default=4096,
+        ge=512,
+        description="本地 LLM 上下文总长 tokens（vLLM max_model_len）；completion 按预算自动钳制防 400",
+    )
+
     # ========== 讯飞语音识别 (ASR) ==========
     xfyun_app_id: str = Field(default="", description="讯飞开放平台 APP_ID（语音听写 IAT）")
     xfyun_api_key: str = Field(default="", description="讯飞开放平台 API_KEY")

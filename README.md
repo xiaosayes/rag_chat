@@ -86,6 +86,26 @@
   （流式中段长文不再硬切顶到屏幕边缘，实测滚动区底 1836 < 状态行顶 1855 < 屏幕底 1920）；
   ③语音提问自动跳聊天态——`useAutoChat` 在 await_broadcast/broadcast 沿切 chat
   （listen 不跳、手动返回不回弹），组合件单测 + 真实页面沿注入实证。
+- **本地大模型双通道（web-044，用户拍板）**：后端问答 LLM 由「仅百炼 qwen-plus」扩展为
+  **百炼 DashScope / 本地 OpenAI 兼容服务并存、可切换**——`.env` 新增
+  `LLM_PROVIDER=dashscope|local`（默认 dashscope，零行为变化）+ `LOCAL_LLM_BASE_URL/
+  LOCAL_LLM_API_KEY/LOCAL_LLM_MODEL/LOCAL_LLM_CONTEXT_TOKENS`（密钥仅服务端，.env 已 gitignore）。
+  内核 `src/llm.py` 新增 `LocalOpenAILLM`（与 BailianLLM 接口/行为对齐：日期注入、逐 token
+  去 emoji、指数退避重试、已 yield 不重试、4xx 抛 FatalAPIError）与 `create_llm` 工厂；
+  `RAGPipeline` 经工厂取 LLM → 切换即全路径（RAG/闲聊/意图 L2）生效；薄层兜底
+  `web_fallback` 同步走本地通道（湘小图人设/320 硬限/裁历史不变）。本地无私有联网能力：
+  `enable_search` 仅告警并忽略（不追加搜索引导）；embedding/rerank 仍走百炼。
+  **实测缺陷修复**：本地模型上下文 4096（vLLM max_model_len），直透 `LLM_MAX_TOKENS=4096`
+  被 400 拒绝（169+4096>4096）→ 按「上下文预算−估算 prompt−32 余量」自动钳制 completion。
+  依赖：`openai>=1.55,<2`（≥1.55 适配 httpx 0.28）。真实冒烟（`scripts/smoke_local_llm.py`）：
+  local 通道 chat 0.60s/流式首字 0.10s/兜底 0.94s 无清洗残留；dashscope 通道回归
+  chat 1.49s/流式首字 0.56s。离线测试 29 项（工厂/重试/钳制/搜索忽略/管线接线/兜底分支）。
+- **兜底提示词播报友好度强化（web-043，用户拍板本轮唯一 QA 优化项）**：
+  `FALLBACK_SYSTEM_PROMPT` 增补口语化约束——连贯单段叙述、禁列表/编号/项目符号、
+  避免英文术语与缩写（必须用时用中文说法）、句子简短顺口适合语音朗读；
+  既有约束（100 字以内/禁 Markdown/不编造/不提实现细节）保留。提示词内容回归测试 3 项。
+  记录在案（本轮不实施）：路径 A/B 答案 Markdown 清洗位置定为**前端展示层**；
+  内核 chitchat/RAG 提示词人设（小虎/家博会）本轮不处理。
 - **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
   薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
   （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，

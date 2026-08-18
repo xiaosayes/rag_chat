@@ -574,3 +574,29 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
 - 语音提问停留在首页（问答气泡不可见）→ `useAutoChat` 组合件：await_broadcast/broadcast
   变化沿切 chat；listen 不跳、手动返回不回弹。单测覆盖三沿 + 真实页面沿注入实证跳转。
 - vitest 55 passed（+1）。
+
+### 增补：web-043/044 问答内容优化轮（用户拍板范围，2026-08-18）
+
+- **范围确认**：本轮只做「口语化/播报友好度」（web-043）+ 新增「本地大模型双通道」
+  （web-044）。记录在案不实施：基线集/人设修复路径/Markdown 清洗（位置已定=前端展示层）/
+  预设池扩充/rerank 预热；内核 chitchat·RAG 提示词（小虎/家博会）维持冻结。
+- **web-043 兜底提示词强化**：`FALLBACK_SYSTEM_PROMPT` 增补——连贯单段、禁列表/编号/
+  项目符号、避英文术语（必须用时中文说法）、短句适合朗读；既有约束保留。测试 3 项。
+- **web-044 本地大模型双通道（百炼/本地并存可切换）**：
+  - 配置（仅新增，默认零变化）：`LLM_PROVIDER=dashscope|local` + `LOCAL_LLM_BASE_URL/
+    API_KEY/MODEL/CONTEXT_TOKENS`；密钥仅服务端（.env gitignore，config 默认空）。
+  - 内核 `src/llm.py`：`LocalOpenAILLM`（接口/行为与 BailianLLM 对齐：日期注入、逐 token
+    去 emoji、退避重试、已 yield 不重试、4xx→FatalAPIError、llm_cache 隔离 key）+
+    `create_llm` 工厂；`BailianLLM` 字节级不变；`RAGPipeline` 改经工厂取 LLM（单点，
+    其余内核零改动）→ provider 切换即 RAG/闲聊/意图 L2 全路径生效；Gradio 同享。
+  - 薄层兜底同步：provider=local 时 `_local_answer_stream`（湘小图人设/320 硬限/裁 1 轮
+    历史/出口 emoji+** 双清洗）；dashscope 路径字节级不变。
+  - 本地能力边界（如实说明）：无私有联网能力——`enable_search` 仅告警忽略、不追加搜索
+    引导（兜底路径=模型自有知识作答）；embedding/rerank/意图 L1 仍走百炼（需 DashScope
+    key 在线）；本地上下文 4096 → completion 按预算自动钳制（实测 169+4096 被 vLLM 400
+    拒绝后修复）；`openai>=1.55,<2`（httpx 0.28 兼容，旧版 1.51 实测 proxies= 报错）。
+  - 证据：真实冒烟 `scripts/smoke_local_llm.py`——local：工厂→LocalOpenAILLM、
+    chat 0.60s、流式首字 0.10s/全程 0.57s、兜底 0.94s 无清洗残留；dashscope 回归：
+    BailianLLM、chat 1.49s、首字 0.56s。离线测试 29 项全绿。
+- **测试**：pytest **738 passed**（+29：config/工厂/chat/stream/重试/4xx/钳制/管线接线/
+  兜底分支）；前端 vitest **55 passed** 无回归。

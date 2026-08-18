@@ -274,3 +274,207 @@ class BailianLLM:
         chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
         other_chars = len(text) - chinese_chars
         return int(chinese_chars * 1.5 + other_chars / 4) + 10
+
+
+class LocalOpenAILLM:
+    """本地 OpenAI 兼容 LLM 封装（web-044，如 vLLM 部署的 Qwen2.5-14B-Instruct-AWQ）
+
+    与 BailianLLM 接口对齐（chat / chat_stream / count_tokens），供 create_llm
+    按 settings.llm_provider 切换。行为与内核对齐：
+      - system prompt 统一追加当前日期说明（bug-105 同款）；
+      - 流式增量输出、逐 token 去 emoji（bug-114 同款）；
+      - 指数退避重试；已 yield token 后中断不重试（避免重复内容）；
+      - 4xx（除 429）视为确定性客户端错误，直接抛 FatalAPIError。
+    差异（本地服务无私有联网能力）：enable_search=True 仅告警并忽略，
+    不追加 _SEARCH_GUIDE_NOTE（避免引导模型依赖不存在的联网结果）。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str = "",
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        top_p: float = 0.8,
+        max_retries: int = 3,
+        use_cache: bool = True,
+        context_tokens: int = 4096,
+    ):
+        try:
+            from openai import OpenAI
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError(
+                "本地 LLM 需要 openai 包：pip install 'openai>=1.40,<2'（web-044）"
+            ) from e
+        self.model = model
+        self.base_url = base_url
+        self.api_key = api_key
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.top_p = top_p
+        self.max_retries = max_retries
+        self.use_cache = use_cache
+        self.context_tokens = context_tokens
+        # OpenAI 客户端要求非空 key；本地服务常不校验，给占位值
+        self._client = OpenAI(base_url=base_url, api_key=api_key or "local-no-key")
+
+    def _build_messages(self, messages, system_prompt=None):
+        """与 BailianLLM 一致：system prompt 追加当前日期说明（零改动 BailianLLM，
+        此处保留 6 行重复换取冻结路径字节级不变）。"""
+        full_messages = []
+        if system_prompt:
+            full_messages.append({
+                "role": "system",
+                "content": system_prompt + _build_current_date_note(),
+            })
+        full_messages.extend(messages)
+        return full_messages
+
+    def _effective_max_tokens(self, full_messages: List[Dict[str, str]]) -> int:
+        """按上下文预算钳制 completion max_tokens（web-044 实测修复）
+
+        本地模型上下文总长有限（vLLM max_model_len，如 4096）：prompt + completion
+        超窗会被 serving 侧 400 拒绝（实测 169+4096=4265>4096）。按
+        「context_tokens - 估算 prompt - 安全余量 32」钳制，保底 1。
+        """
+        est_prompt = sum(self.count_tokens(m.get("content") or "") for m in full_messages)
+        budget = self.context_tokens - est_prompt - 32
+        effective = min(self.max_tokens, max(budget, 1))
+        if effective < self.max_tokens:
+            logger.info(
+                f"本地 LLM completion 限长钳制: {self.max_tokens} -> {effective} "
+                f"(context={self.context_tokens}, est_prompt={est_prompt})")
+        return effective
+
+    @staticmethod
+    def _check_fatal(e: Exception) -> None:
+        """4xx（除 429）→ FatalAPIError（duck-typed：openai.APIStatusError 携带 status_code）"""
+        status = getattr(e, "status_code", None)
+        if isinstance(status, int) and 400 <= status < 500 and status != 429:
+            raise FatalAPIError(f"本地 LLM 返回 {status}: {e}")
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
+        enable_search: bool = False,
+        **kwargs,
+    ) -> str:
+        """非流式调用（带缓存，缓存 key 含 provider 标记，与百炼路径隔离）"""
+        if enable_search:
+            logger.warning("本地 LLM 不支持联网搜索，已忽略 enable_search（web-044）")
+        full_messages = self._build_messages(messages, system_prompt)
+        cache_extra = dict(kwargs) if kwargs else {}
+        cache_extra["provider"] = "local"
+
+        if self.use_cache:
+            cached = llm_cache.get_with_key(
+                "chat", self.model, full_messages, self.temperature,
+                self.max_tokens, self.top_p, cache_extra,
+            )
+            if cached is not None:
+                logger.debug("本地 LLM 响应命中缓存")
+                return strip_emoji(cached)
+
+        for attempt in range(self.max_retries):
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=full_messages,
+                    temperature=self.temperature,
+                    max_tokens=self._effective_max_tokens(full_messages),
+                    top_p=self.top_p,
+                    stream=False,
+                    **kwargs,
+                )
+                content = resp.choices[0].message.content or ""
+                content = strip_emoji(content)
+                if self.use_cache:
+                    llm_cache.set_with_key(
+                        content, "chat", self.model, full_messages, self.temperature,
+                        self.max_tokens, self.top_p, cache_extra,
+                    )
+                return content
+            except Exception as e:
+                self._check_fatal(e)
+                logger.warning(f"本地 LLM 请求失败 (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+
+        raise RuntimeError("本地 LLM 调用失败（已达最大重试次数）")
+
+    def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
+        enable_search: bool = False,
+    ) -> Generator[str, None, None]:
+        """流式调用（增量输出；本地无联网能力，enable_search 仅告警并忽略）"""
+        if enable_search:
+            logger.warning("本地 LLM 不支持联网搜索，已忽略 enable_search（web-044）")
+        full_messages = self._build_messages(messages, system_prompt)
+
+        for attempt in range(self.max_retries):
+            has_yielded = False
+            try:
+                stream = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=full_messages,
+                    temperature=self.temperature,
+                    max_tokens=self._effective_max_tokens(full_messages),
+                    top_p=self.top_p,
+                    stream=True,
+                )
+                for chunk in stream:
+                    if not chunk.choices:      # 末尾 usage 帧无 choices
+                        continue
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield strip_emoji(content)
+                        has_yielded = True
+                return
+            except Exception as e:
+                self._check_fatal(e)
+                if has_yielded:
+                    raise RuntimeError(f"本地 LLM Stream 输出中断: {e}")
+                logger.warning(f"本地 LLM Stream 请求失败 (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+
+        raise RuntimeError("本地 LLM Stream 调用失败")
+
+    def count_tokens(self, text: str) -> int:
+        """估算 Token 数量（与 BailianLLM 同款粗略估算）"""
+        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        other_chars = len(text) - chinese_chars
+        return int(chinese_chars * 1.5 + other_chars / 4) + 10
+
+
+def create_llm(model: Optional[str] = None, use_cache: bool = True):
+    """LLM 工厂（web-044）：按 settings.llm_provider 返回对应实现。
+
+    - dashscope（默认）：BailianLLM，参数与内核既有接线完全一致
+      （model 参数缺省回退 settings.llm_model_name）；
+    - local：LocalOpenAILLM，模型名/地址/密钥取 local_llm_* 配置
+      （model 参数不作用于本地路径），生成参数复用 llm_temperature/
+      llm_max_tokens/llm_top_p（一体机薄层 web-041 进程级钳制同样生效）。
+    """
+    if settings.llm_provider == "local":
+        return LocalOpenAILLM(
+            model=settings.local_llm_model,
+            base_url=settings.local_llm_base_url,
+            api_key=settings.local_llm_api_key,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+            top_p=settings.llm_top_p,
+            use_cache=use_cache,
+            context_tokens=settings.local_llm_context_tokens,
+        )
+    return BailianLLM(
+        model=model or settings.llm_model_name,
+        temperature=settings.llm_temperature,
+        max_tokens=settings.llm_max_tokens,
+        top_p=settings.llm_top_p,
+        use_cache=use_cache,
+    )

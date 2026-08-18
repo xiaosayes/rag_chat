@@ -1,6 +1,9 @@
 # === 核心依赖 ===
 # 阿里云百炼 SDK（DashScope）
 dashscope>=1.20.0
+# 本地大模型 OpenAI 兼容客户端（web-044：LLM_PROVIDER=local 时启用，如 vLLM Qwen2.5-14B）
+# ≥1.55 适配 httpx>=0.28（旧版 openai 传 proxies= 与 httpx 0.28 不兼容，已实测）
+openai>=1.55,<2
 
 # 语音功能（bug-121）
 websocket-client>=1.7.0     # 讯飞 IAT WebSocket（ASR）
