@@ -280,3 +280,63 @@ class TestLocalContextBudget:
         FakeOpenAI.last().chat.completions.script.append(iter([_chunk("ok")]))
         list(llm.chat_stream([{"role": "user", "content": "hi"}]))
         assert FakeOpenAI.last().chat.completions.calls[0]["max_tokens"] == 58
+
+
+class TestLocalPromptFitting:
+    """web-045 修复：KB 路径 prompt 超窗（内核上下文可达 30000 字）被 vLLM 400 拒绝、
+    前端空气泡。LocalOpenAILLM 须在发送前把 prompt 适配进上下文窗口：
+    先丢最老历史（保留 system 与当前问题），仍超再截 system 尾部（保留头部指令+截断标记）。
+    预算 = context_tokens - 32 余量 - min(max_tokens, 256) 保底 completion。"""
+
+    @staticmethod
+    def _budget(llm):
+        return llm.context_tokens - 32 - min(llm.max_tokens, 256)
+
+    @staticmethod
+    def _est(llm, msgs):
+        return sum(llm.count_tokens(m["content"]) for m in msgs)
+
+    def test_short_messages_pass_through(self):
+        llm = _make_local()
+        FakeOpenAI.last().chat.completions.script.append(_msg_resp("ok"))
+        llm.chat([{"role": "user", "content": "hi"}], system_prompt="短提示")
+        sent = FakeOpenAI.last().chat.completions.calls[0]["messages"]
+        assert sent[-1] == {"role": "user", "content": "hi"}
+        assert sent[0]["role"] == "system"
+        assert sent[0]["content"].startswith("短提示")
+
+    def test_long_history_dropped_oldest_first(self):
+        llm = _make_local(context_tokens=1000, max_tokens=256)   # 预算 712
+        FakeOpenAI.last().chat.completions.script.append(_msg_resp("ok"))
+        hist = [{"role": "user" if i % 2 == 0 else "assistant",
+                 "content": "旧对话内容" * 40} for i in range(10)]   # 每条 est≈310
+        llm.chat(hist + [{"role": "user", "content": "当前问题"}], system_prompt="短")
+        sent = FakeOpenAI.last().chat.completions.calls[0]["messages"]
+        assert sent[-1] == {"role": "user", "content": "当前问题"}   # 当前问题必保留
+        assert sent[0]["role"] == "system"                            # system 保留
+        assert self._est(llm, sent) <= self._budget(llm)              # 适配进预算
+        assert len(sent) < 12                                         # 有历史被丢弃
+        # 丢弃的是最老的：若保留了历史，只能是原历史后缀
+        kept = [m for m in sent if m["role"] != "system"]
+        assert kept == (hist + [{"role": "user", "content": "当前问题"}])[-len(kept):]
+
+    def test_oversized_system_truncated_tail_with_marker(self):
+        llm = _make_local(context_tokens=1000, max_tokens=256)   # 预算 712
+        FakeOpenAI.last().chat.completions.script.append(_msg_resp("ok"))
+        big = "指令开头。" + "参考资料文字。" * 300                 # est≈3000，丢光历史仍超
+        llm.chat([{"role": "user", "content": "问题"}], system_prompt=big)
+        sent = FakeOpenAI.last().chat.completions.calls[0]["messages"]
+        sys_sent = sent[0]["content"]
+        assert sys_sent.startswith("指令开头。")                     # 头部指令保留
+        assert "截断" in sys_sent                                   # 截断标记告知模型
+        assert self._est(llm, sent) <= self._budget(llm)
+        assert sent[-1] == {"role": "user", "content": "问题"}
+
+    def test_stream_fits_prompt_too(self):
+        llm = _make_local(context_tokens=1000, max_tokens=256)
+        FakeOpenAI.last().chat.completions.script.append(iter([_chunk("ok")]))
+        big = "指令开头。" + "参考资料文字。" * 300
+        list(llm.chat_stream([{"role": "user", "content": "问题"}], system_prompt=big))
+        sent = FakeOpenAI.last().chat.completions.calls[0]["messages"]
+        assert self._est(llm, sent) <= self._budget(llm)
+        assert sent[-1] == {"role": "user", "content": "问题"}

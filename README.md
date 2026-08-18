@@ -112,6 +112,15 @@
   `frontend/.env.development` 指向 `127.0.0.1:7862`（经隧道连服务器后端；
   `.env.production` 保持 `ub-server:7862` 供局域网一体机）；
   `deploy/server/kiosk-server.service` 按 ub-server 实录修正（conda 路径 + 7862 端口）。
+- **本地模式 KB 问题空气泡修复（web-045，用户反馈）**：根因——KB 路径 prompt = 指令 +
+  检索上下文（内核 MAX_CONTEXT_CHARS=30000）+ 历史，超出 vLLM 4096 窗口被 400 拒绝
+  （实测 6969 tokens 超窗）；web-044 的钳制只限 completion 未限 prompt → FatalAPIError
+  → 薄层发 error 事件 → 前端空气泡无文字。修复：`LocalOpenAILLM._fit_messages_to_window`
+  发送前适配——先丢最老历史（保 system 与当前问题、不破角色交替），仍超再截 system
+  尾部（保头部指令 + 截断标记告知模型），预算=窗口−32−min(max_tokens,256)。
+  证据：同一超长 prompt 复现脚本由 FatalAPIError → 流式完整作答；真实管线副本 KB
+  两路径实测——相关度不足走拒答→兑底（无崩溃）、命中路径 96 chunk 流式作答；
+  离线测试 +4。pytest 742 passed / vitest 55 passed。
 - **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
   薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
   （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，

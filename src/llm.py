@@ -331,6 +331,60 @@ class LocalOpenAILLM:
         full_messages.extend(messages)
         return full_messages
 
+    # web-045：system 截断标记（告知模型参考信息被裁，避免幻觉衔接）
+    _TRUNC_MARK = "……（参考信息过长已截断）"
+
+    def _prompt_budget(self) -> int:
+        """prompt token 预算：窗口 - 32 安全余量 - min(max_tokens, 256) 保底 completion"""
+        return self.context_tokens - 32 - min(self.max_tokens, 256)
+
+    def _est_tokens(self, full_messages: List[Dict[str, str]]) -> int:
+        return sum(self.count_tokens(m.get("content") or "") for m in full_messages)
+
+    def _fit_messages_to_window(
+        self, full_messages: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        """把 prompt 适配进上下文窗口（web-045 实测修复）
+
+        背景：KB 路径 prompt = 指令 + 检索上下文（内核 MAX_CONTEXT_CHARS=30000）+ 历史，
+        本地小窗口模型（4096）直接被 serving 侧 400 拒绝（实测 6969 tokens 超窗）
+        → FatalAPIError → 前端空气泡。适配策略（保序、保当前问题）：
+          1. 从对话头部丢弃最老消息（保留 system 与最后一条 user 问题；
+             连续后缀丢弃保证角色交替不被破坏）；
+          2. 仍超 → 截 system 内容尾部（保留头部指令，加截断标记）。
+        """
+        budget = self._prompt_budget()
+        if self._est_tokens(full_messages) <= budget:
+            return full_messages
+
+        has_system = bool(full_messages) and full_messages[0].get("role") == "system"
+        system = full_messages[:1] if has_system else []
+        convo = list(full_messages[1:] if has_system else full_messages)
+
+        # 1) 丢最老历史（至少保留最后一条=当前问题）
+        dropped = 0
+        while len(convo) > 1 and self._est_tokens(system + convo) > budget:
+            convo.pop(0)
+            dropped += 1
+
+        # 2) 仍超 → 截 system 尾部（按粗估反推字符数；中文 1.5 tok/字为保守方向）
+        truncated = False
+        if system and self._est_tokens(system + convo) > budget:
+            convo_est = self._est_tokens(convo)
+            sys_token_budget = max(budget - convo_est, 50)
+            chars = max(int((sys_token_budget - 10) / 1.5), 50)
+            content = system[0].get("content") or ""
+            if len(content) > chars:
+                content = content[:max(chars - len(self._TRUNC_MARK), 1)] + self._TRUNC_MARK
+                system = [{**system[0], "content": content}]
+                truncated = True
+
+        logger.info(
+            f"本地 LLM prompt 适配: dropped_history={dropped}, "
+            f"system_truncated={truncated}, est={self._est_tokens(system + convo)}"
+            f"/{budget}（web-045）")
+        return system + convo
+
     def _effective_max_tokens(self, full_messages: List[Dict[str, str]]) -> int:
         """按上下文预算钳制 completion max_tokens（web-044 实测修复）
 
@@ -364,7 +418,8 @@ class LocalOpenAILLM:
         """非流式调用（带缓存，缓存 key 含 provider 标记，与百炼路径隔离）"""
         if enable_search:
             logger.warning("本地 LLM 不支持联网搜索，已忽略 enable_search（web-044）")
-        full_messages = self._build_messages(messages, system_prompt)
+        full_messages = self._fit_messages_to_window(
+            self._build_messages(messages, system_prompt))
         cache_extra = dict(kwargs) if kwargs else {}
         cache_extra["provider"] = "local"
 
@@ -413,7 +468,8 @@ class LocalOpenAILLM:
         """流式调用（增量输出；本地无联网能力，enable_search 仅告警并忽略）"""
         if enable_search:
             logger.warning("本地 LLM 不支持联网搜索，已忽略 enable_search（web-044）")
-        full_messages = self._build_messages(messages, system_prompt)
+        full_messages = self._fit_messages_to_window(
+            self._build_messages(messages, system_prompt))
 
         for attempt in range(self.max_retries):
             has_yielded = False

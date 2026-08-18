@@ -605,3 +605,21 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
   （实测定位：本机与服务器唯一通道是 SSH 隧道——防火墙只放 22 且 ub-server 主机名
   本机不解析，preview 无预设/无响应即此因）；单元模板按 ub-server 实录修正。
   服务器部署实证：百炼通道全链 OK（首文本 3.88s/首音频 4.68s）、local 通道冒烟 OK。
+
+### 增补：web-045 本地模式 KB 问题空气泡修复（用户反馈，2026-08-18）
+
+- **现象**：local 模式下 KB 相关问题（"我要买沙发，要怎么推荐？"）无答案、空气泡；
+  闲聊/兜底路径正常。
+- **根因（实证）**：KB 路径 prompt = 指令 + 检索上下文（内核 MAX_CONTEXT_CHARS=30000）
+  + 历史 → 超出 vLLM 4096 窗口；web-044 钳制只限 completion → prompt 本身 6969 tokens
+  被 400 拒绝 → FatalAPIError → chat.py 发 error 事件（无文本）→ 前端空气泡。
+- **修复**：`LocalOpenAILLM._fit_messages_to_window`（自家类，零冻结区改动）——
+  预算=窗口−32−min(max_tokens,256)；先丢最老历史（保 system+当前问题，连续前缀
+  丢弃不破角色交替），仍超截 system 尾部（保头部指令+"……（参考信息过长已截断）"标记）。
+- **证据**：复现脚本同 prompt 由 FatalAPIError → 流式完整作答；副本 KB 真实管线
+  （绕开本机 Qdrant 锁）两路径实测：relevance-fail 优雅拒答无崩溃、KB 命中 96 chunk
+  流式作答（est_prompt=2661）；离线 +4（历史丢弃/截断标记/流式适配/预算）。
+- **观察（如实说明，非本 bug）**：local 模型做相关性确认与 qwen-plus 判定存在差异
+  （沙发题被判不相关→拒答→薄层兜底作答）——换模型的固有行为差，兜底保证有答案；
+  相关性阈值的跨模型校准属冻结内核，未动。
+- **测试**：pytest **742 passed**（+4）；vitest **55 passed** 无回归。
