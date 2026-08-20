@@ -1083,10 +1083,8 @@ class TestSpeak:
         assert _wait(events, lambda e: any(x["type"] == "story_speak_start" for x in e))
         s.on_page(3)
         assert _wait(events, lambda e: any(x["type"] == "story_speak_start" and x["n"] == 3 for x in e))
-        cancelled = [x for x in events if x["type"] == "story_speak_end" and x["cancelled"]]
-        # 第 1 页要么已自然播完、要么被翻页打断——若被打断必须有 cancelled 记录
-        if any(x["n"] == 1 for x in cancelled):
-            assert True
+        starts = [x["n"] for x in events if x["type"] == "story_speak_start"]
+        assert starts[-1] == 3 and 2 not in starts        # 直达第 3 页，无中间页
         s.cancel(); th.join(3)
 
     def test_finish_speaks_closing_then_end(self, tmp_path):
