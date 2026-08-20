@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from .chat import AUDIO_FORMAT, BroadcastSession
+from .story import parse_story_intent
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,10 @@ class VoiceSession:
         # 音频上行串行执行（保序）；测试 sync_audio=True 直驱
         self._audio_pool = None if sync_audio else ThreadPoolExecutor(max_workers=1)
         self._closed = False
+        # web-057：故事绘本集成（set_story_session 注入 factory 后启用意图拦截）
+        self._story_factory = None
+        self._story = None
+        self._story_mode = False
 
     @property
     def busy(self) -> bool:
@@ -60,10 +65,59 @@ class VoiceSession:
     # ---------- 控制面 ----------
 
     def ask(self, text: str) -> None:
+        """文本单点 funnel（WS ask + FSM submit 同路）：web-057 故事意图薄层拦截。"""
+        theme = parse_story_intent(text)
+        if self._story_mode:
+            if self._story is not None:
+                self._story.cancel()                 # 防御：旧故事先停（web-057）
+            self._story_mode = False
+            if theme:
+                self._start_story(theme)
+                return
+            self._broadcast.ask(text)                # 非故事文本照常问答
+            return
+        if theme and self._story_factory is not None:
+            self._start_story(theme)
+            return
         self._broadcast.ask(text)
+
+    # ---------- 故事绘本（web-057） ----------
+
+    def set_story_session(self, factory) -> None:
+        """注入故事会话工厂（voice_ws 接线；factory(emit)->StorySession）。"""
+        self._story_factory = factory
+
+    def set_story_mode(self, on: bool) -> None:
+        self._story_mode = bool(on)
+
+    def _start_story(self, theme: str) -> None:
+        self._story = self._story_factory(self._on_story_event)
+        self._story_mode = True
+        self._story.start(theme)                     # 阻塞驱动（调用方在线程中）
+
+    def _on_story_event(self, ev: dict) -> None:
+        if ev.get("type") in ("story_end", "story_error"):
+            self._story_mode = False
+        self._emit(ev)
+
+    def on_story_page(self, n: int) -> None:
+        if self._story is not None and self._story_mode:
+            self._story.on_page(n)
+
+    def on_story_finish(self) -> None:
+        if self._story is not None and self._story_mode:
+            self._story.on_finish()
+
+    def on_story_cancel(self) -> None:
+        if self._story is not None and self._story_mode:
+            self._story.cancel()
+            self._story_mode = False
 
     def barge_in(self) -> None:
         """打断：应答播报与问答播报同停（触屏按钮 / FSM 语音打断）。"""
+        if self._story_mode:
+            logger.info("故事态忽略 barge_in（web-057）")
+            return
         self._greet_cancel.set()
         self._broadcast.barge_in()
 
@@ -83,6 +137,8 @@ class VoiceSession:
     def feed_audio(self, pcm: bytes) -> None:
         if self._closed:
             return
+        if self._story_mode:
+            return                                   # 故事态全静默（web-057）
         if self._audio_pool is not None:
             self._audio_pool.submit(self._process_audio, pcm)
         else:
