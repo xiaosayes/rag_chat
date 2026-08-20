@@ -140,7 +140,9 @@
   硬断在半个短句上屏 → 薄层检测（长度达水位+结尾无终结符，双条件防误判）并裁至
   最后完整句——上屏/播报/历史三处一致（播报不喂悬尾段，打断轮不修剪）。
   真实 DashScope 实证：原始流 424 字断于「…影迷的」→ 上屏 257 字止于完整句。
-  pytest 771 passed（+6）/ vitest 74 passed。
+  补强（截图 13 回归）：截断收尾只丢悬尾碎片——积压不足 60 字阈值等收尾的完整句
+  照常喂入，播报与上屏同一句点（初版整段跳过的自产 bug，按 full==已喂+buf 恒等式修齐）。
+  pytest 772 passed（+7）/ vitest 74 passed。
 - **回答限长 320 tokens（web-041，用户拍板）**：`.env LLM_MAX_TOKENS=4096` 不动，
   薄层生产入口在任何 pipeline 加载前进程级钳制 `settings.llm_max_tokens→320`
   （`services.apply_kiosk_llm_caps`，幂等/只降不升）——内核 RAG/闲聊/联网全路径生效，

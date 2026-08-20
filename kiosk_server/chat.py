@@ -274,8 +274,13 @@ class BroadcastSession:
                 emit({"type": "playback_cancel"})
         else:
             if tts is not None and not dead:
-                # web-049：截断轮不喂悬尾段——播报止于最后完整句，与上屏文本一致
-                tail = clean_for_broadcast(buf.strip()) if (buf.strip() and not truncated) else ""
+                # web-049：截断轮收尾——只丢悬尾碎片；修剪线内的完整句仍要喂完
+                # （full == 已喂原文 + buf：取 trimmed 中尚未喂入的尾部，保证播报与上屏同一句点）
+                if truncated:
+                    keep = trimmed[len(full) - len(buf):]
+                    tail = clean_for_broadcast(keep.strip()) if keep.strip() else ""
+                else:
+                    tail = clean_for_broadcast(buf.strip()) if buf.strip() else ""
                 if tail and not _feed(tail):
                     _restart()
                 if handle is not None:

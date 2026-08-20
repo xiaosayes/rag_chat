@@ -564,3 +564,27 @@ class TestTruncationDetect:
         assert _trim_to_last_sentence("甲。乙。丙 dangling") == "甲。乙。"
         assert _trim_to_last_sentence("没有终结符") == "没有终结符"   # 无边界原样
         assert _trim_to_last_sentence("甲！乙？丙") == "甲！乙？"
+
+class TestTruncationTailFeed:
+    """web-049 补强（截图 13 回归）：截断收尾只丢悬尾碎片——
+    修剪线内的完整句（积压在 buf 等收尾的）必须照常喂完，否则播报早于上屏结束。"""
+
+    def test_tail_feed_covers_complete_sentences_within_trim(self, monkeypatch):
+        from src.config import settings
+        monkeypatch.setattr(settings, "llm_max_tokens", 320)
+        body = "这是完整的一句推荐语。" * 34              # 374 字完整句
+        final_seg = "最后一部也很精彩。"                 # 9 字完整句（不足 accum=60，留 buf 等收尾）
+        dangling = "还有更多精彩影片等待你"               # 悬尾碎片（无终结符）
+        tokens = [body[i:i + 20] for i in range(0, len(body), 20)] + [final_seg + dangling]
+        pipe = FakePipeline(tokens)                     # 全长 394 ≥ 384 → 截断
+        tts = FakeTTS()
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: tts, emit, clock=AutoClock(), tick_s=0.01)
+        s.ask("推荐电影")
+
+        end = [e for e in events if e["type"] == "answer_end"][0]
+        assert end["full_text"].endswith("最后一部也很精彩。")        # 上屏止于修剪线
+        fed_text = "".join(tts.handles[0].fed)
+        assert "最后一部也很精彩。" in fed_text                       # 修剪线内完整句已播
+        assert "还有更多精彩影片等待你" not in fed_text                # 悬尾碎片不播
+        assert s.history[-1]["content"] == end["full_text"]
