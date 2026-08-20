@@ -55,6 +55,13 @@ class StoryModerationError(StoryScriptError):
     code = "moderation"
 
 
+def _is_moderation(err: Exception) -> bool:
+    """审核拦截判定（web-052 补强 I-1）：HTTP 包装路径（LLM HTTP 400:
+    DataInspectionFailed）与异常路径共用；审核错误不可重试。"""
+    msg = str(err).lower()
+    return "inspection" in msg or "filter" in msg
+
+
 def _generation_call(**kw):          # 薄封装便于 mock（web-052）
     import dashscope
     from src.config import settings
@@ -125,11 +132,13 @@ class ScriptClient:
                         "characters": str(payload.get("characters") or "").strip(),
                         "scenes": scenes}
             except StoryScriptError as e:
+                if _is_moderation(e):                # 审核不重试（web-052 补强 I-1：HTTP 路径）
+                    raise StoryModerationError(str(e)) from e
                 last_err = e
                 msgs = msgs + [{"role": "user", "content":
                                 f"上次输出不合格（{e}），请严格按 JSON 格式重出，8~10 个分镜、每个≤80 字"}]
             except Exception as e:
-                if "inspection" in str(e).lower() or "filter" in str(e).lower():
+                if _is_moderation(e):
                     raise StoryModerationError(str(e)) from e
                 last_err = StoryScriptError(str(e))
         raise last_err or StoryScriptError("生成失败")

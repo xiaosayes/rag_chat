@@ -62,6 +62,26 @@ class TestScriptGenerate:
         with pytest.raises(StoryModerationError):
             ScriptClient("qwen-plus", 1600, 60).generate("t")
 
+    def test_moderation_http_path_not_retried(self, monkeypatch):
+        """web-052 补强（I-1）：真实审核拦截通常不抛异常——Generation.call 返回
+        status_code=400, code=DataInspectionFailed。走真 _generation_call 包装路径，
+        必须重归类 StoryModerationError 且不可重试（底层只调 1 次）。"""
+        calls = []
+
+        class R:
+            status_code = 400
+            code = "DataInspectionFailed"
+
+        def fake_generation_call(**kw):
+            calls.append(kw)
+            return R()
+
+        import dashscope
+        monkeypatch.setattr(dashscope.Generation, "call", fake_generation_call)
+        with pytest.raises(StoryModerationError):
+            ScriptClient("qwen-plus", 1600, 60).generate("t")
+        assert len(calls) == 1                         # 审核不重试
+
     def test_prompt_rules(self):
         p = story.SCRIPT_SYSTEM_PROMPT
         for kw in ("儿童", "8", "10", "80", "JSON", "characters", "健康"):
