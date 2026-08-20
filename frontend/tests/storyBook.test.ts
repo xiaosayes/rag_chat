@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { reactive, ref } from "vue";
 import StoryBook from "../src/components/StoryBook.vue";
+import storyBookRaw from "../src/components/StoryBook.vue?raw";
 
 function fakeStory() {
   return {
@@ -55,6 +56,20 @@ describe("web-061 StoryBook", () => {
     await w.find(".btn-back").trigger("click");
     expect(st.back).toHaveBeenCalled();
     expect(w.emitted("back")).toBeTruthy();
+  });
+
+  // web-062 补强（fix round 1 钉住）：故事舞台 z 序防护——
+  // .storybook 必须显式 z-index ≥ 60（压过 DeerAvatar z1 / SysMenu z50/60）且有不透明底，
+  // 否则同叠层上下文内 z-auto 按 DOM 序绘制，小鹿/SysMenu 会透出在绘本之上。
+  // （vitest 未启用 css:true，jsdom 算不出 scoped 样式 → 用 ?raw 钉源文件样式块）
+  it("stage z-order guard: .storybook z-index >= 60 with opaque background", () => {
+    const m = storyBookRaw.match(/\.storybook\s*\{([\s\S]*?)\n\}/);
+    expect(m, ".storybook 根样式块存在").toBeTruthy();
+    const block = m![1];
+    const z = block.match(/z-index:\s*(\d+)/);
+    expect(z, ".storybook 必须显式 z-index（z-auto 会被小鹿 z1/SysMenu z60 压过）").toBeTruthy();
+    expect(Number(z![1])).toBeGreaterThanOrEqual(60);
+    expect(block).toMatch(/background:/);
   });
 
   it("preparing and finished overlays", async () => {

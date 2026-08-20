@@ -48,8 +48,12 @@ function onBack() {
 /* web-061：1080×1920 设计坐标；羊皮纸色系与返回钮样式对齐 ChatPanel（web-042） */
 .storybook {
   position: relative;
+  z-index: 70;              /* web-062 补强：压过 DeerAvatar(z1)/SysMenu(z50,60)——故事态小鹿/隐藏菜单不透出不可点 */
   width: 1080px;
   height: 1920px;
+  /* 不透明底（与首页同源的森林底图）：z 序修复后下层内容在缝隙处也不透出 */
+  background: url("../../public/img/v1/bg.png") 100% 100% no-repeat;
+  background-size: 100% 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
