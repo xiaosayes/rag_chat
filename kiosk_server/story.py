@@ -496,6 +496,13 @@ class StorySession:
                 reason = "cancelled"
                 break
             if kind == "finish":
+                # web-056 补强：先 barge+排空在播页（busy=False），再播收尾语——
+                # 否则 _speak 的 busy 等待被旧轮 busy 蒙混、_wait_speak_done 在
+                # BroadcastSession 串行化空窗（0.05s 轮询间隙）采样到 busy==False
+                # 提前返回：story_end 抢跑、收尾语被 start() finally 的 close() 裁掉。
+                if self._tts is not None:
+                    self._tts.barge_in()
+                    self._wait_speak_done(5.0)
                 self._speak(0, self._cfg.story_closing)
                 self._wait_speak_done(30.0)          # 收尾语播尽再发 story_end
                 break

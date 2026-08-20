@@ -11,8 +11,9 @@ class _Cfg:
 
 
 class _FakeTTSHandle:
-    def __init__(self, on_audio):
+    def __init__(self, on_audio, gate=None):
         self._on_audio = on_audio
+        self._gate = gate                        # 非 None：finish 挂起直到放行（模拟在播）
         self.error = None
         self.done = threading.Event()
         self.fed = []
@@ -20,16 +21,20 @@ class _FakeTTSHandle:
         self.fed.append(text)
         self._on_audio(b"\x01\x02" * 480)      # 每喂入回 20ms PCM
     def finish(self):
+        if self._gate is not None:
+            self._gate.wait(5.0)                 # 挂起排水（daemon 线程内，有界）
         self.done.set()
     def cancel(self):
         self.done.set()
 
 
 class _FakeTTS:
-    def __init__(self):
+    def __init__(self, hang_first: threading.Event | None = None):
         self.handles = []
+        self._hang_first = hang_first            # 仅第 1 个 handle 挂起
     def start_stream(self, on_audio):
-        h = _FakeTTSHandle(on_audio)
+        gate = self._hang_first if not self.handles else None
+        h = _FakeTTSHandle(on_audio, gate=gate)
         self.handles.append(h)
         return h
 
@@ -101,6 +106,45 @@ class TestSpeak:
         s.cancel()
         assert _wait(events, lambda e: any(x["type"] == "story_end"
                                            and x["reason"] == "cancelled" for x in e))
+        th.join(3)
+
+    def test_finish_while_page_speaking(self, tmp_path, monkeypatch):
+        """web-056 补强：第 1 页仍在播时 on_finish——先排空再播收尾语。
+        修复前复现：_speak 的 busy 等待被旧轮 busy 蒙混，_wait_speak_done 在
+        串行化空窗（chat 侧 0.05s 轮询间隙）采样到 busy==False 提前返回，
+        story_end{done} 抢跑、收尾语被 start() finally 的 close() 裁掉。"""
+        import time as _t
+        import kiosk_server.chat as chat_mod
+
+        class _ChatTimeShim:   # 只放慢 chat 侧节拍：串行化空窗拉大至 0.3s（确定性复现）
+            @staticmethod
+            def sleep(_s):
+                _t.sleep(0.3)
+
+            @staticmethod
+            def monotonic():
+                return _t.monotonic()
+
+        monkeypatch.setattr(chat_mod, "time", _ChatTimeShim)
+
+        gate = threading.Event()
+        events = []
+        tts = _FakeTTS(hang_first=gate)
+        s, th = _start(events, tmp_path, tts)
+        assert _wait(events, lambda e: any(x["type"] == "story_speak_start" and x["n"] == 1 for x in e))
+        assert _wait(events, lambda e: bool(tts.handles) and len(tts.handles[0].fed) > 0)
+        s.on_finish()                                        # 第 1 页仍在播（排水挂起）
+        assert _wait(events, lambda e: any(x["type"] == "story_end" and x["reason"] == "done"
+                                           for x in e), timeout=10.0)
+        gate.set()
+        fed = "".join(seg for h in tts.handles for seg in h.fed)
+        assert "故事讲完啦" in fed                            # 收尾语完整喂入（未被裁）
+        idx_close = next(i for i, x in enumerate(events)
+                         if x["type"] == "story_speak_end" and x["n"] == 0
+                         and x["cancelled"] is False)
+        idx_end = next(i for i, x in enumerate(events)
+                       if x["type"] == "story_end" and x["reason"] == "done")
+        assert idx_close < idx_end                           # 收尾语播尽才有 story_end
         th.join(3)
 
     def test_out_of_range_page_ignored(self, tmp_path):
