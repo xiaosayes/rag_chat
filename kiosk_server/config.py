@@ -24,6 +24,22 @@ class KioskConfig:
     idle_refresh_s: float = 300.0          # KIOSK_IDLE_REFRESH_S（参考实现 300s 自刷新）
     first_floor_chars: int = 12            # KIOSK_TTS_FIRST_FLOOR_CHARS（web-030 首播硬地板，0=禁用）
     web_fallback: bool = True              # KIOSK_WEB_FALLBACK（web-036 知识库拒答→联网搜索兜底）
+    # ---- web-050 故事绘本配置族（KIOSK_STORY_*，默认零行为变化） ----
+    story_enabled: bool = True             # KIOSK_STORY_ENABLED（false=意图拦截关闭，全走问答）
+    story_script_model: str = "qwen-plus"  # KIOSK_STORY_SCRIPT_MODEL（分镜脚本，固定云端）
+    story_script_max_tokens: int = 1600    # KIOSK_STORY_SCRIPT_MAX_TOKENS（独立限长，先例 FALLBACK_MAX_TOKENS）
+    story_script_timeout_s: float = 60.0   # KIOSK_STORY_SCRIPT_TIMEOUT_S
+    story_min_scenes: int = 8              # KIOSK_STORY_MIN_SCENES（分镜目标区间下限）
+    story_max_scenes: int = 10             # KIOSK_STORY_MAX_SCENES（上限）
+    story_scene_max_chars: int = 80        # KIOSK_STORY_SCENE_MAX_CHARS（单镜头字数硬限）
+    story_image_model: str = "qwen-image-3.0"  # KIOSK_STORY_IMAGE_MODEL（文生图，固定云端）
+    story_image_size: str = "1024*1024"    # KIOSK_STORY_IMAGE_SIZE（实测 2048 默认→1024 提速）
+    story_image_concurrency: int = 4       # KIOSK_STORY_IMAGE_CONCURRENCY（平台 RPM=20，并发上限）
+    story_image_timeout_s: float = 90.0    # KIOSK_STORY_IMAGE_TIMEOUT_S（单张超时，实测 13~18s）
+    story_total_budget_s: float = 300.0    # KIOSK_STORY_TOTAL_BUDGET_S（整故事插图总预算）
+    story_cache_dir: str = "data/story"    # KIOSK_STORY_CACHE_DIR（同名故事缓存落盘目录）
+    story_cache_max_mb: int = 500          # KIOSK_STORY_CACHE_MAX_MB（LRU 容量上限）
+    story_closing: str = "故事讲完啦，还想听什么故事吗？"  # KIOSK_STORY_CLOSING（收尾语）
 
     @classmethod
     def from_env(cls) -> "KioskConfig":
@@ -44,4 +60,27 @@ class KioskConfig:
             first_floor_chars=int(os.getenv("KIOSK_TTS_FIRST_FLOOR_CHARS",
                                             str(cls.first_floor_chars))),
             web_fallback=os.getenv("KIOSK_WEB_FALLBACK", "true").lower() in ("1", "true", "yes"),
+            # ---- web-050 故事绘本配置族 ----
+            story_enabled=os.getenv("KIOSK_STORY_ENABLED", "true").lower() in ("1", "true", "yes"),
+            story_script_model=os.getenv("KIOSK_STORY_SCRIPT_MODEL", cls.story_script_model),
+            story_script_max_tokens=int(os.getenv("KIOSK_STORY_SCRIPT_MAX_TOKENS",
+                                                  str(cls.story_script_max_tokens))),
+            story_script_timeout_s=float(os.getenv("KIOSK_STORY_SCRIPT_TIMEOUT_S",
+                                                   str(cls.story_script_timeout_s))),
+            story_min_scenes=int(os.getenv("KIOSK_STORY_MIN_SCENES", str(cls.story_min_scenes))),
+            story_max_scenes=int(os.getenv("KIOSK_STORY_MAX_SCENES", str(cls.story_max_scenes))),
+            story_scene_max_chars=int(os.getenv("KIOSK_STORY_SCENE_MAX_CHARS",
+                                                str(cls.story_scene_max_chars))),
+            story_image_model=os.getenv("KIOSK_STORY_IMAGE_MODEL", cls.story_image_model),
+            story_image_size=os.getenv("KIOSK_STORY_IMAGE_SIZE", cls.story_image_size),
+            story_image_concurrency=int(os.getenv("KIOSK_STORY_IMAGE_CONCURRENCY",
+                                                  str(cls.story_image_concurrency))),
+            story_image_timeout_s=float(os.getenv("KIOSK_STORY_IMAGE_TIMEOUT_S",
+                                                  str(cls.story_image_timeout_s))),
+            story_total_budget_s=float(os.getenv("KIOSK_STORY_TOTAL_BUDGET_S",
+                                                 str(cls.story_total_budget_s))),
+            story_cache_dir=os.getenv("KIOSK_STORY_CACHE_DIR", cls.story_cache_dir),
+            story_cache_max_mb=int(os.getenv("KIOSK_STORY_CACHE_MAX_MB",
+                                             str(cls.story_cache_max_mb))),
+            story_closing=os.getenv("KIOSK_STORY_CLOSING", cls.story_closing),
         )
