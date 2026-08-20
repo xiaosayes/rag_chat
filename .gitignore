@@ -40,3 +40,8 @@ frontend/
 
 #测试
 tests/
+
+#计划文档
+NEXT_*
+remaining-issues.md
+unfixed-impact-analysis.md

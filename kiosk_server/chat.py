@@ -18,6 +18,34 @@ import time
 from typing import Callable, Optional
 
 from .tts_clean import clean_for_broadcast   # web-046：内核清洗+薄层补充（未配对 **/列表前缀）
+from src.config import settings
+
+# web-049：触 max_tokens 硬截断的判据与修剪（实测校准：dashscope 320 tokens ≈ 431 字）
+_TRUNC_TERMINAL = "。！？!?”」』…"     # 句末终结符（含引号/省略号闭合）
+_TRUNC_STRONG = "。！？!?"             # 可裁剪的强句边界
+
+
+def _looks_truncated(full: str, max_tokens: int) -> bool:
+    """答案疑似被 max_tokens 硬截断：长度达上限水位且结尾无句末终结符。
+
+    水位按字符校准（int(max_tokens * 1.2)，320 tokens ≈ 384 字地板）；
+    双条件缺一不可——长但有完整结尾的答案不误判，短残段（未达水位）不误判。
+    """
+    text = (full or "").rstrip()
+    if not text:
+        return False
+    if len(text) < int(max_tokens * 1.2):
+        return False
+    return text[-1] not in _TRUNC_TERMINAL
+
+
+def _trim_to_last_sentence(full: str) -> str:
+    """裁至最后一个强句边界（保留终结符）；无边界则原样返回。"""
+    text = (full or "").rstrip()
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] in _TRUNC_STRONG:
+            return text[:i + 1]
+    return text
 
 from .tts_feed import PauseCompressor, take_feed_unit, take_first_unit
 
@@ -187,6 +215,7 @@ class BroadcastSession:
 
         interrupted = False
         failed = False
+
         ended = False
         while not ended:
             if self._cancel.is_set():
@@ -228,6 +257,12 @@ class BroadcastSession:
                 _restart()
 
         # ---------- 收尾 ----------
+        # web-049：主循环结束后判定截断并预修剪（打断轮不修剪——残段是用户主动打断的）
+        truncated = (bool(full) and not interrupted and not failed
+                     and _looks_truncated(full, settings.llm_max_tokens))
+        trimmed = _trim_to_last_sentence(full) if truncated else full
+        if trimmed == full:                # 整段无强句边界可裁 → 保持原样
+            truncated = False
         if interrupted or failed:
             if handle is not None:
                 try:
@@ -239,7 +274,13 @@ class BroadcastSession:
                 emit({"type": "playback_cancel"})
         else:
             if tts is not None and not dead:
-                tail = clean_for_broadcast(buf.strip()) if buf.strip() else ""
+                # web-049：截断轮收尾——只丢悬尾碎片；修剪线内的完整句仍要喂完
+                # （full == 已喂原文 + buf：取 trimmed 中尚未喂入的尾部，保证播报与上屏同一句点）
+                if truncated:
+                    keep = trimmed[len(full) - len(buf):]
+                    tail = clean_for_broadcast(keep.strip()) if keep.strip() else ""
+                else:
+                    tail = clean_for_broadcast(buf.strip()) if buf.strip() else ""
                 if tail and not _feed(tail):
                     _restart()
                 if handle is not None:
@@ -286,11 +327,12 @@ class BroadcastSession:
                 if replay:
                     self.replay_pcm = bytes(replay)
 
-        if full:
+        final_text = trimmed if truncated else full    # web-049：截断轮上屏/入史用修剪版
+        if final_text:
             self._history.append({"role": "user", "content": question})
-            self._history.append({"role": "assistant", "content": full})
+            self._history.append({"role": "assistant", "content": final_text})
             self._history = self._history[-8:]     # 4 轮（pipeline 内部亦截断，双保险）
-        emit({"type": "answer_end", "turn": turn, "full_text": full,
+        emit({"type": "answer_end", "turn": turn, "full_text": final_text,
               "cancelled": interrupted or failed})
 
     @staticmethod
