@@ -173,8 +173,11 @@ from __future__ import annotations
 import re
 
 # web-051：薄层拦截（宁漏勿抢）——前缀客套词 + 讲/说 + (一)?(个|段)? + 主题 + 的? + 故事|绘本
-_PREFIX_RE = re.compile(r"^(?:请|请你|给我|给我们|你来|帮我|我想听|我要听|我想让你)+")
+_PREFIX_RE = re.compile(r"^(?:请|请你|给我|给我们|你来|帮我|我想让你)+")
 _STORY_RE = re.compile(r"(?:讲|说)(?:一)?(?:个|段)?(.+?)(?:的)?(?:故事|绘本)[吧吗呢啊呀！!。.~]*$")
+# 「我想听/我要听 X 的故事」无讲/说动词——锚定分支（Task 2 实施实测修正：
+# 前缀剥离后无动词永不命中，测试为权威）；「我想听故事」无主题仍不触发。
+_WANT_LISTEN_RE = re.compile(r"^(?:我想听|我要听)(.+?)(?:的)?(?:故事|绘本)[吧吗呢啊呀！!。.~]*$")
 _THEME_STRIP = " 的一了个段下，,。.!！?"
 
 
@@ -183,8 +186,10 @@ def parse_story_intent(text: str) -> str | None:
     t = (text or "").strip()
     if not t or len(t) > 50:
         return None
-    t = _PREFIX_RE.sub("", t)
-    m = _STORY_RE.search(t)
+    m = _WANT_LISTEN_RE.match(t)
+    if not m:
+        t = _PREFIX_RE.sub("", t)
+        m = _STORY_RE.search(t)
     if not m:
         return None
     theme = m.group(1).strip(_THEME_STRIP)
