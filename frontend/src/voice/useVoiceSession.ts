@@ -22,6 +22,7 @@ export interface VoiceSessionDeps {
   onAction?: (name: string) => void;           // 小鹿主题点缀动作（web-039）
   onActivity?: () => void;                     // 服务端活动（空闲计时复位）
   onClose?: () => void;
+  onStoryEvent?: (ev: any) => void;            // web-062：绘本 story_* 事件转接（不进聊天气泡）
 }
 
 export function useVoiceSession(deps: VoiceSessionDeps) {
@@ -106,6 +107,11 @@ export function useVoiceSession(deps: VoiceSessionDeps) {
         break;
       case "error":
         statusText.value = ev.message ?? "服务异常";
+        break;
+      default:
+        if (typeof ev.type === "string" && ev.type.startsWith("story_")) {
+          deps.onStoryEvent?.(ev);                 // web-062：绘本事件转接，不进聊天气泡
+        }
         break;
     }
   }

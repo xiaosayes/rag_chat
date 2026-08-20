@@ -44,8 +44,8 @@ class TestKioskConfig:
 
 class TestPresets:
     def test_default_pool(self):
-        assert len(DEFAULT_PRESETS) == 16
-        assert len(set(DEFAULT_PRESETS)) == 16          # 无重复
+        assert len(DEFAULT_PRESETS) == 17               # web-062：+1 绘本引导入口
+        assert len(set(DEFAULT_PRESETS)) == 17          # 无重复
         assert all(isinstance(q, str) and q.strip() for q in DEFAULT_PRESETS)
 
     def test_missing_file_falls_back(self, tmp_path):

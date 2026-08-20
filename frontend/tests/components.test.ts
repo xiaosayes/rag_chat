@@ -50,9 +50,9 @@ describe("VoiceBar", () => {
 });
 
 describe("store/presets", () => {
-  it("兜底池 16 条无重复", () => {
-    expect(FALLBACK_PRESETS).toHaveLength(16);
-    expect(new Set(FALLBACK_PRESETS).size).toBe(16);
+  it("兜底池 17 条无重复", () => {   // web-062：+1 绘本引导入口
+    expect(FALLBACK_PRESETS).toHaveLength(17);
+    expect(new Set(FALLBACK_PRESETS).size).toBe(17);
   });
 
   it("bootstrap 失败用兜底（fetch 拒绝）", async () => {

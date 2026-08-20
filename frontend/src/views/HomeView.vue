@@ -6,15 +6,20 @@
     <div class="panel">
       <img class="panel-bg" :src="'img/v1/content_bg.png'" />
       <div class="panel-inner">
-        <VoiceBar v-if="inputMode === 'voice'" :recording="session.recording.value"
-                  :interruptible="session.mode.value === 'broadcast'"
-                  @mic="onMic" @toggle-keyboard="inputMode = 'keyboard'" />
-        <KeyboardInput v-else @toggle-voice="inputMode = 'voice'" @send="onTypedSend" />
-        <div class="divider"><i></i><span class="leaf"></span><i></i></div>
+        <!-- web-062：绘本为全屏第三态，底下语音 chrome 不渲染（防透出/误触） -->
+        <template v-if="mode !== 'story'">
+          <VoiceBar v-if="inputMode === 'voice'" :recording="session.recording.value"
+                    :interruptible="session.mode.value === 'broadcast'"
+                    @mic="onMic" @toggle-keyboard="inputMode = 'keyboard'" />
+          <KeyboardInput v-else @toggle-voice="inputMode = 'voice'" @send="onTypedSend" />
+          <div class="divider"><i></i><span class="leaf"></span><i></i></div>
+        </template>
         <PresetPanel v-if="mode === 'home' && inputMode === 'voice'" @select="onPreset" />
         <ChatPanel v-if="mode === 'chat'" :session="session" @back="onBack" />
       </div>
     </div>
+    <!-- web-062：绘本全屏第三态（1080×1920 整舞台组件，置于 panel 同级覆盖） -->
+    <StoryBook v-if="mode === 'story'" :story="story" @back="onStoryBack" />
     <SplashScreen :show="!store.modelReady" />
   </div>
 </template>
@@ -29,15 +34,17 @@ import SplashScreen from "../components/SplashScreen.vue";
 import SysMenu from "../components/SysMenu.vue";
 import KeyboardInput from "../components/KeyboardInput.vue";
 import VoiceBar from "../components/VoiceBar.vue";
+import StoryBook from "../components/StoryBook.vue";
 import { useAutoChat } from "../voice/useAutoChat";
 import { useHandsfree } from "../voice/useHandsfree";
 import { useIdleTimer } from "../voice/useIdleTimer";
+import { useStorySession } from "../voice/useStorySession";
 import { useVoiceSession } from "../voice/useVoiceSession";
 import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
 const deer = ref<InstanceType<typeof DeerAvatar>>();
-const mode = ref<"home" | "chat">("home");
+const mode = ref<"home" | "chat" | "story">("home");   // web-062：绘本第三态
 const inputMode = ref<"voice" | "keyboard">("voice");
 
 const idle = useIdleTimer({
@@ -47,10 +54,16 @@ const idle = useIdleTimer({
     if (mode.value === "chat") {
       session.resetChat();
       mode.value = "home";
+    } else if (mode.value === "story") {
+      story.reset();          // web-062：收尾页停留后空闲回首页（story_end 无新事件驱动计时器）
+      mode.value = "home";
     }
   },
 });
 
+// web-062：story 依赖 session.client/player 须后建；事件只可能在 onMounted connect 后到达，
+// 届时 story 已赋值（TDZ 安全）。
+let story: ReturnType<typeof useStorySession>;
 const session = useVoiceSession({
   onTalkChange: (talking) => {
     if (talking) deer.value?.playTalk();
@@ -59,6 +72,16 @@ const session = useVoiceSession({
   onAction: (name) => deer.value?.playAccent(name),   // web-039 主题点缀动作
   onActivity: () => idle.reset(),
   onClose: () => { session.statusText.value = "连接已断开，重连中…"; },
+  onStoryEvent: (ev) => story?.handleEvent(ev),       // web-062：绘本事件转接
+});
+story = useStorySession({
+  client: session.client,
+  player: session.player,
+  onPhaseChange: (p) => {
+    if (p === "preparing" || p === "playing") mode.value = "story";
+    else if (p === "idle") mode.value = "home";        // error/cancel 回首页
+    // finished：停留收尾页（web-062），空闲计时器到点回首页
+  },
 });
 // web-042：语音提问自动跳聊天态（await_broadcast/broadcast 沿触发，手动返回不回弹）
 useAutoChat(session.mode, mode);
@@ -96,6 +119,11 @@ function onTypedSend(q: string) {
 }
 
 function onBack() {
+  mode.value = "home";
+}
+
+function onStoryBack() {
+  // StoryBook 内部已 story.back()（发 story_cancel + reset）；此处只负责切回首页
   mode.value = "home";
 }
 
