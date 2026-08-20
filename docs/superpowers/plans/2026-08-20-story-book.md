@@ -359,10 +359,15 @@ class ScriptClient:
         self._model, self._max_tokens, self._timeout = model, max_tokens, timeout_s
 
     def _call_llm(self, messages):
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        # 注意：不能用 with 块——超时后 __exit__ 的 shutdown(wait=True) 会卡在
+        # 挂死的 LLM 调用上，使超时失效（Task 3 实施实测修正）。
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
             fut = pool.submit(_generation_call, model=self._model, messages=messages,
                               result_format="message", max_tokens=self._max_tokens)
             return fut.result(timeout=self._timeout)
+        finally:
+            pool.shutdown(wait=False)
 
     def generate(self, theme: str) -> dict:
         msgs = [{"role": "system", "content": SCRIPT_SYSTEM_PROMPT},
@@ -533,12 +538,16 @@ class ImageClient:
         self._model, self._size, self._timeout = model, size, timeout_s
 
     def _once(self, path: Path, prompt: str) -> None:
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        # 同 Task 3 修正：pool.shutdown(wait=False)，超时不被 shutdown 卡住。
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
             fut = pool.submit(_mmconversation_call,
                               model=self._model,
                               messages=[{"role": "user", "content": [{"text": prompt}]}],
                               prompt_extend=False, size=self._size)
             rsp = fut.result(timeout=self._timeout)
+        finally:
+            pool.shutdown(wait=False)
         _download(_extract_image_url(rsp), path)
 
     def generate_to(self, path: Path, prompt: str) -> bool:
