@@ -1,9 +1,11 @@
 """AI 故事绘本（web-050 起）：意图/脚本/插图/缓存/编排。冻结内核零改动。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -216,3 +218,90 @@ class ImageClient:
             except Exception as e:
                 logger.warning("插图生成失败（第 %d 次）: %s", attempt + 1, e)
         return False
+
+
+# ==================== web-054：同名故事缓存 ====================
+
+
+def _normalize_theme(theme: str) -> str:
+    return re.sub(r"[\s，。！？、,.!?~…·]+", "", theme or "")
+
+
+class StoryCache:
+    """data/story/<story_id>/ 落盘缓存：meta.json + page_<n>.png。
+
+    命中条件 = meta.json 存在且 scenes 非空（图片缺失容忍，Task 6 补生成）；
+    容量超 max_mb 按 last_access LRU 整故事淘汰。
+    """
+
+    def __init__(self, root: str, max_mb: int):
+        self._root = Path(root)
+        self._max_bytes = int(max_mb) * 1024 * 1024
+
+    @staticmethod
+    def story_id(theme: str) -> str:
+        return hashlib.sha1(_normalize_theme(theme).encode("utf-8")).hexdigest()[:12]
+
+    def _dir(self, sid: str) -> Path:
+        return self._root / sid
+
+    def image_path(self, sid: str, n: int) -> Path:
+        return self._dir(sid) / f"page_{n}.png"
+
+    def load(self, theme: str) -> dict | None:
+        meta = self._dir(self.story_id(theme)) / "meta.json"
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if not data.get("scenes"):
+                return None
+            self.save_meta_touch(data["id"] if "id" in data else self.story_id(theme))
+            data["id"] = data.get("id") or self.story_id(theme)
+            return data
+        except Exception:
+            return None
+
+    def save(self, theme: str, script: dict) -> str:
+        sid = self.story_id(theme)
+        self._dir(sid).mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        meta = {"id": sid, "theme": theme, "title": script["title"],
+                "characters": script.get("characters", ""), "scenes": script["scenes"],
+                "created": now, "last_access": now}
+        (self._dir(sid) / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        return sid
+
+    def save_meta_touch(self, sid: str, last_access: float | None = None) -> None:
+        meta = self._dir(sid) / "meta.json"
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            data["last_access"] = time.time() if last_access is None else last_access
+            data.setdefault("id", sid)
+            meta.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def evict_if_needed(self) -> None:
+        if not self._root.exists():
+            return
+        dirs = [d for d in self._root.iterdir() if d.is_dir()]
+
+        def size(d: Path) -> int:
+            return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+
+        def last_access(d: Path) -> float:
+            try:
+                return json.loads((d / "meta.json").read_text(encoding="utf-8"))["last_access"]
+            except Exception:
+                return 0.0
+
+        total = sum(size(d) for d in dirs)
+        if total <= self._max_bytes:
+            return
+        import shutil
+        for d in sorted(dirs, key=last_access):
+            if total <= self._max_bytes:
+                break
+            total -= size(d)
+            shutil.rmtree(d, ignore_errors=True)
+            logger.info("故事缓存 LRU 淘汰: %s", d.name)
