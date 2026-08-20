@@ -1753,7 +1753,11 @@ export function useStorySession(deps: {
   const preparingTheme = ref("");
   const errorText = ref("");
   let speakEndPage = 0;          // 最后一个非 cancel 的 speak_end 页码
-  let drained = true;            // 播放器已排空（无在途音频）
+  // 【实施修正（Task 11 实测+审查）】drained 初值必须为 false 且 story_speak_start 复位——
+  // 初值 true 会让 speak_end 单独满足护栏提前翻页，goTo 的 player.stop() 截掉在播尾音；
+  // speakStarted 兜底无 TTS 降级（tts=None 时无 speak_start 无 PCM，speak_end 即视为已排尽，防永卡第 1 页）。
+  let drained = false;           // 播放器已排空（无在途音频）
+  let speakStarted = false;      // 本页是否见过 speak_start
 
   function setPhase(p: StoryPhase) {
     phase.value = p;
@@ -1793,8 +1797,13 @@ export function useStorySession(deps: {
       case "story_page_img":
         images[ev.n] = ev.url;
         break;
+      case "story_speak_start":            // 【实施修正新增】
+        speakStarted = true;
+        drained = false;                     // 新页音频开播 → 未排尽（护栏关键复位）
+        break;
       case "story_speak_end":
         if (ev.cancelled) break;
+        if (!speakStarted) drained = true;   // 【fix round 1】无 TTS：本页无音频，视为已排尽
         speakEndPage = ev.n;
         maybeAdvance();
         break;
@@ -1814,8 +1823,9 @@ export function useStorySession(deps: {
     if (target === page.value) return;
     page.value = target;                          // 乐观翻页
     speakEndPage = 0;
+    speakStarted = false;                         // 【实施修正】新页 speak_start 未至
     deps.player.stop();                           // 本地立即静音（web-047 对齐）
-    drained = true;
+    drained = true;                               // stop 后队列已空=已排尽
     deps.client.storyPage(target);
   }
 
@@ -1824,13 +1834,19 @@ export function useStorySession(deps: {
     maybeAdvance();
   };
 
+  // 【实施修正】reset 提升为作用域函数——对象字面量内自引用属性名会 ReferenceError
+  function reset() {
+    setPhase("idle"); page.value = 1;
+    speakEndPage = 0; speakStarted = false; drained = false;
+  }
+
   return {
     phase, title, page, total, pages, images, preparingTheme, errorText,
     handleEvent, goTo,
     next: () => goTo(page.value + 1),
     prev: () => goTo(page.value - 1),
     back: () => { deps.player.stop(); deps.client.storyCancel(); reset(); },
-    reset: () => { setPhase("idle"); page.value = 1; speakEndPage = 0; },
+    reset,
   };
 }
 ```
