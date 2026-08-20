@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -142,3 +143,76 @@ class ScriptClient:
                     raise StoryModerationError(str(e)) from e
                 last_err = StoryScriptError(str(e))
         raise last_err or StoryScriptError("生成失败")
+
+
+# ======================= web-053：插图生成（qwen-image-3.0） =======================
+
+IMAGE_STYLE_PREFIX = (
+    "中国传统绘本插画，水彩淡彩，色调柔和温暖，儿童读物风格，画面简洁干净。"
+)
+IMAGE_NEGATIVE_SUFFIX = "画面中不要出现任何文字、水印、标志；不要恐怖、阴暗元素。"
+
+
+class StoryImageError(Exception):
+    pass
+
+
+def build_image_prompt(characters: str, scene: str) -> str:
+    parts = [IMAGE_STYLE_PREFIX]
+    if characters:
+        parts.append(f"主要角色保持统一形象：{characters}。")
+    parts.append(f"本页画面：{scene}")
+    parts.append(IMAGE_NEGATIVE_SUFFIX)
+    return "".join(parts)
+
+
+def _mmconversation_call(**kw):        # 薄封装便于 mock（web-053）
+    import dashscope
+    from src.config import settings
+    dashscope.api_key = settings.dashscope_api_key
+    from dashscope import MultiModalConversation
+    rsp = MultiModalConversation.call(**kw)
+    if getattr(rsp, "status_code", 0) != 200:
+        raise StoryImageError(f"image HTTP {rsp.status_code}: {getattr(rsp, 'code', '')}")
+    return rsp
+
+
+def _download(url: str, path: Path) -> None:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=30) as r, open(path, "wb") as f:
+        f.write(r.read())
+
+
+def _extract_image_url(rsp) -> str:
+    for item in rsp.output.choices[0].message.content:
+        if isinstance(item, dict) and item.get("image"):
+            return item["image"]
+    raise StoryImageError("响应无图像")
+
+
+class ImageClient:
+    def __init__(self, model: str, size: str, timeout_s: float):
+        self._model, self._size, self._timeout = model, size, timeout_s
+
+    def _once(self, path: Path, prompt: str) -> None:
+        # 同 Task 3 修正：pool.shutdown(wait=False)，超时不被 shutdown 卡住。
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = pool.submit(_mmconversation_call,
+                              model=self._model,
+                              messages=[{"role": "user", "content": [{"text": prompt}]}],
+                              prompt_extend=False, size=self._size)
+            rsp = fut.result(timeout=self._timeout)
+        finally:
+            pool.shutdown(wait=False)
+        _download(_extract_image_url(rsp), path)
+
+    def generate_to(self, path: Path, prompt: str) -> bool:
+        """失败自动重试 1 次；仍失败记日志返回 False（调用方走占位图降级）。"""
+        for attempt in (0, 1):
+            try:
+                self._once(Path(path), prompt)
+                return True
+            except Exception as e:
+                logger.warning("插图生成失败（第 %d 次）: %s", attempt + 1, e)
+        return False
