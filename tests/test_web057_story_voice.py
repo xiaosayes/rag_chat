@@ -67,6 +67,36 @@ class TestStoryRouting:
         vs.barge_in()
         assert story.cancelled == 0                        # 不级联取消故事
 
+    def test_close_in_story_mode_full_cleanup(self):
+        # web-057 补强：close 是会话生命周期行为——故事态 barge guard 不得阻断清理
+        events = []
+        vs, story = _make(events)
+        called = []
+        orig_barge = vs._broadcast.barge_in
+        vs._broadcast.barge_in = lambda: (called.append(1), orig_barge())
+        vs.set_story_mode(True)
+        vs._story = story
+        story.active = True
+        vs.close()
+        assert story.cancelled == 1                        # 故事实例被取消（线程/TTS 不泄漏）
+        assert called == [1]                               # _broadcast.barge_in 未被阻断
+        assert vs._greet_cancel.is_set()                   # 应答取消置位
+        assert vs._closed is True
+        vs.feed_audio(b"\x00" * 640)                       # close 后帧丢弃（_closed 短路）
+        assert not events
+
+    def test_close_without_story_unchanged(self):
+        # 非故事态 close 语义与修复前一致；未启动的故事实例不被误伤
+        events = []
+        vs, story = _make(events)
+        called = []
+        orig_barge = vs._broadcast.barge_in
+        vs._broadcast.barge_in = lambda: (called.append(1), orig_barge())
+        vs.close()
+        assert called == [1]
+        assert story.cancelled == 0
+        assert vs._closed is True
+
     def test_ask_during_story_defensive_cancel(self):
         events = []
         vs, story = _make(events)

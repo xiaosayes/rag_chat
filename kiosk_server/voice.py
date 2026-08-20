@@ -123,7 +123,16 @@ class VoiceSession:
 
     def close(self) -> None:
         self._closed = True
-        self.barge_in()
+        # web-057 补强：close 是会话生命周期清理，不经 barge_in 的故事态 guard——
+        # 故事实例存在必取消（线程/TTS 句柄不泄漏），应答/问答播报取消内联直调。
+        # 故事态 barge_in 忽略语义不变（那是 WS 消息面行为）。
+        if self._story is not None:
+            try:
+                self._story.cancel()
+            except Exception:
+                pass
+        self._greet_cancel.set()
+        self._broadcast.barge_in()
         if self._assistant is not None:
             try:
                 self._assistant.close()
