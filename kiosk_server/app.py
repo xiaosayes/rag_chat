@@ -37,7 +37,9 @@ class _TokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if self._token and request.url.path.startswith("/api/") \
                 and request.url.path != "/api/health":
-            if request.headers.get("X-Kiosk-Token") != self._token:
+            # web-058：header 优先，回退查询参数（浏览器 <img> 无法设自定义头）
+            token = request.headers.get("X-Kiosk-Token") or request.query_params.get("token")
+            if token != self._token:
                 return JSONResponse({"detail": "未授权"}, status_code=401)
         return await call_next(request)
 
@@ -80,6 +82,19 @@ def create_app(config: KioskConfig | None = None, ocr_client=None,
     @app.get("/api/presets")
     def presets():
         return {"questions": load_presets(cfg.presets_path)}
+
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+
+    @app.get("/api/story/{sid}/img/{n}")
+    def story_img(sid: str, n: int):
+        # web-058：绘本插图供图（服务端落盘，前端不碰 OSS 临时链）
+        if not sid.isalnum() or len(sid) > 32 or not (1 <= n <= 99):
+            return JSONResponse({"detail": "参数非法"}, status_code=404)
+        path = Path(cfg.story_cache_dir) / sid / f"page_{n}.png"
+        if not path.is_file():
+            return JSONResponse({"detail": "插图未就绪"}, status_code=404)
+        return FileResponse(path, media_type="image/png")
 
     @app.post("/api/ocr")
     def ocr(req: _OcrRequest):

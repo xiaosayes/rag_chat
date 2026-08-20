@@ -36,13 +36,29 @@ def _default_session_factory(cfg: KioskConfig):
                 return None
 
         assistant = services.make_voice_assistant(cfg.project_id)   # None=降级纯手动
-        return VoiceSession(
+        vs = VoiceSession(
             pipe, tts_factory, assistant, emit,
             greeting_pcm_fn=lambda: services.greeting_pcm(cfg.project_id),
             accum_chars=settings.tts_accum_chars,
             watchdog_s=settings.tts_stream_watchdog_seconds,
             first_floor_chars=cfg.first_floor_chars,   # web-030 首播硬地板
         )
+        if cfg.story_enabled:                        # web-058：绘本编排全套真件注入
+            from .story import (ImageClient, ScriptClient, StoryCache,
+                                StorySession)
+
+            def story_factory(story_emit):
+                return StorySession(
+                    story_emit,
+                    ScriptClient(cfg.story_script_model, cfg.story_script_max_tokens,
+                                 cfg.story_script_timeout_s),
+                    ImageClient(cfg.story_image_model, cfg.story_image_size,
+                                cfg.story_image_timeout_s),
+                    StoryCache(cfg.story_cache_dir, cfg.story_cache_max_mb),
+                    tts_factory, cfg)
+
+            vs.set_story_session(story_factory)
+        return vs
 
     return make
 
@@ -112,6 +128,12 @@ def register_voice_ws(app, cfg: KioskConfig, session_factory=None) -> None:
                         asyncio.to_thread(session.ask, data.get("text", "")))
                 elif mtype == "barge_in":
                     session.barge_in()
+                elif mtype == "story_page":          # web-058：绘本翻页/收尾/退出
+                    session.on_story_page(data.get("n", 0))
+                elif mtype == "story_finish":
+                    session.on_story_finish()
+                elif mtype == "story_cancel":
+                    session.on_story_cancel()
                 else:
                     out_q.put_nowait({"type": "error", "code": "unknown_type"})
         except WebSocketDisconnect:
