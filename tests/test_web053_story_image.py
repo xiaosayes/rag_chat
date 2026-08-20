@@ -63,3 +63,50 @@ class TestGenerateTo:
         monkeypatch.setattr(story, "_mmconversation_call", flaky)
         monkeypatch.setattr(story, "_download", lambda u, p: p.write_bytes(b"x"))
         assert ImageClient("m", "s", 90).generate_to(tmp_path / "a.png", "p") is True
+
+
+class TestDownloadAtomic:
+    """web-063 终审 F2：_download 原子落盘——中断不留截断残文件、临时文件清理
+    （缓存命中 path.exists() 不误用半张图）。"""
+
+    def test_urlopen_failure_leaves_nothing(self, tmp_path, monkeypatch):
+        import urllib.request
+        def boom(url, timeout=0):
+            raise RuntimeError("连接中断")
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        target = tmp_path / "page_1.png"
+        with pytest.raises(RuntimeError):
+            story._download("https://oss.example/x.png", target)
+        assert not target.exists()
+        assert list(tmp_path.iterdir()) == []        # 临时文件也被清理
+
+    def test_read_failure_leaves_no_partial(self, tmp_path, monkeypatch):
+        import urllib.request
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                raise RuntimeError("传输中断")
+        monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: _Resp())
+        target = tmp_path / "page_1.png"
+        with pytest.raises(RuntimeError):
+            story._download("https://oss.example/x.png", target)
+        assert not target.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_success_writes_via_tmp_no_residue(self, tmp_path, monkeypatch):
+        import urllib.request
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b"PNGBYTES"
+        monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: _Resp())
+        target = tmp_path / "page_1.png"
+        story._download("https://oss.example/x.png", target)
+        assert target.read_bytes() == b"PNGBYTES"
+        assert list(tmp_path.iterdir()) == [target]  # 无临时文件残留

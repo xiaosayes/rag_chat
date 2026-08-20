@@ -131,3 +131,48 @@ class TestStart:
         s, _ = _make(events, img=img, tmp_path=tmp_path)
         _drive(s)
         assert all("虞姬" in p for p in img.prompts)     # 跨图一致性：角色锚定每张携带
+
+
+class TestEvictionWired:
+    """web-063 终审 F1：LRU 接线——start 流程必须调用 evict_if_needed（500MB 上限名存实亡）。"""
+
+    def test_evict_called_during_story_flow(self, tmp_path, monkeypatch):
+        events = []
+        s, cache = _make(events, tmp_path=tmp_path)
+        calls = []
+        monkeypatch.setattr(cache, "evict_if_needed", lambda: calls.append(1))
+        _drive(s)
+        assert calls, "evict_if_needed 从未被调用（LRU 未接线）"
+
+
+class TestCancelDuringPreparing:
+    """web-063 终审 F5：准备期取消不反弹——script 阻塞期间 cancel：
+    无 story_begin、无 story_speak_start、有 story_end{cancelled}。"""
+
+    def test_cancel_before_begin_no_rebound(self, tmp_path):
+        gate = threading.Event()
+
+        class _SlowScript:
+            def __init__(self):
+                self.entered = threading.Event()
+
+            def generate(self, theme):
+                self.entered.set()
+                gate.wait(5.0)                       # 等测试线程 cancel 后再返回
+                return _script()
+
+        events = []
+        script = _SlowScript()
+        s, _ = _make(events, script=script, tmp_path=tmp_path)
+        th = threading.Thread(target=s.start, args=("霸王别姬",), daemon=True)
+        th.start()
+        assert script.entered.wait(2.0), "script.generate 未被调用"
+        s.cancel()
+        gate.set()
+        assert s.wait_idle(5.0), "start() 未在 5s 内返回"
+        th.join(3)
+        t = _types(events)
+        assert "story_begin" not in t
+        assert "story_speak_start" not in t
+        ends = [e for e in events if e["type"] == "story_end"]
+        assert ends and ends[-1]["reason"] == "cancelled"

@@ -186,9 +186,23 @@ def _mmconversation_call(**kw):        # 薄封装便于 mock（web-053）
 
 
 def _download(url: str, path: Path) -> None:
+    """web-063 终审 F2：原子落盘——先写同目录 .part 临时文件再 os.replace；
+    任何失败清理临时文件，目标路径不留截断残文件（缓存命中 path.exists() 不误用半张图）。"""
+    import os
     import urllib.request
-    with urllib.request.urlopen(url, timeout=30) as r, open(path, "wb") as f:
-        f.write(r.read())
+    tmp = path.with_suffix(".part")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = r.read()
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _extract_image_url(rsp) -> str:
@@ -369,6 +383,9 @@ class StorySession:
         self._cmd.put(("finish", None))
 
     def cancel(self) -> None:
+        # web-063 终审 F5：同时置取消旗标——准备期（script 阻塞）取消不反弹，
+        # 插图线程同步收尾（对齐 D7「取消未完成插图任务」）
+        self._cancel.set()
         self._cmd.put(("cancel", None))
 
     def close(self) -> None:
@@ -397,6 +414,10 @@ class StorySession:
                 sid = self._cache.save(theme, script)
                 title, characters, scenes, is_cached = (
                     script["title"], script.get("characters", ""), script["scenes"], False)
+            if self._cancel.is_set():
+                # web-063 终审 F5：准备期取消——不发 story_begin 不开播，直接收尾
+                self._emit({"type": "story_end", "reason": "cancelled"})
+                return
             self._sid, self._title, self._characters = sid, title, characters
             self._pages = [{"n": i + 1, "text": t} for i, t in enumerate(scenes)]
             self._emit({"type": "story_begin", "story_id": sid, "title": title,
@@ -408,6 +429,10 @@ class StorySession:
             self._cancel.set()                     # 通知插图线程收尾
             if self._tts is not None:
                 self._tts.close()                  # web-056：取消在途播报
+            try:
+                self._cache.evict_if_needed()        # web-063 终审 F1：500MB LRU 接线
+            except Exception as e:
+                logger.warning("故事缓存 LRU 淘汰异常: %s", e)
             self._active.clear()
 
     # ---------- 插图编排：页序提交、并发受限、预算兜底 ----------
@@ -489,7 +514,8 @@ class StorySession:
 
     def _command_loop(self) -> None:
         reason = "done"
-        self._speak(1)                               # story_begin 后自动开播第 1 页
+        if not self._cancel.is_set():
+            self._speak(1)                           # story_begin 后自动开播第 1 页（F5：已取消不开播）
         while True:
             kind, payload = self._cmd.get()
             if kind == "cancel":
