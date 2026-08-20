@@ -1290,6 +1290,7 @@ class TestStoryRouting:
     def test_ask_during_story_defensive_cancel(self):
         events = []
         vs, story = _make(events)
+        vs._story = story    # 模拟故事实例在进行（Task 8 实施修正：brief 原测试缺此线必失败）
         vs.set_story_mode(True)
         story.active = True
         vs.ask("图书馆几点关门")                           # 非故事文本 → 取消故事后照常问答
