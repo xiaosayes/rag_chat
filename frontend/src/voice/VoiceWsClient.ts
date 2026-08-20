@@ -108,6 +108,18 @@ export class VoiceWsClient {
     this.send({ type: "barge_in" });
   }
 
+  storyPage(n: number): void {
+    this.send({ type: "story_page", n });
+  }
+
+  storyFinish(): void {
+    this.send({ type: "story_finish" });
+  }
+
+  storyCancel(): void {
+    this.send({ type: "story_cancel" });
+  }
+
   close(): void {
     this.intentionalClose = true;
     this.clearTimers();
