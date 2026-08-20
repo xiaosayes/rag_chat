@@ -72,6 +72,28 @@ describe("web-061 StoryBook", () => {
     expect(block).toMatch(/background:/);
   });
 
+  it("preparing: back button clickable and z-ordered above overlay (web-063 F3)", async () => {
+    const st = fakeStory();
+    st.phase = ref("preparing");
+    const w = mount(StoryBook, { props: { story: st } });
+    await w.find(".btn-back").trigger("click");
+    expect(st.back).toHaveBeenCalled();
+    // z 序钉桩：返回钮必须压过 preparing/finished 盖层（准备期最坏 2×60s 可取消，spec D7）
+    const grab = (cls: string) => {
+      const m = storyBookRaw.match(new RegExp(`\\.${cls}\\s*\\{([\\s\\S]*?)\\n  \\}`));
+      return Number(m?.[1].match(/z-index:\s*(\d+)/)?.[1] ?? -1);
+    };
+    expect(grab("btn-back")).toBeGreaterThan(grab("story-overlay"));
+  });
+
+  it("preparing overlay renders story_error message (web-063 F4)", () => {
+    const st = fakeStory();
+    st.phase = ref("preparing");
+    st.errorText.value = "这个故事我不太会讲，换一个试试吧";
+    const w = mount(StoryBook, { props: { story: st } });
+    expect(w.text()).toContain("换一个试试吧");
+  });
+
   it("preparing and finished overlays", async () => {
     const st = fakeStory();
     st.phase = ref("preparing");

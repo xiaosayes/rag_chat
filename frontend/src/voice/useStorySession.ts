@@ -20,6 +20,24 @@ export function useStorySession(deps: {
   const preparingTheme = ref("");
   const errorText = ref("");
   let speakEndPage = 0;          // 最后一个非 cancel 的 speak_end 页码
+  // web-063 终审 F4：story_error 可见化——停留 preparing 盖层展示拒讲话术后再转 idle
+  const STORY_ERROR_HOLD_MS = 2500;
+  let errorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function holdErrorThenIdle() {
+    if (errorTimer !== null) return;
+    errorTimer = setTimeout(() => {
+      errorTimer = null;
+      setPhase("idle");
+    }, STORY_ERROR_HOLD_MS);
+  }
+
+  function clearErrorTimer() {
+    if (errorTimer !== null) {
+      clearTimeout(errorTimer);
+      errorTimer = null;
+    }
+  }
   // web-060 实施修正：drained 初值必须为 false，且 story_speak_start 时复位——
   // 初值 true 会让 speak_end 单独满足护栏提前翻页，goTo 的 player.stop() 截掉当页尾部音频。
   let drained = false;           // 播放器已排空（无在途音频）
@@ -49,6 +67,7 @@ export function useStorySession(deps: {
   function handleEvent(ev: any) {
     switch (ev.type) {
       case "story_preparing":
+        clearErrorTimer();                        // F4：新故事清残定时器（防迟到 idle 误杀）
         preparingTheme.value = ev.theme ?? "";
         errorText.value = "";
         setPhase("preparing");
@@ -78,11 +97,13 @@ export function useStorySession(deps: {
         maybeAdvance();
         break;
       case "story_end":
-        setPhase(ev.reason === "done" ? "finished" : "idle");
+        if (ev.reason === "done") setPhase("finished");
+        else if (errorText.value) holdErrorThenIdle();  // F4：错误收尾对（story_error 先行）同持留
+        else setPhase("idle");
         break;
       case "story_error":
         errorText.value = ev.message ?? "故事生成失败";
-        setPhase("idle");
+        holdErrorThenIdle();                      // F4：停留盖层展示话术，不静默弹回首页
         break;
     }
   }
@@ -106,6 +127,7 @@ export function useStorySession(deps: {
 
   // 提升为作用域函数——brief 原稿在对象字面量里引用自身属性名导致 ReferenceError（实测修正）
   function reset() {
+    clearErrorTimer();                            // F4：back()/reset() 清残定时器
     setPhase("idle");
     page.value = 1;
     speakEndPage = 0;

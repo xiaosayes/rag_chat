@@ -4,6 +4,8 @@
 
     <div v-if="story.phase.value === 'preparing'" class="story-overlay">
       <div class="prepare-text">湘小图正在想「{{ story.preparingTheme.value }}」的故事…</div>
+      <!-- web-063 终审 F4：拒讲/失败话术可见化（服务端 story_error 礼貌拒讲，spec D8） -->
+      <div v-if="story.errorText.value" class="error-text">{{ story.errorText.value }}</div>
     </div>
 
     <template v-else>
@@ -62,7 +64,7 @@ function onBack() {
     position: absolute;
     top: 30px;
     right: 30px;
-    z-index: 10;
+    z-index: 30;             /* web-063 终审 F3：压过 preparing/finished 盖层(z20)——准备期/结束态可返回取消（spec D7） */
     height: 104px;           /* 对齐 ChatPanel 返回钮（web-042：80→104px） */
     padding: 0 42px;
     border: 0;
@@ -178,12 +180,15 @@ function onBack() {
     inset: 0;
     z-index: 20;
     display: flex;
+    flex-direction: column;                  /* web-063 F4：准备文案与错误话术纵向堆叠 */
+    gap: 24px;
     align-items: center;
     justify-content: center;
     background: rgba(74, 63, 48, 0.35);        /* 半透明盖层 */
 
     .prepare-text,
-    .finished-text {
+    .finished-text,
+    .error-text {
       background: rgba(255, 250, 235, 0.92);   /* 羊皮纸 */
       border-radius: 31px;
       padding: 40px 60px;

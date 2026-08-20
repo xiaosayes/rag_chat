@@ -101,12 +101,54 @@ describe("web-060 useStorySession", () => {
     expect(s.phase.value).toBe("idle");
   });
 
-  it("story_error surfaces message and idles", () => {
-    const { s } = make();
-    s.handleEvent({ type: "story_preparing", theme: "x" });
-    s.handleEvent({ type: "story_error", code: "moderation", message: "换一个试试吧" });
-    expect(s.phase.value).toBe("idle");
-    expect(s.errorText.value).toContain("换一个");
+  // web-063 终审 F4：story_error 可见化——停留 preparing 盖层展示拒讲话术，
+  // STORY_ERROR_HOLD_MS(2500) 后才转 idle（不静默弹回首页）
+  it("story_error holds preparing then idles after hold window", () => {
+    vi.useFakeTimers();
+    try {
+      const { s } = make();
+      s.handleEvent({ type: "story_preparing", theme: "x" });
+      s.handleEvent({ type: "story_error", code: "moderation", message: "换一个试试吧" });
+      expect(s.errorText.value).toContain("换一个");
+      expect(s.phase.value).not.toBe("idle");
+      vi.advanceTimersByTime(2499);
+      expect(s.phase.value).not.toBe("idle");
+      vi.advanceTimersByTime(1);
+      expect(s.phase.value).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("story_end{error} after story_error also holds (server error pair)", () => {
+    vi.useFakeTimers();
+    try {
+      const { s } = make();
+      s.handleEvent({ type: "story_preparing", theme: "x" });
+      s.handleEvent({ type: "story_error", code: "script_failed", message: "失败" });
+      s.handleEvent({ type: "story_end", reason: "error" });
+      expect(s.phase.value).not.toBe("idle");
+      vi.advanceTimersByTime(2500);
+      expect(s.phase.value).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stale error timer does not kill a new story (back clears timer)", () => {
+    vi.useFakeTimers();
+    try {
+      const { s } = make();
+      s.handleEvent({ type: "story_preparing", theme: "x" });
+      s.handleEvent({ type: "story_error", code: "m", message: "x" });
+      s.back();
+      expect(s.phase.value).toBe("idle");
+      s.handleEvent({ type: "story_preparing", theme: "新故事" });
+      vi.advanceTimersByTime(5000);
+      expect(s.phase.value).toBe("preparing");      // 无迟到 setPhase(idle) 反弹
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // web-060 补强（实施修正钉桩）：speak_end 单独到达（音频仍在播、未排尽）不得推进——
