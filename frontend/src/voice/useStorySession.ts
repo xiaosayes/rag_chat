@@ -23,6 +23,9 @@ export function useStorySession(deps: {
   // web-060 实施修正：drained 初值必须为 false，且 story_speak_start 时复位——
   // 初值 true 会让 speak_end 单独满足护栏提前翻页，goTo 的 player.stop() 截掉当页尾部音频。
   let drained = false;           // 播放器已排空（无在途音频）
+  // web-060 补强（fix round 1）：本页是否见过 speak_start——无 TTS 降级路径
+  // （服务端 tts=None）无 speak_start 也无 PCM，speak_end 即视为已排尽，防永卡第 1 页。
+  let speakStarted = false;
 
   function setPhase(p: StoryPhase) {
     phase.value = p;
@@ -56,6 +59,7 @@ export function useStorySession(deps: {
         pages.value = ev.pages ?? [];
         page.value = 1;
         speakEndPage = 0;
+        speakStarted = false;
         drained = false;                       // 新故事：音频未开播，未排尽
         Object.keys(images).forEach((k) => delete images[Number(k)]);
         setPhase("playing");
@@ -64,10 +68,12 @@ export function useStorySession(deps: {
         images[ev.n] = ev.url;
         break;
       case "story_speak_start":
+        speakStarted = true;
         drained = false;                       // 新页音频开播 → 未排尽（护栏关键复位）
         break;
       case "story_speak_end":
         if (ev.cancelled) break;
+        if (!speakStarted) drained = true;     // 无 TTS：本页无音频，视为已排尽
         speakEndPage = ev.n;
         maybeAdvance();
         break;
@@ -87,6 +93,7 @@ export function useStorySession(deps: {
     if (target === page.value) return;
     page.value = target;                          // 乐观翻页
     speakEndPage = 0;
+    speakStarted = false;                         // 新页 speak_start 未至
     deps.player.stop();                           // 本地立即静音（web-047 对齐）
     drained = true;                               // stop 后队列已空=已排尽
     deps.client.storyPage(target);
@@ -102,6 +109,8 @@ export function useStorySession(deps: {
     setPhase("idle");
     page.value = 1;
     speakEndPage = 0;
+    speakStarted = false;                         // 复位语义完整（fix round 1 Minor-2）
+    drained = false;
   }
 
   return {

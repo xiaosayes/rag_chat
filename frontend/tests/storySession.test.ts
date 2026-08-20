@@ -119,4 +119,14 @@ describe("web-060 useStorySession", () => {
     expect(s.page.value).toBe(1);                          // 未播尽不推进（防截尾）
     expect(sent).toHaveLength(0);
   });
+
+  // web-060 补强（fix round 1 钉桩）：无 TTS 降级路径——服务端 tts=None 时无
+  // story_speak_start、无任何 PCM，speak_end 必须视为已排尽并推进（否则永卡第 1 页）。
+  it("no-TTS fallback: speak_end without speak_start advances", () => {
+    const { s, sent } = make();
+    s.handleEvent(begin);
+    s.handleEvent({ type: "story_speak_end", n: 1, cancelled: false });  // 无 speak_start
+    expect(s.page.value).toBe(2);
+    expect(sent).toContainEqual({ type: "story_page", n: 2 });
+  });
 });
