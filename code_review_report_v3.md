@@ -690,3 +690,43 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
   「…沉浸式放松。」、播报喂入止于同一句点（判定一致）。
 - 测试：pytest 772 passed（+1 回归：修剪线内完整句必播/悬尾不播/历史一致）；
   vitest 74 passed 无回归。
+
+### 增补：web-050~063 AI 故事绘本（全新功能，brainstorming 全程拍板，2026-08-20）
+
+- **范围确认**：用户对一体机说「给我讲一个〈任意主题〉的故事」→ 翻页式图文绘本 +
+  逐页语音讲解。设计稿 D1~D10 全部经用户逐项拍板（`docs/superpowers/specs/
+  2026-08-20-story-book-design.md`），实施计划 14 任务 TDD（`docs/superpowers/plans/
+  2026-08-20-story-book.md`），subagent 驱动执行 + 逐任务评审。
+- **决策溯源（D1~D10 拍板值）**：翻页式 8~10 页（一页=一图+≤80 字段文，儿童适宜）；
+  分镜脚本 qwen-plus 固定云端（独立 1600 tokens 限长，先例 FALLBACK_MAX_TOKENS）；
+  插图 qwen-image-3.0（严格遵循文字、跨图一致性、异步并发 ≤4、失败重试 1 次→占位）；
+  绘本全流程固定云端不随 LLM_PROVIDER；薄层正则拦截意图（宁漏勿抢，无主题不触发，
+  不做「再讲一个」专属状态）；播完自动翻页 + 随时手动翻页即切播报；讲完停留收尾页
+  （空闲计时回首页）、中途返回=静音+取消+回首页、绘本全程无语音打断；同名故事缓存
+  500MB LRU；脚本 60s/单图 90s/总预算 300s 超时；审核拦截→礼貌拒讲退出；插图服务端
+  落盘 `data/story/`（前端不碰 OSS 临时链）；方案 A WS 单通道扩展。
+- **关键实测（开工前 probe）**：`qwen-image-3.0` 必须走 MultiModalConversation messages
+  格式（老 ImageSynthesis 400 InvalidParameter）；速度杠杆 `prompt_extend=True` 71.0s →
+  `prompt_extend=False` 17.9s → 再 `size=1024*1024` 12.9s（prompt_extend=False 同时是
+  「不过度发挥」的语义保证）；平台限额 RPM=20。
+- **架构**：新模块 `kiosk_server/story.py`（意图正则/ScriptClient/ImageClient/StoryCache/
+  StorySession）；播报复用专用 BroadcastSession 实例（StoryPagePipeline 喂当页文本，
+  句边界/清洗/看门狗/打断串行化原样继承，answer_* 事件经包装改名 story_speak_*）；
+  VoiceSession 故事态丢弃上行音频帧（唤醒/ASR/语音打断全静默）；WS 增
+  story_page/story_finish/story_cancel 三消息；`GET /api/story/<id>/img/<n>` 供图
+  （token 走查询参数）。前端 StoryBook.vue + useStorySession（页码主导、
+  PcmPlayer.onEnded 播尽 + speak_end 双序护栏自动推进、乐观翻页、占位图淡入），
+  HomeView home/chat/story 三态，预设池加故事引导。
+- **实施期缺陷修正（评审闭环，均已回归）**：线程池超时 with 块陷阱（shutdown(wait=True)
+  卡死使超时失效 → shutdown(wait=False)，Task 3/4 同款同步）；LLM 审核类 HTTP 400 被
+  永久判死（重试循环外分类，story.py:283）；finish 打断在播页裁尾（先排空再播收尾语）；
+  前端 drained 初值 true 致 speak_end 单独触发翻页截尾音（改 false + story_speak_start
+  复位）；无 TTS 降级路径永卡第 1 页（speakStarted 兜底）；故事舞台 z 序盖小鹿防护。
+- **证据（真实 API 冒烟，scripts/smoke_story.py「霸王别姬」，留档 data/story_smoke/）**：
+  脚本 7.7s 出 10 分镜（每段 25~44 字全 ≤80，LLM 自主适龄化改编「霸王别姬」→
+  「小霸王和小花姬」幼儿园京剧故事）；插图 3 张 7.2/12.6/7.9s 出图，目检达标（水彩
+  绘本风、严格切题、角色锚定生效、无文字水印）；A/B 对比图留档。
+- **测试**：pytest **819 passed**（+47：配置族/意图正则/脚本/插图/缓存/启动链路/播报
+  状态机/VoiceSession 集成/WS+供图/预设）；vitest **94 passed**（+20：WS 方法/
+  useStorySession/StoryBook/Home 接线）；npm run build 通过。外部 API 一律 mock，
+  真实 API 仅冒烟脚本。

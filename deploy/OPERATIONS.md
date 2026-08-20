@@ -101,6 +101,10 @@ python scripts/smoke_kiosk_ws.py --port 7862 "家博会几点开门？"
 # LLM 层冒烟（验证当前 .env 指定的通道本身）
 python scripts/smoke_local_llm.py
 #   期望尾行输出 == 冒烟通过 ==；dashscope 通道工厂显示 BailianLLM，local 通道显示 LocalOpenAILLM
+
+# 故事绘本冒烟（真实 qwen-plus 分镜 + qwen-image-3.0 出图，出图留档 data/story_smoke/）
+python scripts/smoke_story.py "霸王别姬" --pages 2
+#   期望尾行输出 SMOKE_STORY_OK；全链验证（经隧道）：smoke_kiosk_ws.py --port 7862 "给我讲一个霸王别姬的故事"
 ```
 
 **本地模式额外前置检查**（vLLM 必须在线，否则问答报错）：

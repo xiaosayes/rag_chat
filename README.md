@@ -32,6 +32,26 @@
 
 ### v1.6.0-pre (开发中) — 数字人前端与服务端薄层（feat(web) 轮）
 
+- **AI 故事绘本（web-050~063，全新功能，brainstorming 全程拍板）**：对一体机说
+  「给我讲一个〈任意主题〉的故事」→ 翻页式图文绘本 + 逐页语音讲解。形态：8~10 页，
+  一页 = 一幅插图 + 一段 ≤80 字文字（儿童适宜）；播完一页自动翻页，随时手动上一页/
+  下一页（翻页即切播报）；讲完停留收尾页（空闲计时回首页）；中途返回 = 静音 + 取消 +
+  回首页；绘本播放全程无语音打断（故事态服务端丢弃上行音频帧）。链路：薄层正则拦截
+  意图（宁漏勿抢，无主题不触发）→ qwen-plus 出分镜脚本（JSON：title/characters 角色
+  锚定/scenes，独立 1600 tokens 限长，校验失败重试 1 次后确定性钳制）→ qwen-image-3.0
+  逐页配图（multimodal-generation messages 格式，`prompt_extend=False` 严格遵循文字 +
+  `size=1024*1024`：实测单张 71s→13s；异步并发 ≤4，RPM 20 内；失败重试 1 次→占位图
+  照常播）。绘本全流程固定云端（不随 LLM_PROVIDER 切换）。WS 单通道扩展：上行
+  `story_page/story_finish/story_cancel`，下行 `story_preparing/story_begin（文本全量）/
+  story_page_img/story_speak_start|end/story_end|story_error`；播报复用专用
+  BroadcastSession 实例（句边界喂入/清洗/看门狗/打断串行化原样继承）；自动翻页由前端
+  `PcmPlayer.onEnded` 播尽信号 + speak_end 双序护栏驱动。插图服务端落盘
+  `data/story/`（前端经 `GET /api/story/<id>/img/<n>` 取图，不碰 OSS 临时链）；同名故事
+  缓存命中跳 LLM 跳插图秒开（500MB LRU）。前端新增 `StoryBook.vue` 绘本页 + 
+  `useStorySession`（乐观翻页/占位图淡入/结束态），HomeView home/chat/story 三态。
+  真实 API 冒烟（`scripts/smoke_story.py`「霸王别姬」）：脚本 7.7s 出 10 分镜（每段
+  25~44 字，LLM 自主适龄化改编为「小霸王和小花姬」），插图 3 张 7.2~12.6s 出图达标
+  （留档 `data/story_smoke/`）。pytest 819 passed（+47）/ vitest 94 passed（+20）。
 - **新增 `kiosk_server/`（全部新文件，零改动既有代码）**：数字人一体机专属薄层 API
   （独立进程 :7861，与 Gradio:7860 互斥运行——Qdrant 本地嵌入模式文件锁，已实证）。
   M1 端点：`GET /api/health|config|presets`、`POST /api/ocr`（百炼 qwen-vl-ocr 手写识别，
