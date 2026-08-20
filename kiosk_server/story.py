@@ -338,7 +338,9 @@ class StorySession:
         self._tts_factory = tts_factory
         self._cfg = cfg
         self._clock = clock
-        self._speak_fn = speak_fn                  # Task 7 缺省 None → 内部播报实现
+        self._speak_fn = speak_fn                  # web-055 测试桩兼容：注入即接管播报
+        self._tts: BroadcastSession | None = None  # web-056：绘本专用播报实例
+        self._speaking_page = 0
         self._cmd: queue.Queue = queue.Queue()
         self._active = threading.Event()
         self._cancel = threading.Event()
@@ -404,6 +406,8 @@ class StorySession:
             self._command_loop()
         finally:
             self._cancel.set()                     # 通知插图线程收尾
+            if self._tts is not None:
+                self._tts.close()                  # web-056：取消在途播报
             self._active.clear()
 
     # ---------- 插图编排：页序提交、并发受限、预算兜底 ----------
@@ -439,16 +443,68 @@ class StorySession:
 
         threading.Thread(target=run_all, daemon=True).start()
 
-    # ---------- 指令循环（Task 7 补播报动作；本任务 finish/cancel 仅收尾事件） ----------
+    # ---------- 播报（复用 BroadcastSession：句边界/清洗/看门狗/打断串行化，web-056） ----------
+
+    def _make_broadcast(self) -> BroadcastSession:
+        self._speaking_page = 0
+
+        def wrapped(ev: dict) -> None:
+            t = ev.get("type")
+            if t == "answer_start":
+                self._emit({"type": "story_speak_start", "n": self._speaking_page})
+                return
+            if t == "answer_chunk":
+                return                                 # 文本已在 story_begin 全量下发
+            if t == "answer_end":
+                self._emit({"type": "story_speak_end", "n": self._speaking_page,
+                            "cancelled": bool(ev.get("cancelled"))})
+                return
+            self._emit(ev)                             # audio*/playback_cancel 透传
+
+        return BroadcastSession(_StoryPagePipeline(), self._tts_factory, wrapped,
+                                accum_chars=60, watchdog_s=15.0, first_floor_chars=12)
+
+    def _speak(self, n: int, text: str | None = None) -> None:
+        """播一页（新线程；BroadcastSession.ask 自带 web-029 打断串行化）。"""
+        if self._speak_fn is not None:                 # web-055 测试桩兼容：注入即接管
+            self._speaking_page = n
+            self._speak_fn(n)
+            return
+        if self._tts is None:
+            self._tts = self._make_broadcast()
+        self._speaking_page = n
+        body = text if text is not None else self._pages[n - 1]["text"]
+        threading.Thread(target=self._tts.ask, args=(body,), daemon=True).start()
+        # 等 busy 置位（有界）——否则紧随的 _wait_speak_done 会在新线程起跑前误判空转
+        end = self._clock() + 2.0
+        while not self._tts.busy and self._clock() < end:
+            time.sleep(0.005)
+
+    def _wait_speak_done(self, timeout: float) -> None:
+        end = self._clock() + timeout
+        while self._tts is not None and self._tts.busy and self._clock() < end:
+            time.sleep(0.05)
+
+    # ---------- 指令循环（web-056：开播第 1 页/翻页即切/收尾/cancel） ----------
 
     def _command_loop(self) -> None:
+        reason = "done"
+        self._speak(1)                               # story_begin 后自动开播第 1 页
         while True:
             kind, payload = self._cmd.get()
             if kind == "cancel":
-                self._emit({"type": "story_end", "reason": "cancelled"})
+                reason = "cancelled"
                 break
             if kind == "finish":
-                self._emit({"type": "story_end", "reason": "done"})
+                self._speak(0, self._cfg.story_closing)
+                self._wait_speak_done(30.0)          # 收尾语播尽再发 story_end
                 break
-            if kind == "page" and self._speak_fn and 1 <= payload <= len(self._pages):
-                self._speak_fn(payload)
+            if kind == "page" and 1 <= payload <= len(self._pages):
+                if (self._tts is None or payload != self._speaking_page
+                        or not self._tts.busy):
+                    self._speak(payload)
+        if reason == "cancelled":
+            if self._tts is not None:
+                self._tts.barge_in()
+            self._wait_speak_done(5.0)
+        self._emit({"type": "story_end", "reason": reason})
