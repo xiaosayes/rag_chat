@@ -1956,6 +1956,8 @@ describe("web-061 StoryBook", () => {
     </div>
 
     <template v-else>
+      <!-- 【实施修正（Task 12 测试为权威）】可见标题元素，测试断言 w.text() 含标题 -->
+      <div class="story-title">{{ story.title.value }}</div>
       <div class="story-img-area">
         <img v-if="imgUrl" class="story-img" :src="imgUrl" :alt="story.title.value" />
         <div v-else class="story-img-placeholder"><span>插画绘制中…</span></div>
