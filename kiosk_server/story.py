@@ -4,10 +4,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import queue
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
+
+from .chat import BroadcastSession          # noqa: F401  web-055（Task 7 播报复用）
+from .tts_clean import clean_for_broadcast  # noqa: F401  （Task 7 播报路径使用）
 
 logger = logging.getLogger(__name__)
 
@@ -305,3 +311,144 @@ class StoryCache:
             total -= size(d)
             shutil.rmtree(d, ignore_errors=True)
             logger.info("故事缓存 LRU 淘汰: %s", d.name)
+
+
+# ==================== web-055：StorySession 启动链路 ====================
+
+
+class _StoryPagePipeline:
+    """当页文本即「问题」：BroadcastSession 原编排零改动复用（web-055）。"""
+    def query_stream(self, question, conversation_history=None):
+        yield question
+
+
+class StorySession:
+    """绘本编排（web-055）：preparing→cache/script→story_begin→插图编排→指令循环。
+
+    线程模型：start() 由调用方线程阻塞执行；on_page/on_finish/cancel 由 WS 线程
+    非阻塞投递指令；插图生成页序提交、信号量限并发、总预算兜底。
+    """
+
+    def __init__(self, emit, script_client, image_client, cache, tts_factory, cfg, *,
+                 clock=time.monotonic, speak_fn: Callable[[int], None] | None = None):
+        self._emit = emit
+        self._script = script_client
+        self._image = image_client
+        self._cache = cache
+        self._tts_factory = tts_factory
+        self._cfg = cfg
+        self._clock = clock
+        self._speak_fn = speak_fn                  # Task 7 缺省 None → 内部播报实现
+        self._cmd: queue.Queue = queue.Queue()
+        self._active = threading.Event()
+        self._cancel = threading.Event()
+        self._img_done = threading.Event()
+        self._pages: list[dict] = []
+        self._sid = ""
+        self._title = ""
+        self._characters = ""
+
+    @property
+    def active(self) -> bool:
+        return self._active.is_set()
+
+    def wait_idle(self, timeout: float) -> bool:   # 测试辅助：有界等 start() 跑完
+        end = self._clock() + timeout
+        while self._active.is_set() and self._clock() < end:
+            time.sleep(0.01)
+        return not self._active.is_set()
+
+    # ---------- 指令入口（WS 线程调用，非阻塞） ----------
+
+    def on_page(self, n: int) -> None:
+        self._cmd.put(("page", int(n)))
+
+    def on_finish(self) -> None:
+        self._cmd.put(("finish", None))
+
+    def cancel(self) -> None:
+        self._cmd.put(("cancel", None))
+
+    def close(self) -> None:
+        self.cancel()
+
+    # ---------- 主流程（调用方线程阻塞执行） ----------
+
+    def start(self, theme: str) -> None:
+        self._active.set()
+        try:
+            self._emit({"type": "story_preparing", "theme": theme})
+            cached = self._cache.load(theme)
+            if cached:
+                sid, title, characters, scenes, is_cached = (
+                    cached["id"], cached["title"], cached.get("characters", ""),
+                    cached["scenes"], True)
+            else:
+                try:
+                    script = self._script.generate(theme)
+                except StoryScriptError as e:
+                    self._emit({"type": "story_error",
+                                "code": getattr(e, "code", "script_failed"),
+                                "message": "这个故事我不太会讲，换一个试试吧"})
+                    self._emit({"type": "story_end", "reason": "error"})
+                    return
+                sid = self._cache.save(theme, script)
+                title, characters, scenes, is_cached = (
+                    script["title"], script.get("characters", ""), script["scenes"], False)
+            self._sid, self._title, self._characters = sid, title, characters
+            self._pages = [{"n": i + 1, "text": t} for i, t in enumerate(scenes)]
+            self._emit({"type": "story_begin", "story_id": sid, "title": title,
+                        "total": len(self._pages), "cached": is_cached,
+                        "pages": self._pages})
+            self._start_image_workers()
+            self._command_loop()
+        finally:
+            self._cancel.set()                     # 通知插图线程收尾
+            self._active.clear()
+
+    # ---------- 插图编排：页序提交、并发受限、预算兜底 ----------
+
+    def _start_image_workers(self) -> None:
+        sem = threading.Semaphore(self._cfg.story_image_concurrency)
+        deadline = self._clock() + self._cfg.story_total_budget_s
+
+        def worker(page: dict) -> None:
+            n = page["n"]
+            path = self._cache.image_path(self._sid, n)
+            with sem:
+                if self._cancel.is_set() or self._clock() > deadline:
+                    return
+                if path.exists():
+                    ok = True                       # 缓存/补生成跳过
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    ok = self._image.generate_to(
+                        path, build_image_prompt(self._characters, page["text"]))
+            if ok and not self._cancel.is_set():
+                self._emit({"type": "story_page_img", "n": n,
+                            "url": f"/api/story/{self._sid}/img/{n}"})
+
+        def run_all() -> None:
+            threads = [threading.Thread(target=worker, args=(p,), daemon=True)
+                       for p in self._pages]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self._img_done.set()
+
+        threading.Thread(target=run_all, daemon=True).start()
+
+    # ---------- 指令循环（Task 7 补播报动作；本任务 finish/cancel 仅收尾事件） ----------
+
+    def _command_loop(self) -> None:
+        while True:
+            kind, payload = self._cmd.get()
+            if kind == "cancel":
+                self._emit({"type": "story_end", "reason": "cancelled"})
+                break
+            if kind == "finish":
+                self._emit({"type": "story_end", "reason": "done"})
+                break
+            if kind == "page" and self._speak_fn and 1 <= payload <= len(self._pages):
+                self._speak_fn(payload)

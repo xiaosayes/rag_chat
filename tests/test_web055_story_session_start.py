@@ -1,0 +1,133 @@
+# tests/test_web055_story_session_start.py
+# web-055：StorySession 启动链路——preparing→begin（缓存命中/新生成）→逐图事件
+import threading
+
+from kiosk_server import story
+from kiosk_server.story import StoryCache, StoryScriptError, StorySession
+
+
+class _Cfg:
+    story_min_scenes = 8; story_max_scenes = 10; story_scene_max_chars = 80
+    story_image_concurrency = 4; story_total_budget_s = 300.0
+    story_closing = "故事讲完啦，还想听什么故事吗？"
+
+
+class _FakeScript:
+    def __init__(self, script=None, err=None):
+        self._script, self._err, self.calls = script, err, []
+
+    def generate(self, theme):
+        self.calls.append(theme)
+        if self._err:
+            raise self._err
+        return self._script
+
+
+def _script(n=8):
+    return {"title": "霸王别姬", "characters": "虞姬",
+            "scenes": [f"第{i}幕。" for i in range(1, n + 1)]}
+
+
+class _FakeImage:
+    def __init__(self, ok=True):
+        self.ok, self.prompts, self._lock = ok, [], threading.Lock()
+
+    def generate_to(self, path, prompt):
+        with self._lock:
+            self.prompts.append(prompt)
+        if self.ok:
+            from pathlib import Path
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(b"PNG")
+        return self.ok
+
+
+def _make(events, script=None, img=None, tmp_path=None, speak=None):
+    cache = StoryCache(str(tmp_path), 500)
+    s = StorySession(events.append, script or _FakeScript(_script()),
+                     img or _FakeImage(), cache, tts_factory=None, cfg=_Cfg(),
+                     speak_fn=speak or (lambda n: None))
+    return s, cache
+
+
+def _drive(s, theme="霸王别姬"):
+    """启动链路时序（web-055 实施注意）：线程跑 start → 等插图编排收尾
+    （假件秒级完成，消除 story_end 与逐图事件的竞态）→ finish 指令 → 等 start 返回。"""
+    th = threading.Thread(target=s.start, args=(theme,), daemon=True)
+    th.start()
+    assert s._img_done.wait(5.0), "插图编排未在 5s 内收尾"
+    s.on_finish()
+    assert s.wait_idle(5.0), "start() 未在 5s 内返回"
+    th.join(3)
+
+
+def _types(events):
+    return [e["type"] for e in events]
+
+
+class TestStart:
+    def test_fresh_flow(self, tmp_path):
+        events = []
+        s, _ = _make(events, tmp_path=tmp_path)
+        _drive(s)
+        t = _types(events)
+        assert t[0] == "story_preparing" and events[0]["theme"] == "霸王别姬"
+        begin = events[t.index("story_begin")]
+        assert begin["total"] == 8 and begin["cached"] is False
+        assert begin["pages"][0] == {"n": 1, "text": "第1幕。"}
+        imgs = [e for e in events if e["type"] == "story_page_img"]
+        assert len(imgs) == 8
+        assert all(e["url"].startswith(f"/api/story/{begin['story_id']}/img/") for e in imgs)
+        assert events[-1]["type"] == "story_end" and events[-1]["reason"] == "done"
+
+    def test_cached_replay_skips_llm_and_images(self, tmp_path):
+        events = []
+        s, cache = _make(events, tmp_path=tmp_path)
+        _drive(s)
+        # 第二轮：同主题 → 命中缓存（LLM 不再调用、图片全已在盘 → 直接发 img 事件）
+        script2 = _FakeScript(_script())
+        img2 = _FakeImage()
+        events2 = []
+        s2, _ = _make(events2, script=script2, img=img2, tmp_path=tmp_path)
+        _drive(s2, " 霸王别姬！")
+        assert script2.calls == []                       # 跳 LLM
+        assert img2.prompts == []                        # 已落盘的图跳生成
+        begin = [e for e in events2 if e["type"] == "story_begin"][0]
+        assert begin["cached"] is True
+        assert len([e for e in events2 if e["type"] == "story_page_img"]) == 8
+
+    def test_partial_cache_backfills_missing_images(self, tmp_path):
+        events = []
+        s, cache = _make(events, tmp_path=tmp_path)
+        _drive(s)
+        sid = StoryCache.story_id("霸王别姬")
+        cache.image_path(sid, 3).unlink()                # 制造缺图缓存
+        img2 = _FakeImage()
+        events2 = []
+        s2, _ = _make(events2, img=img2, tmp_path=tmp_path)
+        _drive(s2)
+        assert len(img2.prompts) == 1                    # 只补第 3 页
+
+    def test_failed_image_no_img_event(self, tmp_path):
+        events = []
+        img = _FakeImage(ok=False)
+        s, _ = _make(events, img=img, tmp_path=tmp_path)
+        _drive(s)
+        assert not [e for e in events if e["type"] == "story_page_img"]
+        assert [e for e in events if e["type"] == "story_end"]   # 照常讲完
+
+    def test_script_failure_emits_error(self, tmp_path):
+        events = []
+        s, _ = _make(events, script=_FakeScript(err=StoryScriptError("x")),
+                     tmp_path=tmp_path)
+        s.start("霸王别姬")
+        t = _types(events)
+        assert "story_error" in t and events[t.index("story_error")]["code"] == "script_failed"
+        assert "story_begin" not in t
+
+    def test_image_prompt_carries_characters(self, tmp_path):
+        events = []
+        img = _FakeImage()
+        s, _ = _make(events, img=img, tmp_path=tmp_path)
+        _drive(s)
+        assert all("虞姬" in p for p in img.prompts)     # 跨图一致性：角色锚定每张携带
