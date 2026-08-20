@@ -474,3 +474,93 @@ class TestVoiceWs:
         body = c.get("/api/health").json()
         assert body["ok"] is True and body["kb"] == "not_loaded"
         assert "tts" in body
+
+
+class TestTruncationTrim:
+    """web-049：答案被 max_tokens 硬截断（截图 12：列表中段戛然而止）→
+    裁至最后完整句——展示（answer_end.full_text）、播报（不喂悬尾段）、历史三处一致。
+    判据：长度达上限水位（≥max_tokens*1.2 字，实测 320 tokens≈431 字校准）且结尾无终结符。"""
+
+    @staticmethod
+    def _tokens(total_chars=400, tail="还有更多惊喜等待"):
+        body = "这是完整的一句推荐语。" * (total_chars // 11)   # 11 字/句
+        parts = [body[i:i + 20] for i in range(0, len(body), 20)]
+        return parts + [tail]                                  # 结尾悬尾无标点
+
+    def test_truncated_answer_trimmed_everywhere(self, monkeypatch):
+        from src.config import settings
+        monkeypatch.setattr(settings, "llm_max_tokens", 320)   # floor=384
+        pipe = FakePipeline(self._tokens())                    # 396+8 字截断态
+        tts = FakeTTS()
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: tts, emit, clock=AutoClock(), tick_s=0.01)
+        s.ask("推荐电影")
+
+        end = [e for e in events if e["type"] == "answer_end"][0]
+        assert end["full_text"].endswith("。")                 # 展示：完整句收尾
+        assert "还有更多惊喜等待" not in end["full_text"]       # 悬尾已裁
+        fed_text = "".join(tts.handles[0].fed)
+        assert "还有更多惊喜等待" not in fed_text               # 播报：悬尾段未喂
+        assert s.history[-1]["content"] == end["full_text"]     # 历史与展示一致
+
+    def test_long_answer_with_terminal_punct_untouched(self, monkeypatch):
+        from src.config import settings
+        monkeypatch.setattr(settings, "llm_max_tokens", 320)
+        tokens = self._tokens()[:-1] + ["全部推荐完毕。"]        # 长但有终结符
+        pipe = FakePipeline(tokens)
+        tts = FakeTTS()
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: tts, emit, clock=AutoClock(), tick_s=0.01)
+        s.ask("q")
+        end = [e for e in events if e["type"] == "answer_end"][0]
+        assert end["full_text"].endswith("全部推荐完毕。")       # 原样保留
+        assert "".join(tts.handles[0].fed).endswith("全部推荐完毕。")
+
+    def test_short_fragment_below_floor_untouched(self, monkeypatch):
+        from src.config import settings
+        monkeypatch.setattr(settings, "llm_max_tokens", 320)
+        pipe = FakePipeline(["嗯", "我在"])                     # 短、无终结符、未达水位
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: None, emit, clock=AutoClock(), tick_s=0.01)
+        s.ask("q")
+        end = [e for e in events if e["type"] == "answer_end"][0]
+        assert end["full_text"] == "嗯我在"                     # 不误裁
+
+    def test_interrupted_answer_not_trimmed(self, monkeypatch):
+        """打断轮的残段保持原样（用户主动打断，不做截断修剪）。"""
+        from src.config import settings
+        monkeypatch.setattr(settings, "llm_max_tokens", 320)
+        gate = threading.Event()
+        pipe = FakePipeline(self._tokens(), gate=gate)          # 卡在长答案中段
+        emit, events = _collect_events()
+        s = BroadcastSession(pipe, lambda: None, emit, clock=AutoClock(), tick_s=0.01)
+        th = threading.Thread(target=s.ask, args=("q",), daemon=True)
+        th.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(
+                e["type"] == "answer_chunk" for e in events):
+            time.sleep(0.02)
+        s.barge_in()
+        th.join(timeout=5)   # 闸门保持关闭：泵阻塞，主循环先见 cancel → interrupted
+        end = [e for e in events if e["type"] == "answer_end"][0]
+        assert end["cancelled"] is True
+        assert not end["full_text"].endswith("。")              # 残段原样，不修剪
+
+
+class TestTruncationDetect:
+    """web-049 判据单测：水位 + 终结符双条件。"""
+
+    def test_boundary(self, monkeypatch):
+        from kiosk_server.chat import _looks_truncated
+        from src.config import settings
+        monkeypatch.setattr(settings, "llm_max_tokens", 320)    # floor=384
+        assert _looks_truncated("字" * 384 + "待", 320) is True
+        assert _looks_truncated("字" * 384 + "。", 320) is False   # 有终结符
+        assert _looks_truncated("字" * 100 + "待", 320) is False    # 未达水位
+        assert _looks_truncated("", 320) is False
+
+    def test_trim_to_last_sentence(self):
+        from kiosk_server.chat import _trim_to_last_sentence
+        assert _trim_to_last_sentence("甲。乙。丙 dangling") == "甲。乙。"
+        assert _trim_to_last_sentence("没有终结符") == "没有终结符"   # 无边界原样
+        assert _trim_to_last_sentence("甲！乙？丙") == "甲！乙？"
