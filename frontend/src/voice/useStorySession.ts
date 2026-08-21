@@ -17,6 +17,7 @@ export function useStorySession(deps: {
   const total = ref(0);
   const pages: Ref<{ n: number; text: string }[]> = ref([]);
   const images: Record<number, string> = reactive({});
+  const imageFailed: Record<number, boolean> = reactive({});   // web-064：插图失败落地页
   const preparingTheme = ref("");
   const errorText = ref("");
   let speakEndPage = 0;          // 最后一个非 cancel 的 speak_end 页码
@@ -60,8 +61,10 @@ export function useStorySession(deps: {
   }
 
   function maybeAdvance() {
-    // 双序护栏：speak_end(page) 与播尽两个条件都齐才推进（乱序各触发一次检查）
-    if (speakEndPage === page.value && drained) advance();
+    // web-064 三条件护栏：speak_end(page)+播尽+当页插图已了结（就绪或失败落地）
+    // ——短分镜播报快于插图生成时不再连跳无图页；手动 goTo 不受此限。
+    const imgDone = !!images[page.value] || !!imageFailed[page.value];
+    if (speakEndPage === page.value && drained && imgDone) advance();
   }
 
   function handleEvent(ev: any) {
@@ -81,10 +84,13 @@ export function useStorySession(deps: {
         speakStarted = false;
         drained = false;                       // 新故事：音频未开播，未排尽
         Object.keys(images).forEach((k) => delete images[Number(k)]);
+        Object.keys(imageFailed).forEach((k) => delete imageFailed[Number(k)]);
         setPhase("playing");
         break;
       case "story_page_img":
-        images[ev.n] = ev.url;
+        if (ev.url) images[ev.n] = ev.url;              // 失败事件 url=null 不写 images
+        if (ev.failed) imageFailed[ev.n] = true;        // web-064：失败落地=已了结
+        maybeAdvance();                                 // 图就绪/失败落地也可能补齐推进条件
         break;
       case "story_speak_start":
         speakStarted = true;
@@ -136,7 +142,7 @@ export function useStorySession(deps: {
   }
 
   return {
-    phase, title, page, total, pages, images, preparingTheme, errorText,
+    phase, title, page, total, pages, images, imageFailed, preparingTheme, errorText,
     handleEvent, goTo,
     next: () => goTo(page.value + 1),
     prev: () => goTo(page.value - 1),

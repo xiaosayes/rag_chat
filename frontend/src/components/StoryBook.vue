@@ -12,7 +12,7 @@
       <div class="story-title">{{ story.title.value }}</div>
       <div class="story-img-area">
         <img v-if="imgUrl" class="story-img" :src="imgUrl" :alt="story.title.value" />
-        <div v-else class="story-img-placeholder"><span>插画绘制中…</span></div>
+        <div v-else class="story-img-placeholder"><span>{{ placeholderText }}</span></div>
       </div>
       <div class="story-text">{{ currentText }}</div>
       <div class="story-bar">
@@ -39,6 +39,9 @@ const currentText = computed(() => {
   return p?.text ?? "";
 });
 const imgUrl = computed(() => props.story.images[props.story.page.value] ?? "");
+// web-064：插图最终失败的页给出诚实占位文案（区别于「绘制中」）
+const placeholderText = computed(() =>
+  props.story.imageFailed?.[props.story.page.value] ? "插画暂时走失了…" : "插画绘制中…");
 
 function onBack() {
   props.story.back();

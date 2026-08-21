@@ -14,6 +14,7 @@ function fakeStory() {
     total: ref(3),
     pages: ref([{ n: 1, text: "第一页文" }, { n: 2, text: "第二页文" }, { n: 3, text: "第三页文" }]),
     images: reactive({}) as Record<number, string>,
+    imageFailed: reactive({}) as Record<number, boolean>,
     preparingTheme: ref(""),
     errorText: ref(""),
     next: vi.fn(), prev: vi.fn(), back: vi.fn(),
@@ -37,6 +38,16 @@ describe("web-061 StoryBook", () => {
     await w.vm.$nextTick();
     expect(w.find(".story-img").exists()).toBe(true);
     expect(w.find("img.story-img").attributes("src")).toBe("/api/story/s1/img/1");
+  });
+
+  it("failed image page shows lost placeholder text (web-064)", async () => {
+    const st = fakeStory();
+    const w = mount(StoryBook, { props: { story: st } });
+    expect(w.text()).toContain("插画绘制中");
+    st.imageFailed[1] = true;
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("插画暂时走失了");
+    expect(w.text()).not.toContain("插画绘制中");
   });
 
   it("flip buttons call next/prev and disable at bounds", async () => {

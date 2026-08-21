@@ -42,6 +42,7 @@ describe("web-060 useStorySession", () => {
   it("auto-advance: speak_end then drain", () => {
     const { s, sent, player, drain } = make();
     s.handleEvent(begin);
+    s.handleEvent({ type: "story_page_img", n: 1, url: "/x" });   // web-064：推进需图已了结
     s.handleEvent({ type: "story_speak_end", n: 1, cancelled: false });
     player.playing = true;
     drain();                                    // 播尽 → 翻第 2 页
@@ -52,6 +53,7 @@ describe("web-060 useStorySession", () => {
   it("auto-advance: drain before speak_end (reverse order)", () => {
     const { s, sent, player, drain } = make();
     s.handleEvent(begin);
+    s.handleEvent({ type: "story_page_img", n: 1, url: "/x" });   // web-064
     player.playing = false;
     drain();                                    // 先排空（guard 未满足，不动）
     expect(s.page.value).toBe(1);
@@ -85,6 +87,7 @@ describe("web-060 useStorySession", () => {
     const { s, sent, player, drain, phases } = make();
     s.handleEvent(begin);
     s.goTo(3);
+    s.handleEvent({ type: "story_page_img", n: 3, url: "/x" });   // web-064
     s.handleEvent({ type: "story_speak_end", n: 3, cancelled: false });
     player.playing = false;
     drain();
@@ -167,7 +170,44 @@ describe("web-060 useStorySession", () => {
   it("no-TTS fallback: speak_end without speak_start advances", () => {
     const { s, sent } = make();
     s.handleEvent(begin);
+    s.handleEvent({ type: "story_page_img", n: 1, url: "/x" });   // web-064
     s.handleEvent({ type: "story_speak_end", n: 1, cancelled: false });  // 无 speak_start
+    expect(s.page.value).toBe(2);
+    expect(sent).toContainEqual({ type: "story_page", n: 2 });
+  });
+
+  // ---------- web-064：自动翻页等插图就绪（手动翻页不受限） ----------
+
+  it("auto-advance waits for image ready", () => {
+    const { s, sent, player, drain } = make();
+    s.handleEvent(begin);
+    s.handleEvent({ type: "story_speak_end", n: 1, cancelled: false });
+    player.playing = false;
+    drain();
+    expect(s.page.value).toBe(1);                 // 播完+排尽但图未就绪 → 不自动翻页
+    expect(sent).toHaveLength(0);
+    s.handleEvent({ type: "story_page_img", n: 1, url: "/api/story/s1/img/1" });
+    expect(s.page.value).toBe(2);                 // 图就绪补齐条件 → 推进
+    expect(sent).toContainEqual({ type: "story_page", n: 2 });
+  });
+
+  it("failed image event unblocks auto-advance", () => {
+    const { s, sent, player, drain } = make();
+    s.handleEvent(begin);
+    s.handleEvent({ type: "story_speak_end", n: 1, cancelled: false });
+    player.playing = false;
+    drain();
+    expect(s.page.value).toBe(1);
+    s.handleEvent({ type: "story_page_img", n: 1, url: null, failed: true });
+    expect(s.page.value).toBe(2);                 // 失败落地=已了结，不卡页
+    expect(s.images[1]).toBeUndefined();          // 失败不写 images
+    expect(s.imageFailed[1]).toBe(true);
+  });
+
+  it("manual flip ignores image readiness", () => {
+    const { s, sent } = make();
+    s.handleEvent(begin);
+    s.next();                                     // 无图也照翻（手动不受等图限制）
     expect(s.page.value).toBe(2);
     expect(sent).toContainEqual({ type: "story_page", n: 2 });
   });
