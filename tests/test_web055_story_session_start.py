@@ -108,12 +108,15 @@ class TestStart:
         _drive(s2)
         assert len(img2.prompts) == 1                    # 只补第 3 页
 
-    def test_failed_image_no_img_event(self, tmp_path):
+    def test_failed_image_emits_failed_event(self, tmp_path):
+        """web-064：插图最终失败补发 failed 事件（前端据此放行自动翻页，不卡页）。"""
         events = []
         img = _FakeImage(ok=False)
         s, _ = _make(events, img=img, tmp_path=tmp_path)
         _drive(s)
-        assert not [e for e in events if e["type"] == "story_page_img"]
+        imgs = [e for e in events if e["type"] == "story_page_img"]
+        assert len(imgs) == 8
+        assert all(e["failed"] is True and e["url"] is None for e in imgs)
         assert [e for e in events if e["type"] == "story_end"]   # 照常讲完
 
     def test_script_failure_emits_error(self, tmp_path):

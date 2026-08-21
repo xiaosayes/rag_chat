@@ -49,7 +49,7 @@ SCRIPT_SYSTEM_PROMPT = (
     "你是湘小图，湖南省少年儿童图书馆里给小朋友讲故事的亲切姐姐。"
     "请把用户给出的主题改编成一个适合 3~8 岁儿童聆听的绘本故事，"
     "语气亲切温暖、句子简短口语化、内容健康积极，不要列表、不要 Markdown、不要英文术语。"
-    "把整个故事拆成 8 到 10 个分镜，每个分镜是一句不超过 80 个字的叙述，合起来情节完整连贯。"
+    "把整个故事拆成 8 到 10 个分镜，每个分镜是一句 40 到 80 个字的叙述，合起来情节完整连贯。"
     "同时用一句话提炼主要角色的形象特征（年龄感、发型、服饰、颜色），供插画师保持角色一致。"
     "只输出 JSON，格式：{\"title\":\"故事标题\",\"characters\":\"角色形象描述\","
     "\"scenes\":[\"分镜1\",\"分镜2\",...]}，不要输出任何其他文字。"
@@ -137,6 +137,13 @@ class ScriptClient:
                 scenes = _clamp_scenes([str(s) for s in scenes], 80, 10)
                 if len(scenes) < 6:
                     raise StoryScriptError(f"分镜过少: {len(scenes)}")
+                # web-064：短分镜（<40 字）播报快于插图生成——首轮校验不合格重试，
+                # 重试后仍短则接受+告警（自动翻页等图机制兑底体验，不判失败）
+                shorts = [s for s in scenes if len(s) < 40]
+                if shorts and attempt == 0:
+                    raise StoryScriptError(f"{len(shorts)} 个分镜不足 40 字")
+                if shorts:
+                    logger.warning("分镜 %d 段不足 40 字（重试后仍短，接受）", len(shorts))
                 return {"title": str(payload.get("title") or theme).strip() or theme,
                         "characters": str(payload.get("characters") or "").strip(),
                         "scenes": scenes}
@@ -145,7 +152,7 @@ class ScriptClient:
                     raise StoryModerationError(str(e)) from e
                 last_err = e
                 msgs = msgs + [{"role": "user", "content":
-                                f"上次输出不合格（{e}），请严格按 JSON 格式重出，8~10 个分镜、每个≤80 字"}]
+                                f"上次输出不合格（{e}），请严格按 JSON 格式重出，8~10 个分镜、每个 40~80 字"}]
             except Exception as e:
                 if _is_moderation(e):
                     raise StoryModerationError(str(e)) from e
@@ -456,6 +463,9 @@ class StorySession:
             if ok and not self._cancel.is_set():
                 self._emit({"type": "story_page_img", "n": n,
                             "url": f"/api/story/{self._sid}/img/{n}"})
+            elif not ok and not self._cancel.is_set():
+                # web-064：失败落地也发事件——前端据 failed 放行自动翻页（占位页不卡故事）
+                self._emit({"type": "story_page_img", "n": n, "url": None, "failed": True})
 
         def run_all() -> None:
             threads = [threading.Thread(target=worker, args=(p,), daemon=True)

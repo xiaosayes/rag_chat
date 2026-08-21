@@ -15,7 +15,7 @@ def _ok_rsp(payload: dict):
     return R()
 
 
-def _script(n=9, chars=30):
+def _script(n=9, chars=45):      # web-064：默认 ≥45 保 happy path（分镜字数要求 40~80）
     return {"title": "霸王别姬", "characters": "虞姬：年轻女子，梳高髻，穿红色戏服",
             "scenes": ["第%d幕。" % i + "x" * chars for i in range(n)]}
 
@@ -82,7 +82,21 @@ class TestScriptGenerate:
             ScriptClient("qwen-plus", 1600, 60).generate("t")
         assert len(calls) == 1                         # 审核不重试
 
+    def test_short_scenes_retry_then_accept(self, monkeypatch):
+        """web-064：分镜 <40 字=校验不合格重试 1 次；重试后仍短→接受+告警（等图兜底）。"""
+        calls = []
+
+        def fake_call(**kw):
+            calls.append(kw)
+            return _ok_rsp(_script(chars=30))          # 每段 34 字 <40
+
+        monkeypatch.setattr(story, "_generation_call", fake_call)
+        s = ScriptClient("qwen-plus", 1600, 60).generate("t")
+        assert len(calls) == 2                         # 首轮短段触发重试
+        assert "40" in calls[1]["messages"][-1]["content"]   # 修正意见含字数下限
+        assert len(s["scenes"]) == 9                  # 仍短则接受（段数不变）
+
     def test_prompt_rules(self):
         p = story.SCRIPT_SYSTEM_PROMPT
-        for kw in ("儿童", "8", "10", "80", "JSON", "characters", "健康"):
+        for kw in ("儿童", "8", "10", "40", "80", "JSON", "characters", "健康"):
             assert kw in p

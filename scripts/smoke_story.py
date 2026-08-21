@@ -36,7 +36,8 @@ def main() -> int:
     print(f"[script] {t_script:.1f}s title={script['title']} scenes={len(script['scenes'])}")
     for i, s in enumerate(script["scenes"], 1):
         assert len(s) <= 80, f"分镜 {i} 超 80 字（{len(s)}）"
-        print(f"  {i:2d}. ({len(s)}字) {s}")
+        warn = " ⚠<40字" if len(s) < 40 else ""       # web-064：短分镜观察提示（不硬断言）
+        print(f"  {i:2d}. ({len(s)}字){warn} {s}")
 
     img = ImageClient("qwen-image-3.0", "1024*1024", 90)
     pages = script["scenes"][: args.pages or len(script["scenes"])]
