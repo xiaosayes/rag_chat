@@ -176,6 +176,28 @@ IMAGE_STYLE_PREFIX = (
     "中国传统绘本插画，水彩淡彩，色调柔和温暖，儿童读物风格，画面简洁干净。"
 )
 IMAGE_NEGATIVE_SUFFIX = "画面中不要出现任何文字、水印、标志；不要恐怖、阴暗元素。"
+# web-069：专用 negative_prompt 参数（第二层防线；第一层=引语剥除——实测引语入
+# prompt 必被渲染成对话框文字，prompt 内否定句与 negative_prompt 单独均压不住）
+IMAGE_NEGATIVE_PROMPT = (
+    "文字，汉字，字母，拼音，数字，符号，水印，标志，字幕，标题，"
+    "畸形，多余的肢体，多余的耳朵，五官错位，肢体融合，恐怖，阴暗")
+
+
+_QUOTED_SPEECH_RE = re.compile(
+    r"[说喊问道答叫嚷唱讲][:：]?\s*[「『“”‘’\"][^「」『』“”‘’\"]{0,120}[」』“”‘’\"][。！？]?")
+_QUOTE_SPAN_RE = re.compile(r"[「『“”‘’\"][^「」『』“”‘’\"]{0,120}[」』“”‘’\"]")
+
+
+def strip_dialogue_for_image(scene: str) -> str:
+    """web-069：剥除引语——图像模型见到「…」/‘…’引文必渲染对话框（乱码文字根因）；
+    「说：…」类句式改写为「说着话」保动作，剥光则回退原文（不为空 prompt）。"""
+    t = _QUOTED_SPEECH_RE.sub("，", scene)        # 引语连同「说/喊/问」谓语整段剥除（实测残留「说着话」仍会诱发空对话框/符号）
+    t = _QUOTE_SPAN_RE.sub("", t)
+    t = re.sub(r"[，,]{2,}", "，", t)
+    t = re.sub(r"，\s*([。！？；])", r"\1", t)
+    t = re.sub(r"，\s*$", "。", t)
+    t = t.strip().lstrip("，,").strip()
+    return t or scene
 
 
 class StoryImageError(Exception):
@@ -194,7 +216,7 @@ def build_image_prompt(characters: str, scene: str) -> str:
     parts = [IMAGE_STYLE_PREFIX]
     if characters:
         parts.append(f"主要角色保持统一形象：{characters}。")
-    parts.append(f"本页画面：{scene}")
+    parts.append(f"本页画面：{strip_dialogue_for_image(scene)}")   # web-069：剥引语防对话框文字
     parts.append(IMAGE_NEGATIVE_SUFFIX)
     return "".join(parts)
 
@@ -203,7 +225,8 @@ def build_first_image_prompt(theme: str) -> str:
     """web-067：首页并行预生成 prompt——脚本 ~11s 期间用主题先生成首页插画
     （角色锚未定稿，以主题场景为主；失败由页 1 worker 落回 scene prompt 重生成）。"""
     return (IMAGE_STYLE_PREFIX
-            + f"儿童绘本故事《{theme}》的开篇插画，主角登场、点明故事场景：{theme}。"
+            + f"儿童绘本故事《{theme}》的开篇插画，主角登场、点明故事场景："
+            + f"{strip_dialogue_for_image(theme)}。"
             + IMAGE_NEGATIVE_SUFFIX)
 
 
@@ -257,7 +280,8 @@ class ImageClient:
             fut = pool.submit(_mmconversation_call,
                               model=self._model,
                               messages=[{"role": "user", "content": [{"text": prompt}]}],
-                              prompt_extend=False, size=self._size)
+                              prompt_extend=False, size=self._size,
+                              negative_prompt=IMAGE_NEGATIVE_PROMPT)   # web-069
             rsp = fut.result(timeout=self._timeout)
         finally:
             pool.shutdown(wait=False)

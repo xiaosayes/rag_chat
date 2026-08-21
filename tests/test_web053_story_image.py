@@ -2,7 +2,8 @@
 # web-053：插图客户端——prompt 模板/严格遵循（prompt_extend=False）/重试 1 次/超时/落盘
 import pytest
 from kiosk_server import story
-from kiosk_server.story import ImageClient, build_image_prompt
+from kiosk_server.story import (ImageClient, build_image_prompt,
+                                strip_dialogue_for_image)
 
 
 def _img_rsp(url="https://oss.example/p.png"):
@@ -23,6 +24,38 @@ class TestBuildPrompt:
         p = build_image_prompt("", "森林里的小鹿")
         assert "森林里的小鹿" in p
 
+    def test_dialogue_stripped_from_prompt(self):
+        """web-069：引语经图像 prompt 必然被渲染成对话框文字（实测 A/B/C 三路线均失败），
+        图像 prompt 必须剥除引语。"""
+        p = build_image_prompt("兔子", "兔子拍拍胸脯说：「我跑得可快啦！」乌龟笑了。")
+        assert "我跑得可快啦" not in p and "「」" not in p
+        assert "兔子" in p and "乌龟笑了" in p
+
+
+class TestStripDialogue:
+    """web-069：引语剥除——图像模型见到引文必画对话框（乱码文字根因）。"""
+
+    def test_say_with_corner_quotes(self):
+        # 引语连同言语动词整段剥除（「说着话」改写实测仍诱发空对话框/问号符号）
+        t = strip_dialogue_for_image("小兔子拍拍胸脯说：「我跑得可快啦，一定第一！」小乌龟只是笑了笑。")
+        assert t == "小兔子拍拍胸脯，小乌龟只是笑了笑。"
+
+    def test_curly_single_quotes(self):
+        t = strip_dialogue_for_image("农夫哥哥拍拍树桩说：‘等兔子呀！’小豆子摇摇头。")
+        assert t == "农夫哥哥拍拍树桩，小豆子摇摇头。"
+
+    def test_bare_quotes_removed(self):
+        t = strip_dialogue_for_image("兔子喊：「快跑」然后冲了出去。")
+        assert "快跑" not in t and "冲了出去" in t
+
+    def test_no_dialogue_unchanged(self):
+        s = "森林里开满小花，小乌龟慢慢往前爬。"
+        assert strip_dialogue_for_image(s) == s
+
+    def test_all_dialogue_falls_back(self):
+        s = "「你好呀」"
+        assert strip_dialogue_for_image(s) == s   # 剥光则回退原文（不为空 prompt）
+
 
 class TestGenerateTo:
     def test_success_downloads(self, monkeypatch, tmp_path):
@@ -31,6 +64,21 @@ class TestGenerateTo:
         ok = ImageClient("qwen-image-3.0", "1024*1024", 90).generate_to(
             tmp_path / "page_1.png", "prompt")
         assert ok and (tmp_path / "page_1.png").read_bytes() == b"PNG"
+
+    def test_negative_prompt_passed(self, monkeypatch, tmp_path):
+        """web-069：专用 negative_prompt 参数（文字/水印/畸形/多余肢体）随调用下发。"""
+        seen = {}
+
+        def fake(**kw):
+            seen.update(kw)
+            return _img_rsp()
+
+        monkeypatch.setattr(story, "_mmconversation_call", fake)
+        monkeypatch.setattr(story, "_download", lambda url, path: path.write_bytes(b"PNG"))
+        ImageClient("qwen-image-3.0", "1024*1024", 90).generate_to(
+            tmp_path / "p.png", "prompt")
+        neg = seen.get("negative_prompt", "")
+        assert "文字" in neg and "多余" in neg
 
     def test_params_pinned(self, monkeypatch, tmp_path):
         seen = {}

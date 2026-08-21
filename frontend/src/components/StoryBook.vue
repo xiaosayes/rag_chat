@@ -136,10 +136,12 @@ function onBack() {
     box-sizing: border-box;
     font-family: "Source Han Serif CN", serif;
     font-size: 44px;
+    font-weight: 600;                        /* web-069：深绿底上提对比 */
     line-height: 1.6;
     text-align: center;
-    color: #4a3f30;
-    text-shadow: 0 1px 2px rgba(255, 250, 235, 0.8);
+    color: #fff7e6;                          /* 亮羊皮纸白 */
+    text-shadow: 0 2px 8px rgba(46, 38, 28, 0.85),
+                 0 1px 2px rgba(46, 38, 28, 0.95);   /* 双层深影描边 */
   }
 
   .story-bar {
@@ -174,7 +176,10 @@ function onBack() {
       font-family: "Source Han Serif CN", serif;
       font-size: 36px;
       color: #4a3f30;
-      text-shadow: 0 1px 2px rgba(255, 250, 235, 0.8);
+      background: rgba(255, 250, 235, 0.92);   /* web-069：羊皮纸胶囊提对比（同按钮）*/
+      border-radius: 31px;
+      padding: 18px 40px;
+      filter: drop-shadow(0 3px 6px rgba(74, 63, 48, 0.35));
     }
   }
 
