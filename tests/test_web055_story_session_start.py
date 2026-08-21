@@ -65,6 +65,33 @@ def _types(events):
     return [e["type"] for e in events]
 
 
+class _CfgSerial(_Cfg):
+    story_image_concurrency = 1                     # web-066：串行化消除批次竞态
+
+
+class _Clock:
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+class _BudgetBlowingImage:
+    """web-066：首张图生成期间把时钟拨过总预算（模拟慢图拖爆 300s deadline）。"""
+
+    def __init__(self, clock, blow_to):
+        self._clock, self._blow_to, self.calls = clock, blow_to, []
+
+    def generate_to(self, path, prompt, should_stop=None):
+        self.calls.append(prompt)
+        from pathlib import Path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"PNG")
+        self._clock.t = self._blow_to               # 生成完已超过 deadline
+        return True
+
+
 class TestStart:
     def test_fresh_flow(self, tmp_path):
         events = []
@@ -118,6 +145,26 @@ class TestStart:
         assert len(imgs) == 8
         assert all(e["failed"] is True and e["url"] is None for e in imgs)
         assert [e for e in events if e["type"] == "story_end"]   # 照常讲完
+
+    def test_deadline_skip_emits_failed_event(self, tmp_path):
+        """web-066：预算 deadline 跳页补发 failed 事件——等图护栏（web-064）下
+        不冻结自动翻页（末页也能走到 story_finish/story_end）。"""
+        events = []
+        clock = _Clock(0.0)
+        img = _BudgetBlowingImage(clock, blow_to=400.0)     # deadline=300
+        cache = StoryCache(str(tmp_path), 500)
+        s = StorySession(events.append, _FakeScript(_script()), img, cache,
+                         tts_factory=None, cfg=_CfgSerial(), clock=clock,
+                         speak_fn=lambda n: None)
+        _drive(s)
+        imgs = [e for e in events if e["type"] == "story_page_img"]
+        assert len(img.calls) == 1                        # 只有第 1 页真实生成
+        ok_pages = [e["n"] for e in imgs if e.get("url")]
+        failed_pages = sorted(e["n"] for e in imgs if e.get("failed"))
+        assert ok_pages == [1]
+        assert failed_pages == [2, 3, 4, 5, 6, 7, 8]      # 跳页全部补 failed
+        assert all(e["url"] is None for e in imgs if e.get("failed"))
+        assert [e for e in events if e["type"] == "story_end"]   # 故事照常收尾
 
     def test_script_failure_emits_error(self, tmp_path):
         events = []

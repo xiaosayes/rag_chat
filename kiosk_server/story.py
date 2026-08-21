@@ -459,7 +459,13 @@ class StorySession:
             n = page["n"]
             path = self._cache.image_path(self._sid, n)
             with sem:
-                if self._cancel.is_set() or self._clock() > deadline:
+                if self._cancel.is_set():
+                    return
+                if self._clock() > deadline:
+                    # web-066：预算跳页也补 failed 事件——等图护栏（web-064）下
+                    # 不冻结自动翻页（播到跳页时 imgDone 可达成，末页亦能收尾）
+                    self._emit({"type": "story_page_img", "n": n, "url": None,
+                                "failed": True})
                     return
                 if path.exists():
                     ok = True                       # 缓存/补生成跳过
