@@ -115,6 +115,46 @@ defineExpose({ value, keyboardShow, handwriting });
     border-radius: 31px;
     padding: 31px;
   }
+
+  /* web-070：键盘放大（ kiosk 触屏）+ 连字拼音候选条 */
+  :deep(.pinyin-candidates) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 18px;
+    min-height: 104px;                 /* 无候选时占位防键盘跳动 */
+    margin-bottom: 22px;
+    padding: 6px 4px;
+    box-sizing: border-box;
+    .pinyin-cand {
+      font-family: "Source Han Serif CN", serif;
+      font-size: 48px;
+      line-height: 1.2;
+      padding: 16px 34px;
+      border: 2px solid rgba(74, 63, 48, 0.28);
+      border-radius: 20px;
+      background: #fff7e6;
+      color: #4a3f30;
+      cursor: pointer;
+    }
+    .pinyin-cand-word {                /* 词组候选高亮（连字拼音主推荐位） */
+      background: #ffe9b8;
+      border-color: rgba(74, 63, 48, 0.45);
+      font-weight: 600;
+    }
+  }
+  :deep(.kiosk-keyboard) {
+    .hg-row { gap: 14px; margin-bottom: 14px; }
+    .hg-button {
+      height: 108px;
+      border-radius: 18px;
+      span {
+        font-size: 42px;
+        font-family: "Source Han Serif CN", serif;
+        color: #4a3f30;
+      }
+    }
+  }
 }
 .zoom-enter-active { animation: zoomIn 0.25s; }
 @keyframes zoomIn {

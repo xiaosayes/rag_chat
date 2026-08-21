@@ -64,11 +64,46 @@ describe("KeyboardInput", () => {
       await btn!.trigger("click");
     }
     await new Promise((r) => setTimeout(r, 50));
-    const candidate = host.findAll(".hg-candidate-box-list-item")
-      .find((el) => el.text() === "你");
+    // web-070：自绘候选条（.pinyin-cand 取代 simple-keyboard 内置候选框）
+    const candidate = host.findAll(".pinyin-cand").find((el) => el.text() === "你");
     expect(candidate, "候选条应含「你」").toBeTruthy();
     await candidate!.trigger("click");
     expect((w.vm as any).value).toContain("你");
+  });
+
+  it("连字拼音：tuzi 词候选「兔子」一次上屏（web-070）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const host = w.find(".simple-keyboard-host");
+    for (const ch of ["t", "u", "z", "i"]) {
+      const btn = host.findAll(".hg-button").find((b) => b.text() === ch);
+      await btn!.trigger("click");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    const wordCand = host.findAll(".pinyin-cand-word")
+      .find((el) => el.text() === "兔子");
+    expect(wordCand, "词候选条应含「兔子」").toBeTruthy();
+    await wordCand!.trigger("click");
+    expect((w.vm as any).value).toBe("兔子");             // 整词上屏，buffer 清空
+  });
+
+  it("连打余字母继续组词：tuzi 选「兔」后 zi 出「子」（web-070）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const host = w.find(".simple-keyboard-host");
+    for (const ch of ["t", "u", "z", "i"]) {
+      const btn = host.findAll(".hg-button").find((b) => b.text() === ch);
+      await btn!.trigger("click");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    const tu = host.findAll(".pinyin-cand-char").find((el) => el.text() === "兔");
+    expect(tu, "单字候选应含「兔」").toBeTruthy();
+    await tu!.trigger("click");                          // eat=2 → buffer 剩 zi
+    await new Promise((r) => setTimeout(r, 50));
+    const zi = host.findAll(".pinyin-cand").find((el) => el.text() === "子");
+    expect(zi, "buffer 余 zi 应出「子」").toBeTruthy();
+    await zi!.trigger("click");
+    expect((w.vm as any).value).toBe("兔子");
   });
 
   it("发送：非空才 emit 并清空", async () => {

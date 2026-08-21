@@ -1,0 +1,60 @@
+/** 连字拼音引擎（web-070）：词组级候选（tuzi→兔子/change→嫦娥）+ 单字候选。
+ *  纯函数，不依赖 simple-keyboard 实例，供 pinyinKeyboard 自绘候选条调用。
+ *  数据源：
+ *  - 音节表/单字候选 = simple-keyboard-layouts chinese 布局 layoutCandidates（原单字链路同源）
+ *  - 词库 = ../assets/pinyin_words.json（jieba 词频 × pypinyin 注音，scripts/build_pinyin_dict.py 生成） */
+import layout from "simple-keyboard-layouts/build/layouts/chinese";
+import wordsJson from "../assets/pinyin_words.json";
+
+const CHARS: Record<string, string> =
+  (layout as unknown as { layoutCandidates?: Record<string, string> }).layoutCandidates ?? {};
+const WORDS: Record<string, string[]> = wordsJson as unknown as Record<string, string[]>;
+
+const MAX_SYLLABLE_LEN = 6;                 // zhuang/shuang 级
+
+export interface PinyinCandidate {
+  text: string;                             // 候选文本（词或单字）
+  eat: number;                              // 选中后从 buffer 头部消耗的字母数
+  kind: "word" | "char";
+}
+
+/** buffer 的最长合法音节前缀（"tuzi"→"tu"），无则 ""。 */
+export function longestSyllablePrefix(buffer: string): string {
+  for (let len = Math.min(MAX_SYLLABLE_LEN, buffer.length); len > 0; len--) {
+    if (CHARS[buffer.slice(0, len)] !== undefined) return buffer.slice(0, len);
+  }
+  return "";
+}
+
+/** DP 判定 buffer 能否完整切分为合法音节序列（词候选前置条件）。 */
+function segmentable(buffer: string): boolean {
+  const n = buffer.length;
+  const dp = new Array<boolean>(n + 1).fill(false);
+  dp[0] = true;
+  for (let i = 0; i < n; i++) {
+    if (!dp[i]) continue;
+    for (let len = 1; len <= MAX_SYLLABLE_LEN && i + len <= n; len++) {
+      if (CHARS[buffer.slice(i, i + len)] !== undefined) dp[i + len] = true;
+    }
+  }
+  return dp[n];
+}
+
+/** 候选：词候选在前（整 buffer 命中词库），单字候选随后（最长音节前缀）。 */
+export function getCandidates(buffer: string, max = 30): PinyinCandidate[] {
+  if (!buffer) return [];
+  const out: PinyinCandidate[] = [];
+  if (segmentable(buffer)) {
+    const ws = WORDS[buffer];
+    if (ws) {
+      for (const w of ws) out.push({ text: w, eat: buffer.length, kind: "word" });
+    }
+  }
+  const p = longestSyllablePrefix(buffer);
+  if (p) {
+    for (const ch of (CHARS[p] ?? "").split(" ")) {
+      if (ch) out.push({ text: ch, eat: p.length, kind: "char" });
+    }
+  }
+  return out.slice(0, max);
+}
