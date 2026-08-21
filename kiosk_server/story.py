@@ -51,7 +51,7 @@ SCRIPT_SYSTEM_PROMPT = (
     "你是湘小图，湖南省少年儿童图书馆里给小朋友讲故事的亲切姐姐。"
     "请把用户给出的主题改编成一个适合 3~8 岁儿童聆听的绘本故事，"
     "语气亲切温暖、句子简短口语化、内容健康积极，不要列表、不要 Markdown、不要英文术语。"
-    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娱奔月），"
+    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娨奔月），"
     "必须严格沿用原著的情节脉络、角色与结局，不得添加原著没有的角色、事件或转折，"
     "不得改变故事寓意；儿童化只体现在用词和语气上，可在不改动情节主线的前提下做适龄化柔化。"
     "把整个故事拆成 8 到 10 个分镜，每个分镜是一段 40 到 80 个字的叙述，合起来情节完整连贯。"
@@ -197,6 +197,14 @@ def build_image_prompt(characters: str, scene: str) -> str:
     parts.append(f"本页画面：{scene}")
     parts.append(IMAGE_NEGATIVE_SUFFIX)
     return "".join(parts)
+
+
+def build_first_image_prompt(theme: str) -> str:
+    """web-067：首页并行预生成 prompt——脚本 ~11s 期间用主题先生成首页插画
+    （角色锚未定稿，以主题场景为主；失败由页 1 worker 落回 scene prompt 重生成）。"""
+    return (IMAGE_STYLE_PREFIX
+            + f"儿童绘本故事《{theme}》的开篇插画，主角登场、点明故事场景：{theme}。"
+            + IMAGE_NEGATIVE_SUFFIX)
 
 
 def _mmconversation_call(**kw):        # 薄封装便于 mock（web-053）
@@ -424,6 +432,7 @@ class StorySession:
         self._sid = ""
         self._title = ""
         self._characters = ""
+        self._pregen: dict | None = None         # web-067：首页并行预生成状态
 
     @property
     def active(self) -> bool:
@@ -458,6 +467,17 @@ class StorySession:
         self._active.set()
         try:
             self._emit({"type": "story_preparing", "theme": theme})
+            # web-067：首页插图并行预生成——脚本 ~11s 期间用主题 prompt 先生成首页
+            # （t≈7~10s 落地），首屏「文字+插画」合计 ≤12s；失败由页 1 worker 落回
+            # scene prompt 重生成。事件统一由页 1 worker 在 story_begin 后发出——
+            # 前端 begin 会清空 images 表，预生成线程直发（先到）会被抹掉。
+            if getattr(self._cfg, "story_first_image_fast", False):
+                sid0 = self._cache.story_id(theme)
+                p1 = self._cache.image_path(sid0, 1)
+                if not p1.exists():
+                    self._pregen = {"done": threading.Event(), "ok": False}
+                    threading.Thread(target=self._pregen_first_image,
+                                     args=(theme, p1), daemon=True).start()
             cached = self._cache.load(theme)
             if cached:
                 sid, title, characters, scenes, is_cached = (
@@ -498,6 +518,18 @@ class StorySession:
 
     # ---------- 插图编排：页序提交、并发受限、预算兜底 ----------
 
+    def _pregen_first_image(self, theme: str, p1: Path) -> None:
+        """web-067：首页并行预生成线程——只生成落盘+记录结果，不发事件
+        （事件由页 1 worker 在 story_begin 之后统一发出，避免被前端 begin 清表抹掉）。"""
+        pregen = self._pregen
+        try:
+            p1.parent.mkdir(parents=True, exist_ok=True)
+            pregen["ok"] = self._image.generate_to(
+                p1, build_first_image_prompt(theme),
+                should_stop=self._cancel.is_set)   # web-065：取消止血贯穿
+        finally:
+            pregen["done"].set()
+
     def _start_image_workers(self) -> None:
         sem = threading.Semaphore(self._cfg.story_image_concurrency)
         deadline = self._clock() + self._cfg.story_total_budget_s
@@ -514,9 +546,20 @@ class StorySession:
                     self._emit({"type": "story_page_img", "n": n, "url": None,
                                 "failed": True})
                     return
-                if path.exists():
+                if n == 1 and self._pregen is not None:
+                    # web-067：等首页预生成落地（页序提交页 1 先持信号量，无死锁；
+                    # 等待有界——预生成线程内 should_stop/超时保证）。ok=True 直接用
+                    # 预生成结果（不重生图）；ok=False 落回下面 scene prompt 重生成。
+                    # 事件仍由本 worker 统一发（在 story_begin 之后，不被前端清表抹掉）。
+                    self._pregen["done"].wait()
+                    ok = bool(self._pregen["ok"])
+                    if not ok and not self._cancel.is_set():
+                        logger.info("首页预生成未果，落回 scene prompt 重生成")
+                elif path.exists():
                     ok = True                       # 缓存/补生成跳过
                 else:
+                    ok = False
+                if not ok and not self._cancel.is_set():
                     path.parent.mkdir(parents=True, exist_ok=True)
                     ok = self._image.generate_to(
                         path, build_image_prompt(self._characters, page["text"]),

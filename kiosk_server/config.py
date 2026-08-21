@@ -35,6 +35,7 @@ class KioskConfig:
     story_image_model: str = "qwen-image-3.0"  # KIOSK_STORY_IMAGE_MODEL（文生图，固定云端）
     story_image_size: str = "1024*1024"    # KIOSK_STORY_IMAGE_SIZE（实测 2048 默认→1024 提速）
     story_image_concurrency: int = 2       # KIOSK_STORY_IMAGE_CONCURRENCY（web-067：实测并发>2 触发 429 Throttling.RateQuota；429 退避重试见 ImageClient）
+    story_first_image_fast: bool = True    # KIOSK_STORY_FIRST_IMAGE_FAST（首页插图并行预生成，首屏提速）
     story_image_timeout_s: float = 90.0    # KIOSK_STORY_IMAGE_TIMEOUT_S（单张超时，实测 13~18s）
     story_total_budget_s: float = 300.0    # KIOSK_STORY_TOTAL_BUDGET_S（整故事插图总预算）
     story_cache_dir: str = "data/story"    # KIOSK_STORY_CACHE_DIR（同名故事缓存落盘目录）
@@ -75,6 +76,8 @@ class KioskConfig:
             story_image_size=os.getenv("KIOSK_STORY_IMAGE_SIZE", cls.story_image_size),
             story_image_concurrency=int(os.getenv("KIOSK_STORY_IMAGE_CONCURRENCY",
                                                   str(cls.story_image_concurrency))),
+            story_first_image_fast=os.getenv("KIOSK_STORY_FIRST_IMAGE_FAST",
+                                             "true").lower() in ("1", "true", "yes"),
             story_image_timeout_s=float(os.getenv("KIOSK_STORY_IMAGE_TIMEOUT_S",
                                                   str(cls.story_image_timeout_s))),
             story_total_budget_s=float(os.getenv("KIOSK_STORY_TOTAL_BUDGET_S",

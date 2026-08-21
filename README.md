@@ -56,7 +56,12 @@
   验收反馈补强（web-064~066）：分镜字数 40~80 校验（短段重试后接受+告警）；
   自动翻页等插图就绪（`story_page_img` 增 `failed` 字段，插图失败/预算跳页均不卡页）；
   取消后不重试不新发起（should_stop 贯穿，费用止血）；deadline 跳页补 failed 事件。
-  pytest **829 passed**（+57）/ vitest **102 passed**（+28）。
+  验收反馈二轮（web-067，真实 API 探测定位）：插图大面积缺失根因=429 Throttling.RateQuota
+  （实测并发>2 即 0.2s 秒拒）——插图并发默认 4→2 + ImageClient 限流退避重试（≤3 次，
+  可中断）；脚本 enable_thinking=False 提速 21.2s→10.9s（qwen-plus 默认开隐式推理）
+  + prompt 增寓言忠实条款（实测 flash/turbo 背离原著，弃用）；首页插图并行预生成
+  （脚本 ~11s 期间主题 prompt 先生成，KIOSK_STORY_FIRST_IMAGE_FAST 可关）。
+  pytest **841 passed**（+69）/ vitest **102 passed**（+28）。
 - **新增 `kiosk_server/`（全部新文件，零改动既有代码）**：数字人一体机专属薄层 API
   （独立进程 :7861，与 Gradio:7860 互斥运行——Qdrant 本地嵌入模式文件锁，已实证）。
   M1 端点：`GET /api/health|config|presets`、`POST /api/ocr`（百炼 qwen-vl-ocr 手写识别，

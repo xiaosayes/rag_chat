@@ -42,10 +42,11 @@ class _FakeImage:
         return self.ok
 
 
-def _make(events, script=None, img=None, tmp_path=None, speak=None):
+def _make(events, script=None, img=None, tmp_path=None, speak=None, cfg=None):
     cache = StoryCache(str(tmp_path), 500)
     s = StorySession(events.append, script or _FakeScript(_script()),
-                     img or _FakeImage(), cache, tts_factory=None, cfg=_Cfg(),
+                     img or _FakeImage(), cache, tts_factory=None,
+                     cfg=cfg or _Cfg(),
                      speak_fn=speak or (lambda n: None))
     return s, cache
 
@@ -181,6 +182,117 @@ class TestStart:
         s, _ = _make(events, img=img, tmp_path=tmp_path)
         _drive(s)
         assert all("虞姬" in p for p in img.prompts)     # 跨图一致性：角色锚定每张携带
+
+
+class _CfgFast(_Cfg):
+    story_first_image_fast = True               # web-067：首页插图并行预生成开
+
+
+class _CfgFastOff(_Cfg):
+    story_first_image_fast = False              # web-067：预生成关（旧行为）
+
+
+class _RecordingImage:
+    """按 (文件名, prompt) 记录；fail_on 关键字命中的 prompt 模拟生成失败（不落盘）。"""
+
+    def __init__(self, fail_on=None):
+        self.records, self._fail_on, self._lock = [], fail_on, threading.Lock()
+
+    def generate_to(self, path, prompt, should_stop=None):
+        from pathlib import Path
+        with self._lock:
+            self.records.append((Path(path).name, prompt))
+        if self._fail_on and self._fail_on in prompt:
+            return False
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"PNG")
+        return True
+
+
+class TestFirstImagePregen:
+    """web-067：首页插图并行预生成——脚本 ~11s 期间首页用主题 prompt 先生成
+    （t≈7~10s 落地），首屏「文字+插画」合计 ≤12s；失败落回 scene prompt 重生成。
+    事件统一由页 1 worker 在 story_begin 之后发出（begin 会清空前端 images 表，
+    预生成线程早发会被抹掉——实现纠偏：规范原稿为预生成线程直发）。"""
+
+    def test_pregen_success_page1_uses_topic_prompt(self, tmp_path):
+        events = []
+        img = _RecordingImage()
+        s, _ = _make(events, img=img, tmp_path=tmp_path, cfg=_CfgFast())
+        _drive(s)
+        page1 = [p for name, p in img.records if name == "page_1.png"]
+        assert len(page1) == 1                         # 预生成成功后 worker 不再重生成
+        assert "开篇插画" in page1[0] and "虞姬" not in page1[0]   # 主题 prompt
+        rest = [p for name, p in img.records if name != "page_1.png"]
+        assert len(rest) == 7 and all("虞姬" in p for p in rest)   # 页 2..8 用 scene prompt
+        ev1 = [e for e in events if e["type"] == "story_page_img" and e["n"] == 1]
+        assert len(ev1) == 1 and ev1[0]["url"].endswith("/img/1")   # 恰好 1 次不双发
+
+    def test_pregen_failure_falls_back_to_scene_prompt(self, tmp_path):
+        events = []
+        img = _RecordingImage(fail_on="开篇插画")      # 预生成失败
+        s, _ = _make(events, img=img, tmp_path=tmp_path, cfg=_CfgFast())
+        _drive(s)
+        page1 = [p for name, p in img.records if name == "page_1.png"]
+        assert len(page1) == 2                         # 预生成 1 次 + fallback 1 次
+        assert "开篇插画" in page1[0] and "虞姬" in page1[1]
+        ev1 = [e for e in events if e["type"] == "story_page_img" and e["n"] == 1]
+        assert len(ev1) == 1 and ev1[0]["url"] is not None   # 最终 OK 事件
+
+    def test_flag_off_uses_scene_prompt_for_page1(self, tmp_path):
+        events = []
+        img = _RecordingImage()
+        s, _ = _make(events, img=img, tmp_path=tmp_path, cfg=_CfgFastOff())
+        _drive(s)
+        assert not any("开篇插画" in p for _, p in img.records)
+        page1 = [p for name, p in img.records if name == "page_1.png"]
+        assert len(page1) == 1 and "虞姬" in page1[0]
+
+    def test_full_cache_skips_pregen(self, tmp_path):
+        events = []
+        s, _ = _make(events, img=_RecordingImage(), tmp_path=tmp_path, cfg=_CfgFast())
+        _drive(s)                                      # 首轮落盘（含首页）
+        img2 = _RecordingImage()
+        events2 = []
+        s2, _ = _make(events2, img=img2, tmp_path=tmp_path, cfg=_CfgFast())
+        _drive(s2, " 霸王别姬！")                      # 同主题命中缓存
+        assert img2.records == []                      # 无预生成、无补生成
+
+    def test_cancel_during_pregen_no_page1_event(self, tmp_path):
+        gate_img, gate_script = threading.Event(), threading.Event()
+        entered = threading.Event()
+
+        class _GatedPregenImage(_RecordingImage):
+            def generate_to(self, path, prompt, should_stop=None):
+                if "开篇插画" in prompt:
+                    entered.set()
+                    gate_img.wait(5.0)                 # 挂起等测试 cancel（有界防死）
+                return super().generate_to(path, prompt, should_stop=should_stop)
+
+        class _SlowScript(_FakeScript):
+            def generate(self, theme):
+                gate_script.wait(5.0)
+                return super().generate(theme)
+
+        events = []
+        img = _GatedPregenImage()
+        s, _ = _make(events, script=_SlowScript(_script()), img=img,
+                     tmp_path=tmp_path, cfg=_CfgFast())
+        th = threading.Thread(target=s.start, args=("霸王别姬",), daemon=True)
+        th.start()
+        assert entered.wait(5.0), "首页预生成未发起"
+        s.cancel()
+        gate_img.set()
+        gate_script.set()
+        assert s.wait_idle(5.0), "start() 未在 5s 内返回"
+        th.join(3)
+        if s._pregen is not None:
+            assert s._pregen["done"].wait(2.0), "预生成线程未收尾"
+        assert not [e for e in events if e["type"] == "story_page_img"]
+        assert "story_begin" not in _types(events)
+        assert len(img.records) == 1                   # 仅预生成 1 次，无新调用
+        ends = [e for e in events if e["type"] == "story_end"]
+        assert ends and ends[-1]["reason"] == "cancelled"
 
 
 class TestCancelStopsNewImages:

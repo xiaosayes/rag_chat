@@ -18,6 +18,7 @@ class TestStoryConfig:
         assert cfg.story_image_model == "qwen-image-3.0"
         assert cfg.story_image_size == "1024*1024"
         assert cfg.story_image_concurrency == 2      # web-067：实测并发>2 触发 429
+        assert cfg.story_first_image_fast is True    # web-067：首页插图并行预生成默认开
         assert cfg.story_image_timeout_s == 90.0
         assert cfg.story_total_budget_s == 300.0
         assert cfg.story_cache_dir == "data/story"
@@ -28,7 +29,9 @@ class TestStoryConfig:
         monkeypatch.setenv("KIOSK_STORY_ENABLED", "false")
         monkeypatch.setenv("KIOSK_STORY_IMAGE_CONCURRENCY", "3")
         monkeypatch.setenv("KIOSK_STORY_CACHE_MAX_MB", "100")
+        monkeypatch.setenv("KIOSK_STORY_FIRST_IMAGE_FAST", "false")
         cfg = KioskConfig.from_env()
         assert cfg.story_enabled is False
         assert cfg.story_image_concurrency == 3
+        assert cfg.story_first_image_fast is False
         assert cfg.story_cache_max_mb == 100
