@@ -540,6 +540,7 @@ class StorySession:
                 try:
                     script = self._script.generate(theme)
                 except StoryScriptError as e:
+                    logger.warning("故事脚本生成失败（%s）: %s", theme, e)   # web-070：留痕可诊断
                     self._emit({"type": "story_error",
                                 "code": getattr(e, "code", "script_failed"),
                                 "message": "这个故事我不太会讲，换一个试试吧"})
