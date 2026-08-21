@@ -726,10 +726,10 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
   脚本 7.7s 出 10 分镜（每段 25~44 字全 ≤80，LLM 自主适龄化改编「霸王别姬」→
   「小霸王和小花姬」幼儿园京剧故事）；插图 3 张 7.2/12.6/7.9s 出图，目检达标（水彩
   绘本风、严格切题、角色锚定生效、无文字水印）；A/B 对比图留档。
-- **测试**：pytest **824 passed**（+52：配置族/意图正则/脚本/插图/缓存/启动链路/播报
-  状态机/VoiceSession 集成/WS+供图/预设/终审补强）；vitest **98 passed**（+24：WS 方法/
-  useStorySession/StoryBook/Home 接线/终审补强）；npm run build 通过。外部 API 一律 mock，
-  真实 API 仅冒烟脚本。
+- **测试**：pytest **829 passed**（+57：配置族/意图正则/脚本/插图/缓存/启动链路/播报
+  状态机/VoiceSession 集成/WS+供图/预设/终审补强/验收反馈）；vitest **102 passed**（+28：
+  WS 方法/useStorySession/StoryBook/Home 接线/终审补强/验收反馈）；npm run build 通过。
+  外部 API 一律 mock，真实 API 仅冒烟脚本。
 
 ### 增补：web-063 终审与补强（SDD 全分支终审，2026-08-20）
 
@@ -758,8 +758,23 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
   4. `story_error` 若未来在 playing 阶段出现（当前仅 preparing 发）持留期无盖层展示——
      协议现状不可达。
   5. Windows GBK 控制台 smoke_story.py 中文 print 乱码（仅显示层，落盘 UTF-8 完好）。
-- **测试**：pytest **824 passed** / vitest **98 passed** / npm run build 通过（终审复测）。
+- **测试**：pytest **829 passed** / vitest **102 passed** / npm run build 通过（终审复测）。
 - **部署待办（运维侧）**：服务器正式池 `data/kiosk/preset_questions.json` 追加
   「给我讲个嫦娥奔月的故事」（正式池优先于缺省池）；KIOSK_STORY_* 全有默认值零配置开箱；
   冒烟 `python scripts/smoke_story.py "主题" --pages 2` + 全链
   `python scripts/smoke_kiosk_ws.py --port 7862 "给我讲一个霸王别姬的故事"`。
+
+### 增补：web-064/065/066 用户验收反馈修复（2026-08-21）
+
+- **web-064 分镜字数与等图翻页（用户实测反馈「连续多页无插画」）**：①分镜字数收为
+  40~80——prompt 下限 + 首轮短段校验重试、重试后仍短接受+告警（等图机制兜底）；
+  ②自动翻页加第三条件「当页插图已了结」（就绪或失败落地），短分镜播报快于生图时
+  不再连跳无图页；插图最终失败补发 `story_page_img{failed:true}`（手动翻页不受限）；
+  失败页占位文案「插画暂时走失了…」。
+- **web-065 生图费用止血（用户验收反馈）**：取消/返回后未完成的插图任务不再重试、
+  不再新发起——`should_stop` 取消旗标贯穿 ImageClient 重试链与 StorySession 编排。
+- **web-066 deadline 跳页补事件（复审 Important 边角）**：总预算 300s 跳页此前静默
+  return，等图护栏下该页 imgDone 永不达成→自动翻页冻结（末页连 story_finish 都发不出）；
+  现跳页且未取消时同形补发 `failed:true`（与 web-064 失败补事件同路径）。
+- **测试**：pytest **829 passed**（+1：deadline 跳页补事件，串行并发+时钟注入确定性
+  构造）；vitest **102 passed**（+4：等图护栏三用例+失败页占位文案）；npm run build 通过。

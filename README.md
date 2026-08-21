@@ -53,7 +53,10 @@
   25~44 字，LLM 自主适龄化改编为「小霸王和小花姬」），插图 3 张 7.2~12.6s 出图达标
   （留档 `data/story_smoke/`）。终审补强（F1~F5）：LRU 淘汰接线生效、插图原子落盘、
   准备期取消不反弹、返回钮 z 序可点、story_error 可见化持留 2.5s。
-  pytest **824 passed**（+52）/ vitest **98 passed**（+24）。
+  验收反馈补强（web-064~066）：分镜字数 40~80 校验（短段重试后接受+告警）；
+  自动翻页等插图就绪（`story_page_img` 增 `failed` 字段，插图失败/预算跳页均不卡页）；
+  取消后不重试不新发起（should_stop 贯穿，费用止血）；deadline 跳页补 failed 事件。
+  pytest **829 passed**（+57）/ vitest **102 passed**（+28）。
 - **新增 `kiosk_server/`（全部新文件，零改动既有代码）**：数字人一体机专属薄层 API
   （独立进程 :7861，与 Gradio:7860 互斥运行——Qdrant 本地嵌入模式文件锁，已实证）。
   M1 端点：`GET /api/health|config|presets`、`POST /api/ocr`（百炼 qwen-vl-ocr 手写识别，
