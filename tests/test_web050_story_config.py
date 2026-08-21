@@ -10,15 +10,15 @@ class TestStoryConfig:
                 monkeypatch.delenv(k)
         cfg = KioskConfig.from_env()
         assert cfg.story_enabled is True
-        assert cfg.story_script_model == "qwen-plus"
-        assert cfg.story_script_max_tokens == 1600
+        assert cfg.story_script_model == "deepseek-v4-flash-0731"   # web-070：寓言忠实+提速
+        assert cfg.story_script_max_tokens == 2200                   # web-070：images 字段增量
         assert cfg.story_script_timeout_s == 60.0
         assert cfg.story_min_scenes == 8 and cfg.story_max_scenes == 10
         assert cfg.story_scene_max_chars == 80
         assert cfg.story_image_model == "qwen-image-3.0"
         assert cfg.story_image_size == "1024*1024"
         assert cfg.story_image_concurrency == 2      # web-067：实测并发>2 触发 429
-        assert cfg.story_first_image_fast is True    # web-067：首页插图并行预生成默认开
+        assert cfg.story_first_image_fast is False   # web-070：主题《》预生成实测渲染书法标题→默认关
         assert cfg.story_image_timeout_s == 90.0
         assert cfg.story_total_budget_s == 300.0
         assert cfg.story_cache_dir == "data/story"

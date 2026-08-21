@@ -29,18 +29,25 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
-    script = ScriptClient("qwen-plus", 1600, 60).generate(args.theme)
+    script = ScriptClient("deepseek-v4-flash-0731", 2200, 60).generate(args.theme)  # web-070 换型
     t_script = time.time() - t0
     (out / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2),
                                      encoding="utf-8")
-    print(f"[script] {t_script:.1f}s title={script['title']} scenes={len(script['scenes'])}")
+    images = script.get("images")
+    print(f"[script] {t_script:.1f}s title={script['title']} scenes={len(script['scenes'])}"
+          f" images={len(images) if images else 0}")
     for i, s in enumerate(script["scenes"], 1):
         assert len(s) <= 80, f"分镜 {i} 超 80 字（{len(s)}）"
         warn = " ⚠<40字" if len(s) < 40 else ""       # web-064：短分镜观察提示（不硬断言）
         print(f"  {i:2d}. ({len(s)}字){warn} {s}")
+        if images:
+            print(f"       img: {images[i - 1]}")     # web-070：画面短句观察
 
     img = ImageClient("qwen-image-3.0", "1024*1024", 90)
-    pages = script["scenes"][: args.pages or len(script["scenes"])]
+    scenes = script["scenes"]
+    # web-070：生图 prompt 优先 images 画面短句（prose 喂图会被渲染成文字），缺失回退叙述
+    pages = [(images[i] if images and i < len(images) else scenes[i])
+             for i in range(len(scenes))][: args.pages or len(scenes)]
     if args.ab:
         # A=现模板；B=现模板+「上一页画面延续」衔接语（对比一致性差异，留档人工判读）
         for tag, prompt in (

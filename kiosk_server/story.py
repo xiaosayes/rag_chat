@@ -45,22 +45,32 @@ def parse_story_intent(text: str) -> str | None:
 
 # ==================== web-052：分镜脚本（qwen-plus，固定云端） ====================
 
-# web-067：寓言忠实条款（实测 flash/turbo 把「守株待兔」主角改成小兔子/小男孩=背离原著，
-# 故留 qwen-plus 用 prompt 约束）+ 参考长度示例（首轮即达 40~80 字，避免重试倍增时延）。
+# web-070：脚本换型 deepseek-v4-flash-0731 + 强忠实条款（「严格按照大家熟知的主流版本」——
+# 实测农夫与蛇主线全对：蛇咬农夫/寓意不反转）+ images 画面描述字段（15~25 字纯画面短句——
+# 实测整段叙述 prose 喂图会被图像模型当文字渲染=插图乱码根因）。
+# prompt 原文逐字取自探测稿 scripts/_diag_ds_script.py NEW_PROMPT（实测 8.7s 出全量脚本）。
 SCRIPT_SYSTEM_PROMPT = (
     "你是湘小图，湖南省少年儿童图书馆里给小朋友讲故事的亲切姐姐。"
     "请把用户给出的主题改编成一个适合 3~8 岁儿童聆听的绘本故事，"
     "语气亲切温暖、句子简短口语化、内容健康积极，不要列表、不要 Markdown、不要英文术语。"
-    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娥奔月），"
-    "必须严格沿用原著的情节脉络、角色与结局，不得添加原著没有的角色、事件或转折，"
-    "不得改变故事寓意；儿童化只体现在用词和语气上，可在不改动情节主线的前提下做适龄化柔化。"
+    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娥奔月、农夫与蛇），"
+    "必须严格按照大家熟知的主流版本讲述：主要角色、关键情节、结局和寓意都与原著一致，"
+    "不得自由发挥、不得添加或删改原著的主要情节与角色、不得反转寓意"
+    "（例如农夫与蛇的结局必须是蛇咬了农夫，寓意是不能怜悯恶人）；"
+    "儿童化只体现在用词和语气上，可在不改动情节主线与结局的前提下做适龄化柔化。"
     "把整个故事拆成 8 到 10 个分镜，每个分镜是一段 40 到 80 个字的叙述，合起来情节完整连贯。"
-    "参考长度：「清晨，小乌龟和兔子站在森林的起跑线上。兔子拍拍胸脯说，我跑得可快啦，"
-    "一定第一个到终点！小乌龟只是笑了笑，没有说话。」"
     "同时用一句话提炼主要角色的形象特征（年龄感、发型、服饰、颜色），供插画师保持角色一致。"
+    "再给每个分镜配一句 15 到 25 字的画面描述：只写角色、动作、场景（谁、在哪里、做什么），"
+    "是对画面内容的客观描述，不要对话、不要心理描写、不要引号、不要书名号。"
     "只输出 JSON，格式：{\"title\":\"故事标题\",\"characters\":\"角色形象描述\","
-    "\"scenes\":[\"分镜1\",\"分镜2\",...]}，不要输出任何其他文字。"
+    "\"scenes\":[\"分镜1\",\"分镜2\",...],"
+    "\"images\":[\"画面1\",\"画面2\",...]}，images 与 scenes 一一对应，不要输出任何其他文字。"
 )
+
+
+def _clean_image_desc(text: str) -> str:
+    """web-070：画面描述防御性清洗——剥引语（防对话框文字渲染）+ 去书名号（防标题书法渲染）。"""
+    return strip_dialogue_for_image(text).replace("《", "").replace("》", "").strip()
 
 
 class StoryScriptError(Exception):
@@ -144,7 +154,22 @@ class ScriptClient:
                 scenes = payload.get("scenes") or []
                 if not isinstance(scenes, list):
                     raise StoryScriptError("scenes 非列表")
-                scenes = _clamp_scenes([str(s) for s in scenes], 80, 10)
+                raw_scenes = [str(s) for s in scenes]
+                # web-070：images 画面描述字段——与 scenes 逐对 clamp 对齐（防下标错位）；
+                # 缺失/非列表/长度不符 → None 回退（worker 侧用 scene 剥引语兑底）
+                raw_images = payload.get("images")
+                images: list[str] | None = None
+                if isinstance(raw_images, list) and len(raw_images) == len(raw_scenes):
+                    pairs = []
+                    for sc, im in list(zip(raw_scenes, raw_images))[:10]:
+                        clamped = _clamp_scenes([sc], 80, 1)
+                        if clamped:
+                            pairs.append((clamped[0],
+                                          _clean_image_desc(str(im)) or clamped[0]))
+                    scenes = [p[0] for p in pairs]
+                    images = [p[1] for p in pairs]
+                else:
+                    scenes = _clamp_scenes(raw_scenes, 80, 10)
                 if len(scenes) < 6:
                     raise StoryScriptError(f"分镜过少: {len(scenes)}")
                 # web-064：短分镜（<40 字）播报快于插图生成——首轮校验不合格重试，
@@ -156,13 +181,14 @@ class ScriptClient:
                     logger.warning("分镜 %d 段不足 40 字（重试后仍短，接受）", len(shorts))
                 return {"title": str(payload.get("title") or theme).strip() or theme,
                         "characters": str(payload.get("characters") or "").strip(),
-                        "scenes": scenes}
+                        "scenes": scenes, "images": images}
             except StoryScriptError as e:
                 if _is_moderation(e):                # 审核不重试（web-052 补强 I-1：HTTP 路径）
                     raise StoryModerationError(str(e)) from e
                 last_err = e
                 msgs = msgs + [{"role": "user", "content":
-                                f"上次输出不合格（{e}），请严格按 JSON 格式重出，8~10 个分镜、每个 40~80 字"}]
+                                f"上次输出不合格（{e}），请严格按 JSON 格式重出，8~10 个分镜、"
+                                "每个 40~80 字，并给每个分镜配 15~25 字 images 画面描述"}]
             except Exception as e:
                 if _is_moderation(e):
                     raise StoryModerationError(str(e)) from e
@@ -380,6 +406,7 @@ class StoryCache:
         now = time.time()
         meta = {"id": sid, "theme": theme, "title": script["title"],
                 "characters": script.get("characters", ""), "scenes": script["scenes"],
+                "images": script.get("images"),              # web-070：画面描述随脚本缓存
                 "created": now, "last_access": now}
         (self._dir(sid) / "meta.json").write_text(
             json.dumps(meta, ensure_ascii=False), encoding="utf-8")
@@ -508,6 +535,7 @@ class StorySession:
                 sid, title, characters, scenes, is_cached = (
                     cached["id"], cached["title"], cached.get("characters", ""),
                     cached["scenes"], True)
+                images = cached.get("images")                # web-070：旧缓存无此字段→None 回退
             else:
                 try:
                     script = self._script.generate(theme)
@@ -520,15 +548,19 @@ class StorySession:
                 sid = self._cache.save(theme, script)
                 title, characters, scenes, is_cached = (
                     script["title"], script.get("characters", ""), script["scenes"], False)
+                images = script.get("images")
             if self._cancel.is_set():
                 # web-063 终审 F5：准备期取消——不发 story_begin 不开播，直接收尾
                 self._emit({"type": "story_end", "reason": "cancelled"})
                 return
             self._sid, self._title, self._characters = sid, title, characters
-            self._pages = [{"n": i + 1, "text": t} for i, t in enumerate(scenes)]
+            # web-070：img=画面短句（生图 prompt 用）；story_begin 载荷保持 {n,text} 不泄漏
+            self._pages = [{"n": i + 1, "text": t,
+                            "img": images[i] if images and i < len(images) else None}
+                           for i, t in enumerate(scenes)]
             self._emit({"type": "story_begin", "story_id": sid, "title": title,
                         "total": len(self._pages), "cached": is_cached,
-                        "pages": self._pages})
+                        "pages": [{"n": p["n"], "text": p["text"]} for p in self._pages]})
             self._start_image_workers()
             self._command_loop()
         finally:
@@ -593,7 +625,8 @@ class StorySession:
                 if not ok and not self._cancel.is_set():
                     path.parent.mkdir(parents=True, exist_ok=True)
                     ok = self._image.generate_to(
-                        path, build_image_prompt(self._characters, page["text"]),
+                        path, build_image_prompt(self._characters,
+                                                 page.get("img") or page["text"]),  # web-070
                         should_stop=self._cancel.is_set)   # web-065：取消止血贯穿
             if ok and not self._cancel.is_set():
                 self._emit({"type": "story_page_img", "n": n,

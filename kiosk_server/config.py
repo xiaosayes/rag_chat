@@ -26,8 +26,8 @@ class KioskConfig:
     web_fallback: bool = True              # KIOSK_WEB_FALLBACK（web-036 知识库拒答→联网搜索兜底）
     # ---- web-050 故事绘本配置族（KIOSK_STORY_*，默认零行为变化） ----
     story_enabled: bool = True             # KIOSK_STORY_ENABLED（false=意图拦截关闭，全走问答）
-    story_script_model: str = "qwen-plus"  # KIOSK_STORY_SCRIPT_MODEL（分镜脚本，固定云端）
-    story_script_max_tokens: int = 1600    # KIOSK_STORY_SCRIPT_MAX_TOKENS（独立限长，先例 FALLBACK_MAX_TOKENS）
+    story_script_model: str = "deepseek-v4-flash-0731"  # KIOSK_STORY_SCRIPT_MODEL（web-070 换型：寓言忠实+8.7s 出稿，实测）
+    story_script_max_tokens: int = 2200    # KIOSK_STORY_SCRIPT_MAX_TOKENS（web-070：images 字段增量）
     story_script_timeout_s: float = 60.0   # KIOSK_STORY_SCRIPT_TIMEOUT_S
     story_min_scenes: int = 8              # KIOSK_STORY_MIN_SCENES（分镜目标区间下限）
     story_max_scenes: int = 10             # KIOSK_STORY_MAX_SCENES（上限）
@@ -35,7 +35,7 @@ class KioskConfig:
     story_image_model: str = "qwen-image-3.0"  # KIOSK_STORY_IMAGE_MODEL（文生图，固定云端）
     story_image_size: str = "1024*1024"    # KIOSK_STORY_IMAGE_SIZE（实测 2048 默认→1024 提速）
     story_image_concurrency: int = 2       # KIOSK_STORY_IMAGE_CONCURRENCY（web-067：实测并发>2 触发 429 Throttling.RateQuota；429 退避重试见 ImageClient）
-    story_first_image_fast: bool = True    # KIOSK_STORY_FIRST_IMAGE_FAST（首页插图并行预生成，首屏提速）
+    story_first_image_fast: bool = False   # KIOSK_STORY_FIRST_IMAGE_FAST（web-070 默认关：主题《》预生成实测被渲染成书法标题/乱码文本列；页 1 改由 images[0] 在 begin 后生成，仍有开关可开回）
     story_image_timeout_s: float = 90.0    # KIOSK_STORY_IMAGE_TIMEOUT_S（单张超时，实测 13~18s）
     story_total_budget_s: float = 300.0    # KIOSK_STORY_TOTAL_BUDGET_S（整故事插图总预算）
     story_cache_dir: str = "data/story"    # KIOSK_STORY_CACHE_DIR（同名故事缓存落盘目录）
@@ -77,7 +77,7 @@ class KioskConfig:
             story_image_concurrency=int(os.getenv("KIOSK_STORY_IMAGE_CONCURRENCY",
                                                   str(cls.story_image_concurrency))),
             story_first_image_fast=os.getenv("KIOSK_STORY_FIRST_IMAGE_FAST",
-                                             "true").lower() in ("1", "true", "yes"),
+                                             str(cls.story_first_image_fast)).lower() in ("1", "true", "yes"),
             story_image_timeout_s=float(os.getenv("KIOSK_STORY_IMAGE_TIMEOUT_S",
                                                   str(cls.story_image_timeout_s))),
             story_total_budget_s=float(os.getenv("KIOSK_STORY_TOTAL_BUDGET_S",

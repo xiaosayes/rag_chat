@@ -21,9 +21,9 @@ def _script(n=9, chars=45):      # web-064：默认 ≥45 保 happy path（分�
 
 
 class TestScriptSpeedAndFidelity:
-    """web-067：脚本提速 + 寓言忠实——enable_thinking=False（实测 21.2s→10.9s，
-    隐式推理耗时砍掉）；prompt 加忠实条款（flash/turbo 实测把守株待兔主角改成
-    小兔子/小男孩=背离原著，故留 qwen-plus 用 prompt 约束）。"""
+    """web-067：enable_thinking=False 提速；web-070：脚本换型 deepseek-v4-flash-0731
+    （实测 8.7s 出全量脚本+images 字段；农夫与蛇主线全对——蛇咬农夫/寓意不反转），
+    prompt 同步换为「严格按主流版本+画面描述字段」版。"""
 
     def test_enable_thinking_disabled(self, monkeypatch):
         calls = []
@@ -44,11 +44,68 @@ class TestScriptSpeedAndFidelity:
         monkeypatch.setattr(story, "_generation_call", fake_call)
         ScriptClient("qwen-plus", 1600, 60).generate("守株待兔")
         prompt = calls[0]["messages"][0]["content"]
-        assert "严格沿用原著" in prompt             # 寓言/成语/神话忠实条款
+        # web-070：换型后 prompt 钉忠实条款+画面描述字段要求（原文逐字取自
+        # scripts/_diag_ds_script.py NEW_PROMPT——实测 8.7s/农夫与蛇主线全对）
+        assert "严格按照大家熟知的主流版本" in prompt
         assert "40 到 80" in prompt                  # 分镜字数要求（web-064）
-        # web-068：钉全句防再回归（嫦娨→嫦娥错字曾漏网——子串断言覆盖不到示例列举）
-        assert "龟兔赛跑、守株待兔、嫦娥奔月" in prompt
-        assert "清晨，小乌龟和兔子站在森林的起跑线上" in prompt
+        assert "15 到 25" in prompt                  # 画面描述长度要求（web-070）
+        assert "images" in prompt                    # 画面描述字段（web-070）
+        assert "农夫与蛇" in prompt                  # 忠实示例列举防漏（寓意反转事故主题）
+
+
+class TestScriptImages:
+    """web-070：images 画面描述字段解析——生图 prompt 用 15~25 字纯画面短句
+    （实测整段叙述 prose 喂图会被模型当文字渲染=插图乱码根因）；
+    缺失/长度不符→None 回退（worker 侧用 scene 剥引语兑底）。"""
+
+    def _payload(self, n=8, with_images=True):
+        p = _script(n)
+        if with_images:
+            p["images"] = [f"画面{i}：虞姬在帐中。" for i in range(1, n + 1)]
+        return p
+
+    def test_images_parsed_and_aligned(self, monkeypatch):
+        monkeypatch.setattr(story, "_generation_call",
+                            lambda **kw: _ok_rsp(self._payload()))
+        out = ScriptClient("deepseek-v4-flash-0731", 2200, 60).generate("霸王别姬")
+        assert out["images"] is not None
+        assert len(out["images"]) == len(out["scenes"])
+        assert out["images"][0].startswith("画面1")
+
+    def test_images_sanitized(self, monkeypatch):
+        p = self._payload()
+        p["images"][0] = "虞姬说：「大王饶命」，《霸王别姬》开场。"
+        monkeypatch.setattr(story, "_generation_call", lambda **kw: _ok_rsp(p))
+        out = ScriptClient("m", 2200, 60).generate("霸王别姬")
+        assert "大王饶命" not in out["images"][0]          # 引语剥除
+        assert "《" not in out["images"][0] and "》" not in out["images"][0]
+
+    def test_images_missing_falls_back_none(self, monkeypatch):
+        monkeypatch.setattr(story, "_generation_call",
+                            lambda **kw: _ok_rsp(self._payload(with_images=False)))
+        out = ScriptClient("m", 2200, 60).generate("霸王别姬")
+        assert out["images"] is None
+        assert len(out["scenes"]) == 8                     # scenes 行为不变
+
+    def test_images_length_mismatch_falls_back_none(self, monkeypatch):
+        p = self._payload()
+        p["images"] = p["images"][:-1]                     # 7 vs 8 不齐
+        monkeypatch.setattr(story, "_generation_call", lambda **kw: _ok_rsp(p))
+        out = ScriptClient("m", 2200, 60).generate("霸王别姬")
+        assert out["images"] is None
+
+    def test_retry_message_mentions_images(self, monkeypatch):
+        calls = []
+
+        def fake(**kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                return _ok_rsp({"title": "t", "characters": "", "scenes": ["短"] * 8})
+            return _ok_rsp(self._payload())
+        monkeypatch.setattr(story, "_generation_call", fake)
+        ScriptClient("m", 2200, 60).generate("霸王别姬")
+        retry_msg = calls[1]["messages"][-1]["content"]
+        assert "images" in retry_msg                      # 重试指引补画面字段要求
 
 
 class TestScriptGenerate:

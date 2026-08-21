@@ -26,7 +26,8 @@ class _FakeScript:
 
 def _script(n=8):
     return {"title": "霸王别姬", "characters": "虞姬",
-            "scenes": [f"第{i}幕。" for i in range(1, n + 1)]}
+            "scenes": [f"第{i}幕。" for i in range(1, n + 1)],
+            "images": [f"画面{i}" for i in range(1, n + 1)]}   # web-070：画面描述字段
 
 
 class _FakeImage:
@@ -336,6 +337,40 @@ class TestFirstImagePregen:
         s.on_finish()
         assert s.wait_idle(5.0)
         th.join(3)
+
+
+class TestWorkerUsesImagesField:
+    """web-070：worker 生图 prompt 用 images 画面短句（实测 prose 喂图会被渲染成文字）；
+    无 images（旧缓存/解析回退）→ scene 剥引语兑底；story_begin 载荷不含 img。"""
+
+    def test_worker_prompt_uses_img_field(self, tmp_path):
+        events = []
+        script = _script()
+        script["scenes"] = [f"第{i}幕，很长很长很长很长的叙述文字。" for i in range(1, 9)]
+        script["images"] = [f"画面短句{i}" for i in range(1, 9)]
+        img = _RecordingImage()
+        s, _ = _make(events, script=_FakeScript(script), img=img,
+                     tmp_path=tmp_path, cfg=_CfgFastOff())
+        _drive(s)
+        prompts = [p for _, p in img.records]
+        assert len(prompts) == 8 and all("画面短句" in p for p in prompts)
+        assert all("很长很长" not in p for p in prompts)        # 整段叙述不进生图 prompt
+        begin = next(e for e in events if e["type"] == "story_begin")
+        assert all(set(p.keys()) == {"n", "text"} for p in begin["pages"])   # img 不泄漏前端
+
+    def test_worker_prompt_falls_back_to_stripped_scene(self, tmp_path):
+        events = []
+        script = _script()
+        script["scenes"] = [f"第{i}幕，虞姬说：「大王」之后舞剑。" for i in range(1, 9)]
+        script.pop("images", None)
+        img = _RecordingImage()
+        s, _ = _make(events, script=_FakeScript(script), img=img,
+                     tmp_path=tmp_path, cfg=_CfgFastOff())
+        _drive(s)
+        prompts = [p for _, p in img.records]
+        assert len(prompts) == 8
+        assert all("大王" not in p for p in prompts)            # 引语被剥
+        assert all("舞剑" in p for p in prompts)                # 动作保留
 
 
 class TestCancelStopsNewImages:
