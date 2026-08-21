@@ -32,7 +32,7 @@ class _FakeImage:
     def __init__(self, ok=True):
         self.ok, self.prompts, self._lock = ok, [], threading.Lock()
 
-    def generate_to(self, path, prompt):
+    def generate_to(self, path, prompt, should_stop=None):   # web-065：签名对齐
         with self._lock:
             self.prompts.append(prompt)
         if self.ok:
@@ -134,6 +134,43 @@ class TestStart:
         s, _ = _make(events, img=img, tmp_path=tmp_path)
         _drive(s)
         assert all("虞姬" in p for p in img.prompts)     # 跨图一致性：角色锚定每张携带
+
+
+class TestCancelStopsNewImages:
+    """web-065：返回取消后生图止血——取消后不再发起任何新生成（未开始页 0 次新调用）。"""
+
+    def test_cancel_stops_new_image_generation(self, tmp_path):
+        gate = threading.Event()
+        started = threading.Event()
+        calls = []
+        lock = threading.Lock()
+
+        class _GatedImage:
+            def generate_to(self, path, prompt, should_stop=None):
+                with lock:
+                    calls.append(prompt)
+                    if len(calls) >= 4:
+                        started.set()            # 首批并发 4 张全部在途
+                gate.wait(5.0)                   # 挂起等测试放行（有界防死）
+                from pathlib import Path
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_bytes(b"PNG")
+                return True
+
+        events = []
+        s, _ = _make(events, img=_GatedImage(), tmp_path=tmp_path)
+        th = threading.Thread(target=s.start, args=("霸王别姬",), daemon=True)
+        th.start()
+        assert started.wait(5.0), "首批 4 张插图未发起"
+        s.cancel()
+        gate.set()
+        assert s.wait_idle(5.0), "start() 未在 5s 内返回"
+        th.join(3)
+        with lock:
+            total = len(calls)
+        assert total <= 4, f"取消后仍发起新生图（共 {total} 次调用）"
+        ends = [e for e in events if e["type"] == "story_end"]
+        assert ends and ends[-1]["reason"] == "cancelled"
 
 
 class TestEvictionWired:

@@ -236,9 +236,16 @@ class ImageClient:
             pool.shutdown(wait=False)
         _download(_extract_image_url(rsp), path)
 
-    def generate_to(self, path: Path, prompt: str) -> bool:
-        """失败自动重试 1 次；仍失败记日志返回 False（调用方走占位图降级）。"""
+    def generate_to(self, path: Path, prompt: str, should_stop=None) -> bool:
+        """失败自动重试 1 次；仍失败记日志返回 False（调用方走占位图降级）。
+
+        web-065：should_stop（零参 callable，如 StorySession._cancel.is_set）在每次
+        尝试前检查——True 立即返回 False：取消后不重试、不发起新调用（生图费用止血）。
+        """
         for attempt in (0, 1):
+            if should_stop is not None and should_stop():
+                logger.info("插图生成已取消，跳过尝试（第 %d 次）", attempt + 1)
+                return False
             try:
                 self._once(Path(path), prompt)
                 return True
@@ -459,7 +466,8 @@ class StorySession:
                 else:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     ok = self._image.generate_to(
-                        path, build_image_prompt(self._characters, page["text"]))
+                        path, build_image_prompt(self._characters, page["text"]),
+                        should_stop=self._cancel.is_set)   # web-065：取消止血贯穿
             if ok and not self._cancel.is_set():
                 self._emit({"type": "story_page_img", "n": n,
                             "url": f"/api/story/{self._sid}/img/{n}"})

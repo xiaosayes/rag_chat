@@ -45,7 +45,7 @@ class _FakeScript:
 
 
 class _NoopImage:
-    def generate_to(self, path, prompt):
+    def generate_to(self, path, prompt, should_stop=None):   # web-065：签名对齐
         return False                              # 本任务不关心图
 
 

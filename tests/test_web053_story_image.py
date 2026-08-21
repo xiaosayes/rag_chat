@@ -65,6 +65,32 @@ class TestGenerateTo:
         assert ImageClient("m", "s", 90).generate_to(tmp_path / "a.png", "p") is True
 
 
+class TestGenerateToShouldStop:
+    """web-065：生图费用止血——should_stop 在每次尝试前检查：取消后不重试、不发起新调用。"""
+
+    def test_no_retry_after_cancel(self, monkeypatch, tmp_path):
+        calls = []
+        stop = {"v": False}
+        def boom(**kw):
+            calls.append(1)
+            stop["v"] = True                       # 第 1 次失败后用户点了返回
+            raise RuntimeError("oss 抖动")
+        monkeypatch.setattr(story, "_mmconversation_call", boom)
+        ok = ImageClient("qwen-image-3.0", "1024*1024", 90).generate_to(
+            tmp_path / "a.png", "p", should_stop=lambda: stop["v"])
+        assert ok is False and len(calls) == 1     # 取消后不重试（白烧一次重试被堵住）
+
+    def test_no_first_attempt_when_already_stopped(self, monkeypatch, tmp_path):
+        calls = []
+        def boom(**kw):
+            calls.append(1)
+            raise RuntimeError("不应被调用")
+        monkeypatch.setattr(story, "_mmconversation_call", boom)
+        ok = ImageClient("m", "s", 90).generate_to(
+            tmp_path / "a.png", "p", should_stop=lambda: True)
+        assert ok is False and len(calls) == 0     # 首次尝试前已取消 → 0 次调用
+
+
 class TestDownloadAtomic:
     """web-063 终审 F2：_download 原子落盘——中断不留截断残文件、临时文件清理
     （缓存命中 path.exists() 不误用半张图）。"""
