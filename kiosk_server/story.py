@@ -172,6 +172,14 @@ class StoryImageError(Exception):
     pass
 
 
+def _is_rate_limit(err: Exception) -> bool:
+    """web-067：限流判定（429 Throttling.RateQuota）——实测并发>2 即触发（0.2s 秒拒），
+    此类错误立即重发只会再撞限流，必须退避后重试（见 ImageClient.generate_to）。"""
+    msg = str(err).lower()
+    return ("throttl" in msg or "ratequota" in msg or "rate_limit" in msg
+            or "rate limit" in msg or "429" in msg)
+
+
 def build_image_prompt(characters: str, scene: str) -> str:
     parts = [IMAGE_STYLE_PREFIX]
     if characters:
@@ -220,8 +228,9 @@ def _extract_image_url(rsp) -> str:
 
 
 class ImageClient:
-    def __init__(self, model: str, size: str, timeout_s: float):
+    def __init__(self, model: str, size: str, timeout_s: float, rate_wait_s: float = 6.0):
         self._model, self._size, self._timeout = model, size, timeout_s
+        self._rate_wait = rate_wait_s         # web-067：限流退避秒数
 
     def _once(self, path: Path, prompt: str) -> None:
         # 同 Task 3 修正：pool.shutdown(wait=False)，超时不被 shutdown 卡住。
@@ -237,21 +246,49 @@ class ImageClient:
         _download(_extract_image_url(rsp), path)
 
     def generate_to(self, path: Path, prompt: str, should_stop=None) -> bool:
-        """失败自动重试 1 次；仍失败记日志返回 False（调用方走占位图降级）。
-
-        web-065：should_stop（零参 callable，如 StorySession._cancel.is_set）在每次
-        尝试前检查——True 立即返回 False：取消后不重试、不发起新调用（生图费用止血）。
+        """重试策略（web-067 重写）：
+        - 限流错（429 Throttling.RateQuota）：可中断退避 rate_wait_s 后重试，≤3 次
+          ——立即重发只会再撞限流（实测 0.2s 秒拒）；
+        - 其他错误：立即重试 ≤1 次（web-053 原语义）；两类计数独立；超限返回 False。
+        - should_stop（零参 callable）在每次尝试前与退避期间检查——True 立即返回 False
+          （web-065：取消后不重试、不发起新调用，生图费用止血）。
         """
-        for attempt in (0, 1):
+        rate_retries = 0
+        plain_retried = False
+        while True:
             if should_stop is not None and should_stop():
-                logger.info("插图生成已取消，跳过尝试（第 %d 次）", attempt + 1)
+                logger.info("插图生成已取消，跳过尝试")
                 return False
             try:
                 self._once(Path(path), prompt)
                 return True
             except Exception as e:
-                logger.warning("插图生成失败（第 %d 次）: %s", attempt + 1, e)
-        return False
+                if _is_rate_limit(e) and rate_retries < 3:
+                    rate_retries += 1
+                    logger.warning("插图限流，%.1fs 后重试（第 %d/3 次）: %s",
+                                   self._rate_wait, rate_retries, e)
+                    if self._interrupted(self._rate_wait, should_stop):
+                        logger.info("插图限流退避期间被取消，放弃重试")
+                        return False
+                    continue
+                if not _is_rate_limit(e) and not plain_retried:
+                    plain_retried = True
+                    logger.warning("插图生成失败，立即重试 1 次: %s", e)
+                    continue
+                logger.warning("插图生成最终失败: %s", e)
+                return False
+
+    @staticmethod
+    def _interrupted(seconds: float, should_stop) -> bool:
+        """0.5s tick 可中断退避：should_stop 翻 True 提前返回 True（取消尽快止血）。"""
+        waited = 0.0
+        while waited < seconds:
+            if should_stop is not None and should_stop():
+                return True
+            step = min(0.5, seconds - waited)
+            time.sleep(step)
+            waited += step
+        return should_stop is not None and should_stop()
 
 
 # ==================== web-054：同名故事缓存 ====================

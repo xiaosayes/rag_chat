@@ -91,6 +91,66 @@ class TestGenerateToShouldStop:
         assert ok is False and len(calls) == 0     # 首次尝试前已取消 → 0 次调用
 
 
+class TestRateLimitBackoff:
+    """web-067：429 Throttling.RateQuota 退避重试——实测并发>2 即限流（0.2s 秒拒），
+    立即重发只会再撞限流：限流错退避重试 ≤3 次；非限流错立即重试 ≤1 次（原语义）。"""
+
+    def _flaky(self, monkeypatch, seq, calls):
+        def f(**kw):
+            calls.append(1)
+            r = seq.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        monkeypatch.setattr(story, "_mmconversation_call", f)
+        monkeypatch.setattr(story, "_download", lambda u, p: p.write_bytes(b"x"))
+
+    def test_429_then_success(self, monkeypatch, tmp_path):
+        calls = []
+        self._flaky(monkeypatch,
+                    [RuntimeError("image HTTP 429: Throttling.RateQuota"), _img_rsp()],
+                    calls)
+        ok = ImageClient("m", "s", 90, rate_wait_s=0).generate_to(tmp_path / "a.png", "p")
+        assert ok is True and len(calls) == 2        # 退避后第 2 次成功
+
+    def test_429_always_fails_after_bounded_retries(self, monkeypatch, tmp_path):
+        calls = []
+        self._flaky(monkeypatch,
+                    [RuntimeError("image HTTP 429: Throttling.RateQuota")] * 4, calls)
+        ok = ImageClient("m", "s", 90, rate_wait_s=0).generate_to(tmp_path / "a.png", "p")
+        assert ok is False and len(calls) == 4       # 1 + 限流退避重试 3 次封顶
+
+    def test_plain_error_retry_semantics_unchanged(self, monkeypatch, tmp_path):
+        calls = []
+        self._flaky(monkeypatch, [RuntimeError("oss 抖动")] * 5, calls)
+        ok = ImageClient("m", "s", 90, rate_wait_s=0).generate_to(tmp_path / "a.png", "p")
+        assert ok is False and len(calls) == 2       # 非限流：立即重试 ≤1 次（防回归）
+
+    def test_429_then_plain_then_plain(self, monkeypatch, tmp_path):
+        calls = []
+        self._flaky(monkeypatch,
+                    [RuntimeError("HTTP 429: Throttling.RateQuota"),
+                     RuntimeError("oss 抖动"), RuntimeError("oss 又抖")], calls)
+        ok = ImageClient("m", "s", 90, rate_wait_s=0).generate_to(tmp_path / "a.png", "p")
+        assert ok is False and len(calls) == 3       # 限流 1 次退避 + 普通立即重试 1 次
+
+    def test_cancel_during_backoff_stops_immediately(self, monkeypatch, tmp_path):
+        calls = []
+        stop = {"v": False}
+
+        def boom(**kw):
+            calls.append(1)
+            raise RuntimeError("HTTP 429: Throttling.RateQuota")
+        monkeypatch.setattr(story, "_mmconversation_call", boom)
+
+        def fake_sleep(_s):
+            stop["v"] = True                         # 退避期间用户点了返回
+        monkeypatch.setattr(story.time, "sleep", fake_sleep)
+        ok = ImageClient("m", "s", 90, rate_wait_s=6.0).generate_to(
+            tmp_path / "a.png", "p", should_stop=lambda: stop["v"])
+        assert ok is False and len(calls) == 1       # 退避中取消：不再发起新调用
+
+
 class TestDownloadAtomic:
     """web-063 终审 F2：_download 原子落盘——中断不留截断残文件、临时文件清理
     （缓存命中 path.exists() 不误用半张图）。"""

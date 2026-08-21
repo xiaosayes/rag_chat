@@ -17,7 +17,7 @@ class TestStoryConfig:
         assert cfg.story_scene_max_chars == 80
         assert cfg.story_image_model == "qwen-image-3.0"
         assert cfg.story_image_size == "1024*1024"
-        assert cfg.story_image_concurrency == 4
+        assert cfg.story_image_concurrency == 2      # web-067：实测并发>2 触发 429
         assert cfg.story_image_timeout_s == 90.0
         assert cfg.story_total_budget_s == 300.0
         assert cfg.story_cache_dir == "data/story"
@@ -26,9 +26,9 @@ class TestStoryConfig:
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("KIOSK_STORY_ENABLED", "false")
-        monkeypatch.setenv("KIOSK_STORY_IMAGE_CONCURRENCY", "2")
+        monkeypatch.setenv("KIOSK_STORY_IMAGE_CONCURRENCY", "3")
         monkeypatch.setenv("KIOSK_STORY_CACHE_MAX_MB", "100")
         cfg = KioskConfig.from_env()
         assert cfg.story_enabled is False
-        assert cfg.story_image_concurrency == 2
+        assert cfg.story_image_concurrency == 3
         assert cfg.story_cache_max_mb == 100
