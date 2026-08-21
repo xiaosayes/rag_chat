@@ -45,6 +45,9 @@ watch(keyboardShow, async (show) => {
   if (show) {
     await nextTick();
     mountKeyboard();
+  } else {
+    kb?.destroy();                        // web-070 评审修复：收起即销毁并置空——
+    kb = null;                            // v-if 会销毁宿主 DOM，重开必须重建（否则空白面板）
   }
 });
 

@@ -133,6 +133,10 @@ export function createPinyinKeyboard(
 
   renderCandidates();
   return {
-    destroy: () => keyboard.destroy(),
+    destroy: () => {
+      keyboard.destroy();
+      candBar.remove();                    // web-070 评审修复：自绘 DOM 随销毁清理——
+      kbHost.remove();                     // 防宿主 clear() 重建后残留可点击陈旧候选/累积
+    },
   };
 }

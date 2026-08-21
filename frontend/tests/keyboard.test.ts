@@ -117,6 +117,37 @@ describe("KeyboardInput", () => {
     expect((w.vm as any).value).toBe("");
   });
 
+  it("✕清空后无陈旧候选条残留（web-070 评审修复）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const host = w.find(".simple-keyboard-host");
+    for (const ch of ["n", "i"]) {
+      const btn = host.findAll(".hg-button").find((b) => b.text() === ch);
+      await btn!.trigger("click");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.findAll(".pinyin-cand").length).toBeGreaterThan(0);   // 有候选
+    await w.find(".clear").trigger("click");                          // ✕ = clear+重建
+    await w.vm.$nextTick();
+    const bars = w.findAll(".pinyin-candidates");
+    expect(bars).toHaveLength(1);                                     // 无累积
+    expect(bars[0].findAll(".pinyin-cand")).toHaveLength(0);         // 无陈旧候选
+  });
+
+  it("完成收起后重开键盘不空白（web-070 评审修复）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const finish = w.findAll(".hg-button").find((b) => b.text() === "完成");
+    await finish!.trigger("click");
+    await w.vm.$nextTick();
+    expect(w.find(".keyboard-panel").exists()).toBe(false);           // 已收起
+    await w.find(".field").trigger("click");                          // 点输入框重开
+    await w.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(w.find(".keyboard-panel").exists()).toBe(true);
+    expect(w.findAll(".hg-button").length).toBeGreaterThan(20);       // 键盘重建非空白
+  });
+
   it("切手写：键盘收起 + HandwritingPad 出现", async () => {
     const w = mount(KeyboardInput);
     await w.vm.$nextTick();
