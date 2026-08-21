@@ -45,11 +45,18 @@ def parse_story_intent(text: str) -> str | None:
 
 # ==================== web-052：分镜脚本（qwen-plus，固定云端） ====================
 
+# web-067：寓言忠实条款（实测 flash/turbo 把「守株待兔」主角改成小兔子/小男孩=背离原著，
+# 故留 qwen-plus 用 prompt 约束）+ 参考长度示例（首轮即达 40~80 字，避免重试倍增时延）。
 SCRIPT_SYSTEM_PROMPT = (
     "你是湘小图，湖南省少年儿童图书馆里给小朋友讲故事的亲切姐姐。"
     "请把用户给出的主题改编成一个适合 3~8 岁儿童聆听的绘本故事，"
     "语气亲切温暖、句子简短口语化、内容健康积极，不要列表、不要 Markdown、不要英文术语。"
-    "把整个故事拆成 8 到 10 个分镜，每个分镜是一句 40 到 80 个字的叙述，合起来情节完整连贯。"
+    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娱奔月），"
+    "必须严格沿用原著的情节脉络、角色与结局，不得添加原著没有的角色、事件或转折，"
+    "不得改变故事寓意；儿童化只体现在用词和语气上，可在不改动情节主线的前提下做适龄化柔化。"
+    "把整个故事拆成 8 到 10 个分镜，每个分镜是一段 40 到 80 个字的叙述，合起来情节完整连贯。"
+    "参考长度：「清晨，小乌龟和兔子站在森林的起跑线上。兔子拍拍胸脯说，我跑得可快啦，"
+    "一定第一个到终点！小乌龟只是笑了笑，没有说话。」"
     "同时用一句话提炼主要角色的形象特征（年龄感、发型、服饰、颜色），供插画师保持角色一致。"
     "只输出 JSON，格式：{\"title\":\"故事标题\",\"characters\":\"角色形象描述\","
     "\"scenes\":[\"分镜1\",\"分镜2\",...]}，不要输出任何其他文字。"
@@ -117,8 +124,11 @@ class ScriptClient:
         # 60s 超时（web-052/D8）才真实生效；测试行为不变
         pool = ThreadPoolExecutor(max_workers=1)
         try:
+            # web-067：enable_thinking=False——qwen-plus 默认开隐式推理，
+            # 实测脚本时延 21.2s→10.9s（用户验收要求首屏 ≤10s 级）
             fut = pool.submit(_generation_call, model=self._model, messages=messages,
-                              result_format="message", max_tokens=self._max_tokens)
+                              result_format="message", max_tokens=self._max_tokens,
+                              enable_thinking=False)
             return fut.result(timeout=self._timeout)
         finally:
             pool.shutdown(wait=False)

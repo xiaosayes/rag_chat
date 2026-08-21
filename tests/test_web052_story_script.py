@@ -20,6 +20,34 @@ def _script(n=9, chars=45):      # web-064：默认 ≥45 保 happy path（分�
             "scenes": ["第%d幕。" % i + "x" * chars for i in range(n)]}
 
 
+class TestScriptSpeedAndFidelity:
+    """web-067：脚本提速 + 寓言忠实——enable_thinking=False（实测 21.2s→10.9s，
+    隐式推理耗时砍掉）；prompt 加忠实条款（flash/turbo 实测把守株待兔主角改成
+    小兔子/小男孩=背离原著，故留 qwen-plus 用 prompt 约束）。"""
+
+    def test_enable_thinking_disabled(self, monkeypatch):
+        calls = []
+
+        def fake_call(**kw):
+            calls.append(kw)
+            return _ok_rsp(_script())
+        monkeypatch.setattr(story, "_generation_call", fake_call)
+        ScriptClient("qwen-plus", 1600, 60).generate("守株待兔")
+        assert calls[0]["enable_thinking"] is False
+
+    def test_prompt_has_fidelity_and_length_clause(self, monkeypatch):
+        calls = []
+
+        def fake_call(**kw):
+            calls.append(kw)
+            return _ok_rsp(_script())
+        monkeypatch.setattr(story, "_generation_call", fake_call)
+        ScriptClient("qwen-plus", 1600, 60).generate("守株待兔")
+        prompt = calls[0]["messages"][0]["content"]
+        assert "严格沿用原著" in prompt             # 寓言/成语/神话忠实条款
+        assert "40 到 80" in prompt                  # 分镜字数要求（web-064）
+
+
 class TestScriptGenerate:
     def test_parses_fenced_json(self, monkeypatch):
         calls = []
