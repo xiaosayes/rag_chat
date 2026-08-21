@@ -46,6 +46,9 @@ class TestScriptSpeedAndFidelity:
         prompt = calls[0]["messages"][0]["content"]
         assert "严格沿用原著" in prompt             # 寓言/成语/神话忠实条款
         assert "40 到 80" in prompt                  # 分镜字数要求（web-064）
+        # web-068：钉全句防再回归（嫦娨→嫦娥错字曾漏网——子串断言覆盖不到示例列举）
+        assert "龟兔赛跑、守株待兔、嫦娥奔月" in prompt
+        assert "清晨，小乌龟和兔子站在森林的起跑线上" in prompt
 
 
 class TestScriptGenerate:

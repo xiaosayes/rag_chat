@@ -40,8 +40,8 @@
   意图（宁漏勿抢，无主题不触发）→ qwen-plus 出分镜脚本（JSON：title/characters 角色
   锚定/scenes，独立 1600 tokens 限长，校验失败重试 1 次后确定性钳制）→ qwen-image-3.0
   逐页配图（multimodal-generation messages 格式，`prompt_extend=False` 严格遵循文字 +
-  `size=1024*1024`：实测单张 71s→13s；异步并发 ≤4，RPM 20 内；失败重试 1 次→占位图
-  照常播）。绘本全流程固定云端（不随 LLM_PROVIDER 切换）。WS 单通道扩展：上行
+  `size=1024*1024`：实测单张 71s→13s；异步并发 ≤2（实测并发 >2 必触发 429
+  Throttling.RateQuota），限流退避重试 ≤3 次/其他失败重试 1 次→占位图照常播）。绘本全流程固定云端（不随 LLM_PROVIDER 切换）。WS 单通道扩展：上行
   `story_page/story_finish/story_cancel`，下行 `story_preparing/story_begin（文本全量）/
   story_page_img/story_speak_start|end/story_end|story_error`；播报复用专用
   BroadcastSession 实例（句边界喂入/清洗/看门狗/打断串行化原样继承）；自动翻页由前端

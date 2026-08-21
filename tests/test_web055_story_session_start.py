@@ -1,6 +1,7 @@
 # tests/test_web055_story_session_start.py
 # web-055：StorySession 启动链路——preparing→begin（缓存命中/新生成）→逐图事件
 import threading
+import time
 
 from kiosk_server import story
 from kiosk_server.story import StoryCache, StoryScriptError, StorySession
@@ -293,6 +294,48 @@ class TestFirstImagePregen:
         assert len(img.records) == 1                   # 仅预生成 1 次，无新调用
         ends = [e for e in events if e["type"] == "story_end"]
         assert ends and ends[-1]["reason"] == "cancelled"
+
+
+    def test_pregen_wait_past_deadline_no_fallback(self, tmp_path):
+        """web-068：页 1 worker 等预生成落地后重查预算——预生成全程拖过 300s deadline
+        且失败时，不再发起超预算 fallback，补 failed 事件了结页 1（等图护栏不冻结）。"""
+        gate, entered = threading.Event(), threading.Event()
+        clock = _Clock(0.0)
+
+        class _SlowFailPregenImage(_RecordingImage):
+            def generate_to(self, path, prompt, should_stop=None):
+                if "开篇插画" in prompt:
+                    from pathlib import Path
+                    with self._lock:
+                        self.records.append((Path(path).name, prompt))
+                    entered.set()
+                    gate.wait(5.0)                 # 挂起等测试拨钟（有界防死）
+                    return False                   # 预生成失败
+                return super().generate_to(path, prompt, should_stop=should_stop)
+
+        events = []
+        img = _SlowFailPregenImage()
+        s = StorySession(events.append, _FakeScript(_script()), img,
+                         StoryCache(str(tmp_path), 500), tts_factory=None,
+                         cfg=_CfgFast(), clock=clock, speak_fn=lambda n: None)
+        th = threading.Thread(target=s.start, args=("霸王别姬",), daemon=True)
+        th.start()
+        assert entered.wait(5.0), "首页预生成未发起"
+        end = time.monotonic() + 5.0
+        while not any(e["type"] == "story_begin" for e in events):
+            assert time.monotonic() < end, "story_begin 未到达"
+            time.sleep(0.01)
+        time.sleep(0.1)                            # 让页 1 worker 进入 pregen wait
+        clock.t = 400.0                            # workers 启动于 clock≈0 → deadline=300
+        gate.set()
+        assert s._img_done.wait(5.0), "插图编排未收尾"
+        page1 = [p for name, p in img.records if name == "page_1.png"]
+        assert len(page1) == 1 and "开篇插画" in page1[0]   # 无 scene prompt fallback
+        ev1 = [e for e in events if e["type"] == "story_page_img" and e["n"] == 1]
+        assert len(ev1) == 1 and ev1[0].get("failed") and ev1[0]["url"] is None
+        s.on_finish()
+        assert s.wait_idle(5.0)
+        th.join(3)
 
 
 class TestCancelStopsNewImages:

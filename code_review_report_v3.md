@@ -808,3 +808,14 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
   vitest **102 passed**（纯服务端批次，防回归）；npm run build 通过。
 - **部署提醒**：服务器 .env 若显式钉 `KIOSK_STORY_IMAGE_CONCURRENCY=4` 需改 2 或删除
   （走新默认值）；重传 `kiosk_server/story.py` + `kiosk_server/config.py` 并重启生效。
+
+**web-068 评审修复轮**（scoped review verdict: Needs fixes → 全部 ADDRESSED）：
+①prompt 错字「嫦娥→嫦娥」（探测稿逐字条款违反，测试补钉示例列举全句防再回归）；
+②README 旧句「并发 ≤4/重试 1 次」同步为新口径；③页 1 worker 等预生成落地后补
+deadline 重查（病态场景不再发起超预算 fallback，补 failed 事件防护栏冻结）+1 测试。
+pytest **842 passed**。
+
+**真实 API 端到端自测**（scripts/_selftest_story_e2e.py，真件 ScriptClient/ImageClient
++ 慢速假 TTS，主题「守株待兔」）：story_preparing 0.0s → story_begin **11.6s**（原 30s+）
+→ 首页插图事件 11.6s（预生成命中）→ 插图 **10/10 全成 0 失败**（原缺 4~5 张）；寓言主线
+忠实（农夫/撞桩/守株/田荒/醒悟，分镜 43~64 字全在 40~80 区间）。

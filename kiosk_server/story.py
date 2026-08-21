@@ -51,7 +51,7 @@ SCRIPT_SYSTEM_PROMPT = (
     "你是湘小图，湖南省少年儿童图书馆里给小朋友讲故事的亲切姐姐。"
     "请把用户给出的主题改编成一个适合 3~8 岁儿童聆听的绘本故事，"
     "语气亲切温暖、句子简短口语化、内容健康积极，不要列表、不要 Markdown、不要英文术语。"
-    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娨奔月），"
+    "若主题出自已有的寓言、成语、神话或童话故事（例如龟兔赛跑、守株待兔、嫦娥奔月），"
     "必须严格沿用原著的情节脉络、角色与结局，不得添加原著没有的角色、事件或转折，"
     "不得改变故事寓意；儿童化只体现在用词和语气上，可在不改动情节主线的前提下做适龄化柔化。"
     "把整个故事拆成 8 到 10 个分镜，每个分镜是一段 40 到 80 个字的叙述，合起来情节完整连贯。"
@@ -554,6 +554,12 @@ class StorySession:
                     self._pregen["done"].wait()
                     ok = bool(self._pregen["ok"])
                     if not ok and not self._cancel.is_set():
+                        if self._clock() > deadline:
+                            # web-068：wait 后重查预算——预生成全程限流退避等病态场景下
+                            # 不再发起超预算 fallback，补 failed 事件了结页 1（防等图护栏冻结）
+                            self._emit({"type": "story_page_img", "n": n, "url": None,
+                                        "failed": True})
+                            return
                         logger.info("首页预生成未果，落回 scene prompt 重生成")
                 elif path.exists():
                     ok = True                       # 缓存/补生成跳过
