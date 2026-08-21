@@ -837,3 +837,32 @@ pytest **842 passed**。
   build ✓；4 张生产路径验证图逐张目检——零文字、零气泡、解剖正常。
 - **部署提醒**：重传 `kiosk_server/story.py` + 前端构建（或 dev 热更）；**服务器旧缓存
   故事的图是旧 prompt 产物（含乱码图），需清 `data/story/` 对应目录或换主题才见新图**。
+
+### 增补：web-070 插图文字根治/脚本换型/连字拼音（2026-08-21，探测驱动）
+
+用户验收报 3 问题：①插图仍大量文字（含错字）；②主旨偏离熟知版本（农夫与蛇被改成蛇道谢）
++拍板脚本模型 qwen-plus→**deepseek-v4-flash-0731**；③键盘拼音太小+只能拼单字需连字拼音。
+
+- **插图文字根因（再定位）**：qwen-image-3.0 文字渲染能力强——prompt 里的大段叙述 prose
+  会被当文字内容画进图里（34/35 截图实证；引语剥除后 prose 主体仍会触发）。**根治=脚本
+  为每分镜产出 15~25 字 images 纯画面短句**（谁/在哪里/做什么，无对话无引号无书名号），
+  生图只喂短句；首页预生成 prompt 含《主题》会被渲染成书法标题（实测）→ **预生成默认关**
+  （KIOSK_STORY_FIRST_IMAGE_FAST=true 可开回），页 1 于 begin 后由 images[0] 生成。
+  strip_dialogue_for_image 与 negative_prompt 保留为纵深防御。
+- **脚本换型**：dashscope Generation.call 原生支持 deepseek-v4-flash-0731（百炼 key 不变，
+  实测连通 1.6s）；enable_thinking=False + 新 prompt（「严格按照大家熟知的主流版本…不得
+  反转寓意（例如农夫与蛇的结局必须是蛇咬了农夫）」+images 字段要求）实测 **8.7s** 出全量
+  脚本（较 qwen-plus 10.9s 更快）、农夫与蛇主线全对、分镜 44~58 字合规。端到端自测
+  （农夫与蛇）：begin 13.7s（含 1 次校验重试）、插图 9/9 全成 0 失败、出图逐张目检零文字。
+  max_tokens 1600→2200。解析：images 与 scenes 逐对 clamp 对齐、缺失/不齐回退 None
+  （worker 用 scene 剥引语兑底）；story_begin 载荷保持 {n,text} 不泄漏 img。
+- **连字拼音**：新 pinyinEngine.ts（词库候选优先+单字最长音节前缀，DP 音节切分）；
+  词库 frontend/src/assets/pinyin_words.json（**2.1MB 内置**，jieba 词频×pypinyin 注音，
+  生成器 scripts/build_pinyin_dict.py，79,993 keys）；pinyinKeyboard 改写自绘候选条+
+  committed/buffer 自管模型（空格=选首选，IME 惯例）；键盘按键 108px/42px、候选 48px 放大。
+  bundle 2,966KB（gzip 1,230KB，离线 kiosk 一次性加载可接受）。
+- **测试**：pytest **856 passed**（+7）；vitest **112 passed**（+8 引擎 +2 连字组件用例）；
+  build ✓。偶发：一次端到端自测出现 story_error（两轮校验均未过的随机事件，未复现），
+  已在 story_error 前补服务端 logger.warning 留痕。
+- **部署提醒**：重传 kiosk_server/{story,config}.py + scripts/smoke_story.py 并重启；
+  前端 dev 热更；**服务器 data/story/ 旧缓存需清空**（旧图含文字、旧脚本无 images 字段）。
