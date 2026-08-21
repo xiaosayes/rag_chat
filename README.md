@@ -51,7 +51,9 @@
   `useStorySession`（乐观翻页/占位图淡入/结束态），HomeView home/chat/story 三态。
   真实 API 冒烟（`scripts/smoke_story.py`「霸王别姬」）：脚本 7.7s 出 10 分镜（每段
   25~44 字，LLM 自主适龄化改编为「小霸王和小花姬」），插图 3 张 7.2~12.6s 出图达标
-  （留档 `data/story_smoke/`）。pytest 819 passed（+47）/ vitest 94 passed（+20）。
+  （留档 `data/story_smoke/`）。终审补强（F1~F5）：LRU 淘汰接线生效、插图原子落盘、
+  准备期取消不反弹、返回钮 z 序可点、story_error 可见化持留 2.5s。
+  pytest **824 passed**（+52）/ vitest **98 passed**（+24）。
 - **新增 `kiosk_server/`（全部新文件，零改动既有代码）**：数字人一体机专属薄层 API
   （独立进程 :7861，与 Gradio:7860 互斥运行——Qdrant 本地嵌入模式文件锁，已实证）。
   M1 端点：`GET /api/health|config|presets`、`POST /api/ocr`（百炼 qwen-vl-ocr 手写识别，

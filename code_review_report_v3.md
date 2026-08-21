@@ -726,7 +726,40 @@ src/ 冻结内核零改动，一切修正在薄层与前端；修复均带离线
   脚本 7.7s 出 10 分镜（每段 25~44 字全 ≤80，LLM 自主适龄化改编「霸王别姬」→
   「小霸王和小花姬」幼儿园京剧故事）；插图 3 张 7.2/12.6/7.9s 出图，目检达标（水彩
   绘本风、严格切题、角色锚定生效、无文字水印）；A/B 对比图留档。
-- **测试**：pytest **819 passed**（+47：配置族/意图正则/脚本/插图/缓存/启动链路/播报
-  状态机/VoiceSession 集成/WS+供图/预设）；vitest **94 passed**（+20：WS 方法/
-  useStorySession/StoryBook/Home 接线）；npm run build 通过。外部 API 一律 mock，
+- **测试**：pytest **824 passed**（+52：配置族/意图正则/脚本/插图/缓存/启动链路/播报
+  状态机/VoiceSession 集成/WS+供图/预设/终审补强）；vitest **98 passed**（+24：WS 方法/
+  useStorySession/StoryBook/Home 接线/终审补强）；npm run build 通过。外部 API 一律 mock，
   真实 API 仅冒烟脚本。
+
+### 增补：web-063 终审与补强（SDD 全分支终审，2026-08-20）
+
+- **终审**：14 任务全绿后派全分支终审（5b15c55..e48aadc，27 提交）——架构/协议/线程/
+  测试真实性获肯定；发现 4 Important + 2 Minor，其中 F1/F3/F4 为 spec 拍板项落地不全。
+- **补强（F1~F5，两笔提交，均先红后绿）**：
+  - F1 LRU 接线：`evict_if_needed()` 此前实现并测试但无调用方（500MB 上限名存实亡）
+    → 接入 `StorySession.start()` finally（全退出路径生效，失败仅记日志不拖垮拆解）。
+  - F2 插图原子落盘：`_download` 直写目标路径，中断留截断残文件会被缓存命中路径误用
+    → 同目录 `.part` + `os.replace` 原子改名，异常清理临时文件（3 项原子性测试）。
+  - F3 返回钮 z 序：`.story-overlay` z20 盖 `.btn-back` z10，准备期/收尾页无法点返回
+    （违 D7）→ btn-back z30（.storybook 根叠层上下文内决定性压制）。
+  - F4 story_error 可见化：errorText 此前无渲染点且立即弹回首页（D8 拒讲话术静默）→
+    preparing 盖层渲染拒讲话术 + 持留 2.5s 再转 idle（STORY_ERROR_HOLD_MS，back/reset
+    清定时器，fake-timers 边界测试）。
+  - F5 准备期取消不反弹：cancel 只投指令不检查 → 生成完成仍 story_begin+开播把已回首页
+    前端弹回 → cancel 置旗 + story_begin 前/_speak(1) 前双检查（直接 story_end{cancelled}）。
+- **遗留 backlog（终审裁决，后续打磨不阻塞）**：
+  1. 意图正则主题质量：指示代词停用词（「我想听这个故事」→「这个」）、`_THEME_STRIP`
+     两端剥字符伤合法主题（「一只猫」→「只猫」）、`search` 非锚定可致乱码主题——
+     均为「产次品故事」方向（非抢问答），符合宁漏勿抢，下次打磨一行级修复。
+  2. 死配置三字段：`story_min_scenes/max_scenes/scene_max_chars` 无消费方（代码钉死
+     6/10/80 与默认值一致，无行为偏差）——接线或标注预留。
+  3. 象限③（故事态新故事 ask）`_on_story_event` 无实例同一性守卫——前端故事态无输入
+     入口不可达，防御性记录。
+  4. `story_error` 若未来在 playing 阶段出现（当前仅 preparing 发）持留期无盖层展示——
+     协议现状不可达。
+  5. Windows GBK 控制台 smoke_story.py 中文 print 乱码（仅显示层，落盘 UTF-8 完好）。
+- **测试**：pytest **824 passed** / vitest **98 passed** / npm run build 通过（终审复测）。
+- **部署待办（运维侧）**：服务器正式池 `data/kiosk/preset_questions.json` 追加
+  「给我讲个嫦娥奔月的故事」（正式池优先于缺省池）；KIOSK_STORY_* 全有默认值零配置开箱；
+  冒烟 `python scripts/smoke_story.py "主题" --pages 2` + 全链
+  `python scripts/smoke_kiosk_ws.py --port 7862 "给我讲一个霸王别姬的故事"`。
