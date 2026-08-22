@@ -61,7 +61,15 @@
   可中断）；脚本 enable_thinking=False 提速 21.2s→10.9s（qwen-plus 默认开隐式推理）
   + prompt 增寓言忠实条款（实测 flash/turbo 背离原著，弃用）；首页插图并行预生成
   （脚本 ~11s 期间主题 prompt 先生成，KIOSK_STORY_FIRST_IMAGE_FAST 可关）。
-  pytest **841 passed**（+69）/ vitest **102 passed**（+28）。
+  验收反馈三轮（web-068~069）：评审修复（prompt 错字/预生成 deadline 重查）；插图质量——
+  引语剥除根治图中乱码文字（实测引语必被渲染成对话框）+ negative_prompt 防畸形/水印 +
+  文本页码对比度提升。验收反馈四轮（web-070）：插图文字再根治——脚本换型
+  **deepseek-v4-flash-0731**（实测 8.7s 出稿，农夫与蛇主线全对）+ 每分镜 15~25 字 images
+  纯画面短句喂图（prose 喂图必被当文字渲染=根因）+ 首页预生成默认关（主题《》被渲成书法
+  标题）；**连字拼音键盘**：自研引擎（2.8MB 词库内置，jieba×pypinyin）词组候选（tuzi→兔子）。
+  验收反馈五轮（web-071）：候选单行+「更多▼」浮层（不再挤键盘出屏）；**首字母联想**
+  （nh→你好/年后/您好，会话高频提权）；键面/输入框高亮放大；键盘边界收拢不越对话框。
+  pytest **856 passed**（+84）/ vitest **118 passed**（+44）。
 - **新增 `kiosk_server/`（全部新文件，零改动既有代码）**：数字人一体机专属薄层 API
   （独立进程 :7861，与 Gradio:7860 互斥运行——Qdrant 本地嵌入模式文件锁，已实证）。
   M1 端点：`GET /api/health|config|presets`、`POST /api/ocr`（百炼 qwen-vl-ocr 手写识别，

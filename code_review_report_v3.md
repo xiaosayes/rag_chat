@@ -866,3 +866,22 @@ pytest **842 passed**。
   已在 story_error 前补服务端 logger.warning 留痕。
 - **部署提醒**：重传 kiosk_server/{story,config}.py + scripts/smoke_story.py 并重启；
   前端 dev 热更；**服务器 data/story/ 旧缓存需清空**（旧图含文字、旧脚本无 images 字段）。
+
+### 增补：web-071 键盘 UX 四轮反馈（2026-08-21）
+
+用户报 4 点：候选词多行把键盘挤出屏/需首字母联想（nh→你好）/按钮与输入框不高亮/边界越对话框。
+
+- **单行候选+更多浮层**：候选条 nowrap+定高 104px；splitRow 宽度估算（50·len+80，对齐实际
+  48·len+72 上浮冗余；溢出时预算 750 给「更多▼」留位）；更多候选进 absolute 浮层
+  （bottom:calc(100%+12px)，不占布局流→键盘永不被推挤），选词/击键自动收起。
+- **首字母联想**：词库 JSON 重构 {words,initials}（initials=按字首字母索引，19,513 keys）；
+  引擎规则=可完整切分音节→全拼词+单字，不可切分→首字母词优先；BOOST_WORDS 会话/儿童
+  高频提权（jieba 新闻语料词频「南海」压「你好」→提权后你好居首，对齐用户示例）。
+- **样式**：键面 #fffdf6 亮底+描边+投影+600 字重；功能键分色（完成 #4a7c59 白字）；
+  输入框 40px/600；面板 width:100%+box-sizing 收拢边界。
+- **评审修复（3 Critical 全闭合）**：①浮层被 .keyboard-panel overflow:hidden 裁剪→移除
+  （横向约束已由 width/box-sizing/min-width 保证）；②destroy 漏清 overlay（第三个自绘 DOM）
+  →补齐+测试断言；③行宽估算低估致「更多▼」自裁→估算上浮+预算收窄。M1 击键收起浮层、
+  M2 包含块 CSS 钉住，一并修复。
+- **测试**：vitest **118 passed**（首字母/更多浮层/连打余字母/清空无残留等组件级覆盖）/
+  build ✓（bundle 2745KB gzip 1396KB）/ pytest 856（服务端零改动防回归）。
