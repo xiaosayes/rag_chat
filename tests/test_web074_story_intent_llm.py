@@ -63,6 +63,13 @@ class TestResolveGate:
         fn = _classify_recorder({"intent": "story", "theme": ""})
         assert resolve_story_intent("随便给我讲一个", classify=fn) is None
 
+    def test_meta_signals_inside_story_theme_not_blocked(self):
+        """评审 Minor-1：故事主题内含 会不会/什么是 不误杀（快路径应正常出主题）。"""
+        fn = _classify_recorder({"intent": "qa", "theme": ""})
+        assert resolve_story_intent("讲一个丑小鸭会不会变天鹅的故事", classify=fn) is not None
+        assert resolve_story_intent("我想听小熊能不能飞的故事", classify=fn) is not None
+        assert fn.calls == []
+
     def test_no_classifier_keeps_regex_only_behavior(self):
         assert resolve_story_intent("我想听嫦娥奔月") is None        # 正则不中即 None（旧语义）
         assert resolve_story_intent("给我讲一个嫦娥奔月的故事") == "嫦娥奔月"
@@ -154,6 +161,13 @@ class TestClassifyIntentLlm:
         monkeypatch.setattr(story, "_generation_call",
                             lambda **kw: self._ok_rsp({"intent": "qa", "theme": ""}))
         assert classify_intent_llm("袋鼠宝宝住在口袋里吗", model="m")["intent"] == "qa"
+
+    def test_invalid_intent_enum_raises(self, monkeypatch):
+        """合法 JSON 但非法 intent 枚举 → 拒绝（评审 Minor-3 补钉）。"""
+        monkeypatch.setattr(story, "_generation_call",
+                            lambda **kw: self._ok_rsp({"intent": "chat", "theme": ""}))
+        with pytest.raises(Exception):
+            classify_intent_llm("随便", model="m")
 
     def test_garbage_payload_raises(self, monkeypatch):
         class R:
