@@ -3,7 +3,8 @@
 依赖（仅生成期，非运行时）：pip install jieba pypinyin
 用法: python -X utf8 scripts/build_pinyin_dict.py
 产出: frontend/src/assets/pinyin_words.json
-  {"words": {全拼key: [词...]}, "initials": {首字母key: [词...]}}（均词频降序；words 每 key ≤8，initials 每 key ≤10）
+  {"words": {全拼key: [词...]}, "initials": {首字母key: [词...]}, "letters": {单字母: [高频单字...]}}
+  （均词频降序+会话高频提权；words 每 key ≤8，initials 每 key ≤10，letters 每字母 ≤12）
 """
 import json
 import os
