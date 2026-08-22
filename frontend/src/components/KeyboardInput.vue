@@ -152,21 +152,21 @@ defineExpose({ value, keyboardShow, handwriting });
     display: flex;
     flex-wrap: nowrap;                  /* web-071：只弹一行，不多行挤压键盘 */
     align-items: center;
-    gap: 18px;
-    height: 104px;
+    gap: 14px;
+    height: 92px;                       /* web-072 续：随字号下调收高 */
     max-width: 100%;
     overflow: hidden;
-    margin-bottom: 22px;
+    margin-bottom: 18px;
     padding: 6px 4px;
     box-sizing: border-box;
     .pinyin-cand {
       flex: none;
       font-family: "Source Han Serif CN", serif;
-      font-size: 48px;
+      font-size: 40px;                  /* web-072 续：48→40 缩 1~2 号 */
       line-height: 1.2;
-      padding: 16px 34px;
+      padding: 12px 26px;
       border: 2px solid rgba(74, 63, 48, 0.28);
-      border-radius: 20px;
+      border-radius: 18px;
       background: #fff7e6;
       color: #4a3f30;
       cursor: pointer;
@@ -178,18 +178,16 @@ defineExpose({ value, keyboardShow, handwriting });
     }
     .pinyin-cand-more {                /* 更多/收起切换 */
       background: #f3e3bd;
-      font-size: 40px;
+      font-size: 34px;
     }
   }
-  :deep(.pinyin-cand-overlay) {        /* web-071：更多候选浮层——绝对定位不挤键盘 */
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: calc(100% + 12px);
+  :deep(.pinyin-cand-overlay) {        /* web-071/072：更多候选浮层——fixed 定位不占布局不挨裁 */
+    position: fixed;                    /* left/width/bottom/max-height 由 JS 实测下发 */
     z-index: 30;
     display: flex;
     flex-wrap: wrap;
-    gap: 18px;
+    align-content: flex-start;
+    gap: 14px;
     max-height: 420px;
     overflow-y: auto;
     padding: 24px;
@@ -201,11 +199,11 @@ defineExpose({ value, keyboardShow, handwriting });
     .pinyin-cand {
       flex: none;
       font-family: "Source Han Serif CN", serif;
-      font-size: 48px;
+      font-size: 40px;
       line-height: 1.2;
-      padding: 16px 34px;
+      padding: 12px 26px;
       border: 2px solid rgba(74, 63, 48, 0.28);
-      border-radius: 20px;
+      border-radius: 18px;
       background: #fff7e6;
       color: #4a3f30;
       cursor: pointer;
@@ -214,16 +212,16 @@ defineExpose({ value, keyboardShow, handwriting });
   }
   :deep(.kiosk-keyboard) {
     max-width: 100%;
-    .hg-row { gap: 14px; margin-bottom: 14px; }
+    .hg-row { gap: 12px; margin-bottom: 12px; }
     .hg-button {
-      height: 108px;
+      height: 88px;                     /* web-072 续：108→88 收高让位浮层 */
       min-width: 0;                     /* web-071：可收缩防横向溢出 */
-      border-radius: 18px;
+      border-radius: 16px;
       background: #fffdf6;              /* web-071：更亮更清晰的键面 */
       border: 2px solid rgba(74, 63, 48, 0.35);
       box-shadow: 0 3px 6px rgba(74, 63, 48, 0.18);
       span {
-        font-size: 42px;
+        font-size: 34px;                /* web-072 续：42→34 缩 1~2 号 */
         font-weight: 600;
         font-family: "Source Han Serif CN", serif;
         color: #3a3126;

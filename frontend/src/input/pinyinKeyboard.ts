@@ -123,19 +123,19 @@ export function createPinyinKeyboard(
 
   // web-071：单行容量估算（字号 48px + 内边距 + 间距），超出部分进「更多」浮层；
   // 有溢出时按较窄预算重排，给「更多▼」钮预留位置（防其被裁剪）
-  // web-071 评审修复 C3：估算对齐实际钮宽（48px/字+padding68+border4≈48·len+72），
-  // 上浮取 50·len+80 留冗余；「更多▼」(~230px) 场景预算收窄防其被裁
+  // web-071 评审修复 C3：估算对齐实际钮宽上浮冗余；「更多▼」场景预算收窄防其被裁；
+  // web-072 续：字号 40px 后重校（40·len+padding52+border4 → 44·len+64 上浮）
   const ROW_BUDGET = 1000;
-  const ROW_BUDGET_WITH_MORE = 750;
+  const ROW_BUDGET_WITH_MORE = 780;
 
   function splitRow(cands: PinyinCandidate[], budget: number): PinyinCandidate[] {
     const row: PinyinCandidate[] = [];
     let used = 0;
     for (const c of cands) {
-      const w = c.text.length * 50 + 80;
+      const w = c.text.length * 44 + 64;
       if (row.length && used + w > budget) break;
       row.push(c);
-      used += w + 18;
+      used += w + 14;
     }
     return row;
   }
@@ -188,14 +188,17 @@ export function createPinyinKeyboard(
     }
   }
 
-  // web-072：浮层最大高=宿主顶到最近裁切祖先顶（.panel/HomeView overflow:hidden）
-  // 的实测距离——不再写死 420px（写死会顶穿祖先被裁掉首行）
+  // web-072 续：浮层改 fixed 定位（相对视口，逃脱 .panel overflow 裁剪——30.png 顶行被切/
+  // 太窄两级反馈），底部锚在候选条上方、横向对齐键盘面板，目标高 540px（≈4 行+滚动），
+  // 顶不少于 280px（给鹿景/标题留视觉余量）
   function fitOverlay() {
-    const hostTop = container.getBoundingClientRect().top;
-    const clipper = container.closest(".panel") ?? container.closest(".keyboard-panel");
-    const clipTop = clipper ? clipper.getBoundingClientRect().top : 0;
-    const avail = Math.max(96, Math.min(420, hostTop - clipTop - 24));
-    overlay.style.maxHeight = `${avail}px`;
+    const r = container.getBoundingClientRect();
+    overlay.style.left = `${r.left}px`;
+    overlay.style.width = `${r.width}px`;
+    overlay.style.bottom = `${window.innerHeight - r.top + 12}px`;
+    const target = 540;
+    const top = Math.max(280, r.top - 12 - target);
+    overlay.style.maxHeight = `${Math.max(220, r.top - 12 - top)}px`;
   }
 
   renderCandidates();
