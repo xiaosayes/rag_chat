@@ -41,7 +41,7 @@ export function createPinyinKeyboard(
   delete (chinese as { layoutCandidates?: unknown }).layoutCandidates;   // web-070：自绘候选条
 
   // web-070：候选条（键盘上方）；web-071：单行+「更多▼」浮层展开（候选不再挤占键盘）
-  container.style.position = "relative";
+  // 包含块由 CSS 钉住（.simple-keyboard-host{position:relative}，KeyboardInput.vue）
   const candBar = document.createElement("div");
   candBar.className = "pinyin-candidates";
   const overlay = document.createElement("div");
@@ -113,6 +113,7 @@ export function createPinyinKeyboard(
   }
 
   function sync() {
+    expanded = false;                        // web-071 评审修复 M1：击键改 buffer 即收起浮层
     syncing = true;
     keyboard.setInput(committed + buffer);
     syncing = false;
@@ -122,14 +123,16 @@ export function createPinyinKeyboard(
 
   // web-071：单行容量估算（字号 48px + 内边距 + 间距），超出部分进「更多」浮层；
   // 有溢出时按较窄预算重排，给「更多▼」钮预留位置（防其被裁剪）
-  const ROW_BUDGET = 1010;
-  const ROW_BUDGET_WITH_MORE = 790;
+  // web-071 评审修复 C3：估算对齐实际钮宽（48px/字+padding68+border4≈48·len+72），
+  // 上浮取 50·len+80 留冗余；「更多▼」(~230px) 场景预算收窄防其被裁
+  const ROW_BUDGET = 1000;
+  const ROW_BUDGET_WITH_MORE = 750;
 
   function splitRow(cands: PinyinCandidate[], budget: number): PinyinCandidate[] {
     const row: PinyinCandidate[] = [];
     let used = 0;
     for (const c of cands) {
-      const w = c.text.length * 52 + 44;
+      const w = c.text.length * 50 + 80;
       if (row.length && used + w > budget) break;
       row.push(c);
       used += w + 18;
@@ -190,6 +193,7 @@ export function createPinyinKeyboard(
       keyboard.destroy();
       candBar.remove();                    // web-070 评审修复：自绘 DOM 随销毁清理——
       kbHost.remove();                     // 防宿主 clear() 重建后残留可点击陈旧候选/累积
+      overlay.remove();                    // web-071 评审修复 C2：第三个自绘 DOM 一并清理
     },
   };
 }

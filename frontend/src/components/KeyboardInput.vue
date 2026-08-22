@@ -120,8 +120,10 @@ defineExpose({ value, keyboardShow, handwriting });
     padding: 31px;
     width: 100%;                        /* web-071：边界不超出对话框 */
     box-sizing: border-box;
-    overflow: hidden;
+    /* 评审修复 C1：不设 overflow:hidden——横向收玫由 width/box-sizing/min-width 保证，
+       且 overflow:hidden 会把「更多▼」浮层（absolute 于面板上方）裁掉 */
   }
+  :deep(.simple-keyboard-host) { position: relative; }   /* 候选浮层包含块（评审修复 M2）*/
 
   /* web-070/071：键盘放大 + 连字拼音候选条（单行+更多浮层） */
   :deep(.pinyin-candidates) {

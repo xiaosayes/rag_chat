@@ -174,6 +174,8 @@ describe("KeyboardInput", () => {
     const bars = w.findAll(".pinyin-candidates");
     expect(bars).toHaveLength(1);                                     // 无累积
     expect(bars[0].findAll(".pinyin-cand")).toHaveLength(0);         // 无陈旧候选
+    // web-071 评审修复 C2：浮层 DOM 也随 destroy 清理（防幽灵文本）
+    expect(w.findAll(".pinyin-cand-overlay")).toHaveLength(1);
   });
 
   it("完成收起后重开键盘不空白（web-070 评审修复）", async () => {
