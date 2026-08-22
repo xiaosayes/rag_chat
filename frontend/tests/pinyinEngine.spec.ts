@@ -37,11 +37,21 @@ describe("pinyinEngine.getCandidates", () => {
     expect(c[0]).toEqual({ text: "嫦娥", eat: 6, kind: "word" });
   });
 
-  it("空串/单字母 → 空候选；纯辅音串走首字母联想", () => {
+  it("空串 → 空候选；纯辅音串走首字母联想", () => {
     expect(getCandidates("")).toEqual([]);
-    expect(getCandidates("t")).toEqual([]);        // t 非音节且长度<2 不联想
     const zzz = getCandidates("zzz");              // 不可切分音节 → 首字母联想
     expect(zzz.some((x) => x.text === "自治州" && x.kind === "word")).toBe(true);
+  });
+
+  it("单字母即出高频字：h → 和/好/会（char，eat=1）（web-072）", () => {
+    const c = getCandidates("h");
+    expect(c.length).toBeGreaterThan(0);
+    expect(c.every((x) => x.kind === "char" && x.eat === 1)).toBe(true);
+    for (const ch of ["和", "好", "会"]) {
+      expect(c.some((x) => x.text === ch), `h 候选应含「${ch}」`).toBe(true);
+    }
+    // 本身是音节的单字母（a/e/o）仍走原音节候选路径
+    expect(getCandidates("a").some((x) => x.text === "阿")).toBe(true);
   });
 
   it("首字母联想：nh → 你好/年后/您好（词候选，eat=2，你好居首）", () => {

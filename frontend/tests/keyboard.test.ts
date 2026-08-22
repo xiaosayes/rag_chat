@@ -122,6 +122,19 @@ describe("KeyboardInput", () => {
     expect((w.vm as any).value).toBe("");
   });
 
+  it("单字母即出候选：h 候选含「好」可点上屏（web-072）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const host = w.find(".simple-keyboard-host");
+    const btn = host.findAll(".hg-button").find((b) => b.text() === "h");
+    await btn!.trigger("click");
+    await new Promise((r) => setTimeout(r, 50));
+    const hao = host.findAll(".pinyin-cand").find((el) => el.text() === "好");
+    expect(hao, "单字母 h 应出高频字候选「好」").toBeTruthy();
+    await hao!.trigger("click");
+    expect((w.vm as any).value).toBe("好");
+  });
+
   it("首字母联想：nh 候选含「你好」（web-071）", async () => {
     const w = mount(KeyboardInput);
     await w.vm.$nextTick();

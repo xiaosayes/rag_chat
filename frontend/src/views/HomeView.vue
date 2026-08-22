@@ -1,6 +1,6 @@
 <template>
   <div class="home">
-    <img class="logo" :src="'img/logo.png'" alt="logo" />
+    <!-- web-072：删除叠加 logo——v1/bg.png 左上角已内嵌馆标，img 再叠一层即重影 -->
     <DeerAvatar ref="deer" />
     <SysMenu />
     <div class="panel">
@@ -144,13 +144,6 @@ onMounted(() => {
   background: url("../../public/img/v1/bg.png") 100% 100% no-repeat;
   background-size: 100% 100%;
   overflow: hidden;
-  .logo {
-    position: absolute;
-    left: 46px;
-    top: 46px;
-    height: 115px;
-    z-index: 2;
-  }
   .panel {
     position: absolute;
     bottom: 0;

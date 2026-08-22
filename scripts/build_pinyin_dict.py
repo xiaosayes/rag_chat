@@ -63,7 +63,25 @@ def main() -> None:
                 if word not in (w for _, w in ib):
                     ib.append((freq, word))
     out_initials = {k: _rank(v)[:MAX_PER_INITIAL] for k, v in initials.items()}
-    payload = {"words": out, "initials": out_initials}
+    # web-072：单字母候选（h→好/和/会）——jieba 单字条目按词频归到拼音首字母
+    letters: dict[str, list[tuple[int, str]]] = {}
+    with open(dt_path, encoding="utf-8") as f2:
+        for line in f2:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            word, freq = parts[0], int(parts[1])
+            if len(word) != 1 or not ("一" <= word <= "鿿"):
+                continue
+            py = pinyin(word, style=Style.NORMAL)
+            if not py or not py[0]:
+                continue
+            letter = py[0][0][0].lower()
+            lb = letters.setdefault(letter, [])
+            if word not in (w for _, w in lb):
+                lb.append((freq, word))
+    out_letters = {k: _rank(v)[:12] for k, v in letters.items()}
+    payload = {"words": out, "initials": out_initials, "letters": out_letters}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                    encoding="utf-8")
@@ -74,6 +92,8 @@ def main() -> None:
         assert w in out.get(key, []), f"{w} 未入库"
     assert out_initials.get("nh", [""])[0] == "你好", "首字母联想 你好 应居首（提权生效）"
     assert "年后" in out_initials.get("nh", []) and "您好" in out_initials.get("nh", [])
+    h_letters = out_letters.get("h", [])
+    assert all(c in h_letters for c in "好和会"), f"单字母 h 候选缺好/和/会: {h_letters}"
     print("coverage self-check OK")
 
 

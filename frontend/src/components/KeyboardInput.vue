@@ -1,7 +1,10 @@
 <template>
   <div class="keyboard-input">
     <div class="input-row">
-      <img class="mic-toggle" :src="'img/v1/key_keyboard.png'" @click.stop.prevent="$emit('toggle-voice')" />
+      <!-- web-072：弃用内嵌「拼音」文字的素材图——改高亮羊皮纸胶囊+话筒图标+明确语义文案 -->
+      <button type="button" class="mic-toggle" @click.stop.prevent="$emit('toggle-voice')">
+        <img :src="'img/micro.png'" alt="" /><span>语音</span>
+      </button>
       <div class="field" @click.stop.prevent="keyboardShow = true">
         <span class="value">{{ value }}</span>
         <img v-if="value" class="clear" :src="'img/v1/input_close.png'"
@@ -89,12 +92,35 @@ defineExpose({ value, keyboardShow, handwriting });
     align-items: center;
     justify-content: center;
     gap: 31px;
-    .mic-toggle { height: 130px; cursor: pointer; }
+    .mic-toggle {
+      height: 130px;
+      min-width: 220px;
+      border: 3px solid rgba(74, 63, 48, 0.45);
+      border-radius: 65px;
+      background: #fffdf6;                 /* web-072：高亮羊皮纸，弃旧素材丑图 */
+      box-shadow: 0 4px 10px rgba(74, 63, 48, 0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      cursor: pointer;
+      img { height: 58px; }
+      span {
+        font-family: "Source Han Serif CN", serif;
+        font-size: 38px;
+        font-weight: 600;
+        color: #3a3126;
+      }
+      &:active { background: #ffe9b8; }
+    }
     .field {
       width: 499px;
       height: 130px;
-      background: url("../assets/input_bg.png") 100% 100% no-repeat;
-      background-size: 100% 100%;
+      background: #fffdf6;                 /* web-072：弃暗色素材图，改亮底描边胶囊 */
+      border: 3px solid rgba(74, 63, 48, 0.45);
+      border-radius: 65px;
+      box-shadow: 0 4px 10px rgba(74, 63, 48, 0.25),
+                  inset 0 2px 6px rgba(74, 63, 48, 0.10);
       display: flex;
       align-items: center;
       padding: 0 38px;

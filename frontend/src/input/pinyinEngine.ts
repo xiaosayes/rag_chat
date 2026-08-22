@@ -13,6 +13,9 @@ const WORDS: Record<string, string[]> =
 // web-071：首字母联想索引（nh→你好/年后/您好），词频+会话高频提权序
 const INITIALS: Record<string, string[]> =
   (dictJson as { initials: Record<string, string[]> }).initials ?? {};
+// web-072：单字母候选（h→和/好/会，jieba 单字词频序）
+const LETTERS: Record<string, string[]> =
+  (dictJson as { letters?: Record<string, string[]> }).letters ?? {};
 
 const MAX_SYLLABLE_LEN = 6;                 // zhuang/shuang 级
 
@@ -49,6 +52,12 @@ function segmentable(buffer: string): boolean {
  *  不可完整切分（如 nh）→ 首字母联想词优先、单字候选兑底。 */
 export function getCandidates(buffer: string, max = 30): PinyinCandidate[] {
   if (!buffer) return [];
+  // web-072：单字母即出高频字候选（h→和/好/会…）；a/e/o 等本身是音节的走原路径
+  if (buffer.length === 1 && CHARS[buffer] === undefined) {
+    return (LETTERS[buffer] ?? [])
+      .map((text) => ({ text, eat: 1, kind: "char" as const }))
+      .slice(0, max);
+  }
   const out: PinyinCandidate[] = [];
   const seg = segmentable(buffer);
   if (seg) {
