@@ -165,6 +165,8 @@ describe("KeyboardInput", () => {
     await more!.trigger("click");                        // 展开浮层
     const overlay = host.find(".pinyin-cand-overlay");
     expect(overlay.attributes("style") ?? "").not.toContain("display: none");
+    // web-072：展开时按可视空间实测设 max-height（防顶行被裁，30.png 回归）
+    expect(overlay.attributes("style")).toContain("max-height");
     const yi = overlay.findAll(".pinyin-cand").find((el) => el.text() === "一");
     expect(yi, "浮层应含全部候选").toBeTruthy();
     await yi!.trigger("click");

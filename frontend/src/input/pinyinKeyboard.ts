@@ -181,10 +181,21 @@ export function createPinyinKeyboard(
     }
     if (expanded) {
       for (const c of currentCands) overlay.appendChild(makeCandButton(c));
+      fitOverlay();                        // web-072：运行时量高防裁（评审 30.png 顶行被切）
       overlay.style.display = "flex";
     } else {
       overlay.style.display = "none";
     }
+  }
+
+  // web-072：浮层最大高=宿主顶到最近裁切祖先顶（.panel/HomeView overflow:hidden）
+  // 的实测距离——不再写死 420px（写死会顶穿祖先被裁掉首行）
+  function fitOverlay() {
+    const hostTop = container.getBoundingClientRect().top;
+    const clipper = container.closest(".panel") ?? container.closest(".keyboard-panel");
+    const clipTop = clipper ? clipper.getBoundingClientRect().top : 0;
+    const avail = Math.max(96, Math.min(420, hostTop - clipTop - 24));
+    overlay.style.maxHeight = `${avail}px`;
   }
 
   renderCandidates();

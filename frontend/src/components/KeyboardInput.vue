@@ -94,33 +94,29 @@ defineExpose({ value, keyboardShow, handwriting });
     gap: 31px;
     .mic-toggle {
       height: 130px;
-      min-width: 220px;
-      border: 3px solid rgba(74, 63, 48, 0.45);
-      border-radius: 65px;
-      background: #fffdf6;                 /* web-072：高亮羊皮纸，弃旧素材丑图 */
-      box-shadow: 0 4px 10px rgba(74, 63, 48, 0.25);
+      min-width: 240px;
+      border: 0;
+      padding: 0;
+      background: url("../assets/input_micro_bg.png") 100% 100% no-repeat;
+      background-size: 100% 100%;          /* web-072：与语音态胶囊同素材同观感 */
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 14px;
       cursor: pointer;
-      img { height: 58px; }
+      img { height: 46px; }
       span {
         font-family: "Source Han Serif CN", serif;
-        font-size: 38px;
-        font-weight: 600;
-        color: #3a3126;
+        font-size: 36px;
+        font-weight: bold;
+        color: #6d5a42;                    /* 与语音胶囊文案同色 */
       }
-      &:active { background: #ffe9b8; }
     }
     .field {
       width: 499px;
       height: 130px;
-      background: #fffdf6;                 /* web-072：弃暗色素材图，改亮底描边胶囊 */
-      border: 3px solid rgba(74, 63, 48, 0.45);
-      border-radius: 65px;
-      box-shadow: 0 4px 10px rgba(74, 63, 48, 0.25),
-                  inset 0 2px 6px rgba(74, 63, 48, 0.10);
+      background: url("../assets/input_micro_bg.png") 100% 100% no-repeat;
+      background-size: 100% 100%;          /* web-072：与语音态胶囊同素材同观感 */
       display: flex;
       align-items: center;
       padding: 0 38px;
@@ -130,8 +126,8 @@ defineExpose({ value, keyboardShow, handwriting });
         flex: 1;
         font-family: "Source Han Serif CN", serif;
         font-size: 40px;                          /* web-071：加大加粗提亮 */
-        font-weight: 600;
-        color: #3a3126;
+        font-weight: bold;
+        color: #6d5a42;                           /* web-072：与语音胶囊文案同色 */
         overflow: hidden;
         white-space: nowrap;
       }
