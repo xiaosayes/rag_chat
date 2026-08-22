@@ -103,12 +103,15 @@ defineExpose({ value, keyboardShow, handwriting });
       align-items: center;
       justify-content: center;
       gap: 14px;
+      padding: 0 0 12px;                   /* web-073：素材底部阴影带补偿，视觉上移居中 */
+      box-sizing: border-box;
       cursor: pointer;
       img { height: 46px; }
       span {
         font-family: "Source Han Serif CN", serif;
         font-size: 36px;
         font-weight: bold;
+        line-height: 1.2;
         color: #6d5a42;                    /* 与语音胶囊文案同色 */
       }
     }
@@ -119,7 +122,7 @@ defineExpose({ value, keyboardShow, handwriting });
       background-size: 100% 100%;          /* web-072：与语音态胶囊同素材同观感 */
       display: flex;
       align-items: center;
-      padding: 0 38px;
+      padding: 0 38px 12px;                /* web-073：同素材阴影带补偿 */
       box-sizing: border-box;
       cursor: pointer;
       .value {
@@ -127,6 +130,7 @@ defineExpose({ value, keyboardShow, handwriting });
         font-family: "Source Han Serif CN", serif;
         font-size: 40px;                          /* web-071：加大加粗提亮 */
         font-weight: bold;
+        line-height: 1.2;                         /* web-073：收行高助垂直居中 */
         color: #6d5a42;                           /* web-072：与语音胶囊文案同色 */
         overflow: hidden;
         white-space: nowrap;
