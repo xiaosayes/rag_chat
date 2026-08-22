@@ -103,8 +103,9 @@ defineExpose({ value, keyboardShow, handwriting });
       .value {
         flex: 1;
         font-family: "Source Han Serif CN", serif;
-        font-size: 34px;
-        color: #4a3f30;
+        font-size: 40px;                          /* web-071：加大加粗提亮 */
+        font-weight: 600;
+        color: #3a3126;
         overflow: hidden;
         white-space: nowrap;
       }
@@ -117,19 +118,25 @@ defineExpose({ value, keyboardShow, handwriting });
     background: rgba(255, 250, 235, 0.95);
     border-radius: 31px;
     padding: 31px;
+    width: 100%;                        /* web-071：边界不超出对话框 */
+    box-sizing: border-box;
+    overflow: hidden;
   }
 
-  /* web-070：键盘放大（ kiosk 触屏）+ 连字拼音候选条 */
+  /* web-070/071：键盘放大 + 连字拼音候选条（单行+更多浮层） */
   :deep(.pinyin-candidates) {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;                  /* web-071：只弹一行，不多行挤压键盘 */
     align-items: center;
     gap: 18px;
-    min-height: 104px;                 /* 无候选时占位防键盘跳动 */
+    height: 104px;
+    max-width: 100%;
+    overflow: hidden;
     margin-bottom: 22px;
     padding: 6px 4px;
     box-sizing: border-box;
     .pinyin-cand {
+      flex: none;
       font-family: "Source Han Serif CN", serif;
       font-size: 48px;
       line-height: 1.2;
@@ -145,17 +152,69 @@ defineExpose({ value, keyboardShow, handwriting });
       border-color: rgba(74, 63, 48, 0.45);
       font-weight: 600;
     }
+    .pinyin-cand-more {                /* 更多/收起切换 */
+      background: #f3e3bd;
+      font-size: 40px;
+    }
+  }
+  :deep(.pinyin-cand-overlay) {        /* web-071：更多候选浮层——绝对定位不挤键盘 */
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 12px);
+    z-index: 30;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    max-height: 420px;
+    overflow-y: auto;
+    padding: 24px;
+    box-sizing: border-box;
+    background: rgba(255, 250, 235, 0.98);
+    border: 2px solid rgba(74, 63, 48, 0.35);
+    border-radius: 24px;
+    box-shadow: 0 8px 24px rgba(46, 38, 28, 0.35);
+    .pinyin-cand {
+      flex: none;
+      font-family: "Source Han Serif CN", serif;
+      font-size: 48px;
+      line-height: 1.2;
+      padding: 16px 34px;
+      border: 2px solid rgba(74, 63, 48, 0.28);
+      border-radius: 20px;
+      background: #fff7e6;
+      color: #4a3f30;
+      cursor: pointer;
+    }
+    .pinyin-cand-word { background: #ffe9b8; font-weight: 600; }
   }
   :deep(.kiosk-keyboard) {
+    max-width: 100%;
     .hg-row { gap: 14px; margin-bottom: 14px; }
     .hg-button {
       height: 108px;
+      min-width: 0;                     /* web-071：可收缩防横向溢出 */
       border-radius: 18px;
+      background: #fffdf6;              /* web-071：更亮更清晰的键面 */
+      border: 2px solid rgba(74, 63, 48, 0.35);
+      box-shadow: 0 3px 6px rgba(74, 63, 48, 0.18);
       span {
         font-size: 42px;
+        font-weight: 600;
         font-family: "Source Han Serif CN", serif;
-        color: #4a3f30;
+        color: #3a3126;
       }
+      &:active { background: #ffe9b8; }
+    }
+    /* 功能键区分色：手写/空格/退格/Aa 深羊皮纸；完成 主色 */
+    .hg-button[data-skbtn="{write}"],
+    .hg-button[data-skbtn="{space}"],
+    .hg-button[data-skbtn="{bksp}"],
+    .hg-button[data-skbtn="{shift}"] { background: #f3e3bd; }
+    .hg-button[data-skbtn="{finished}"] {
+      background: #4a7c59;
+      border-color: #3a6347;
+      span { color: #ffffff; }
     }
   }
 }

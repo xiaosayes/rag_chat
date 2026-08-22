@@ -4,11 +4,15 @@
  *  - 音节表/单字候选 = simple-keyboard-layouts chinese 布局 layoutCandidates（原单字链路同源）
  *  - 词库 = ../assets/pinyin_words.json（jieba 词频 × pypinyin 注音，scripts/build_pinyin_dict.py 生成） */
 import layout from "simple-keyboard-layouts/build/layouts/chinese";
-import wordsJson from "../assets/pinyin_words.json";
+import dictJson from "../assets/pinyin_words.json";
 
 const CHARS: Record<string, string> =
   (layout as unknown as { layoutCandidates?: Record<string, string> }).layoutCandidates ?? {};
-const WORDS: Record<string, string[]> = wordsJson as unknown as Record<string, string[]>;
+const WORDS: Record<string, string[]> =
+  (dictJson as { words: Record<string, string[]> }).words;
+// web-071：首字母联想索引（nh→你好/年后/您好），词频+会话高频提权序
+const INITIALS: Record<string, string[]> =
+  (dictJson as { initials: Record<string, string[]> }).initials ?? {};
 
 const MAX_SYLLABLE_LEN = 6;                 // zhuang/shuang 级
 
@@ -40,14 +44,22 @@ function segmentable(buffer: string): boolean {
   return dp[n];
 }
 
-/** 候选：词候选在前（整 buffer 命中词库），单字候选随后（最长音节前缀）。 */
+/** 候选（web-070 连字 / web-071 首字母联想）：
+ *  buffer 可完整切分为音节 → 全拼词候选在前、单字候选（最长音节前缀）随后；
+ *  不可完整切分（如 nh）→ 首字母联想词优先、单字候选兑底。 */
 export function getCandidates(buffer: string, max = 30): PinyinCandidate[] {
   if (!buffer) return [];
   const out: PinyinCandidate[] = [];
-  if (segmentable(buffer)) {
+  const seg = segmentable(buffer);
+  if (seg) {
     const ws = WORDS[buffer];
     if (ws) {
       for (const w of ws) out.push({ text: w, eat: buffer.length, kind: "word" });
+    }
+  }
+  if (!seg && buffer.length >= 2) {
+    for (const w of INITIALS[buffer] ?? []) {
+      out.push({ text: w, eat: buffer.length, kind: "word" });
     }
   }
   const p = longestSyllablePrefix(buffer);

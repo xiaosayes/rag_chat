@@ -37,10 +37,24 @@ describe("pinyinEngine.getCandidates", () => {
     expect(c[0]).toEqual({ text: "嫦娥", eat: 6, kind: "word" });
   });
 
-  it("空串/非法输入 → 空候选", () => {
+  it("空串/单字母 → 空候选；纯辅音串走首字母联想", () => {
     expect(getCandidates("")).toEqual([]);
-    expect(getCandidates("zzz")).toEqual([]);      // 无合法音节前缀
-    expect(getCandidates("t")).toEqual([]);        // t 非音节
+    expect(getCandidates("t")).toEqual([]);        // t 非音节且长度<2 不联想
+    const zzz = getCandidates("zzz");              // 不可切分音节 → 首字母联想
+    expect(zzz.some((x) => x.text === "自治州" && x.kind === "word")).toBe(true);
+  });
+
+  it("首字母联想：nh → 你好/年后/您好（词候选，eat=2，你好居首）", () => {
+    const c = getCandidates("nh");
+    expect(c.length).toBeGreaterThan(0);
+    expect(c[0]).toEqual({ text: "你好", eat: 2, kind: "word" });   // 会话高频提权
+    expect(c.some((x) => x.text === "年后")).toBe(true);
+    expect(c.some((x) => x.text === "您好")).toBe(true);
+  });
+
+  it("全拼词优先于首字母词：tuzi 首候选仍为全拼命中", () => {
+    const c = getCandidates("tuzi");
+    expect(c[0]).toEqual({ text: "兔子", eat: 4, kind: "word" });
   });
 });
 

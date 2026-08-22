@@ -87,7 +87,7 @@ describe("KeyboardInput", () => {
     expect((w.vm as any).value).toBe("兔子");             // 整词上屏，buffer 清空
   });
 
-  it("连打余字母继续组词：tuzi 选「兔」后 zi 出「子」（web-070）", async () => {
+  it("连打余字母继续组词：tuzi 选「兔」后 zi 出「子」（web-070/071）", async () => {
     const w = mount(KeyboardInput);
     await w.vm.$nextTick();
     const host = w.find(".simple-keyboard-host");
@@ -96,8 +96,13 @@ describe("KeyboardInput", () => {
       await btn!.trigger("click");
     }
     await new Promise((r) => setTimeout(r, 50));
-    const tu = host.findAll(".pinyin-cand-char").find((el) => el.text() === "兔");
-    expect(tu, "单字候选应含「兔」").toBeTruthy();
+    // web-071 单行候选：「兔」为 tu 的第 9 个单字候选，收在「更多▼」浮层
+    const more = host.findAll(".pinyin-cand").find((el) => el.text().includes("更多"));
+    expect(more, "候选超出行容量应出现「更多▼」").toBeTruthy();
+    await more!.trigger("click");
+    const tu = host.find(".pinyin-cand-overlay").findAll(".pinyin-cand-char")
+      .find((el) => el.text() === "兔");
+    expect(tu, "浮层单字候选应含「兔」").toBeTruthy();
     await tu!.trigger("click");                          // eat=2 → buffer 剩 zi
     await new Promise((r) => setTimeout(r, 50));
     const zi = host.findAll(".pinyin-cand").find((el) => el.text() === "子");
@@ -115,6 +120,43 @@ describe("KeyboardInput", () => {
     await w.find(".send").trigger("click");
     expect(w.emitted("send")).toEqual([["测试问题"]]);
     expect((w.vm as any).value).toBe("");
+  });
+
+  it("首字母联想：nh 候选含「你好」（web-071）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const host = w.find(".simple-keyboard-host");
+    for (const ch of ["n", "h"]) {
+      const btn = host.findAll(".hg-button").find((b) => b.text() === ch);
+      await btn!.trigger("click");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    const nihao = host.findAll(".pinyin-cand").find((el) => el.text() === "你好");
+    expect(nihao, "候选条应含联想词「你好」").toBeTruthy();
+    await nihao!.trigger("click");
+    expect((w.vm as any).value).toBe("你好");
+  });
+
+  it("候选过多时单行+「更多▼」浮层展开，选词后收起（web-071）", async () => {
+    const w = mount(KeyboardInput);
+    await w.vm.$nextTick();
+    const host = w.find(".simple-keyboard-host");
+    for (const ch of ["y", "i"]) {                       // yi = 160+ 单字候选
+      const btn = host.findAll(".hg-button").find((b) => b.text() === ch);
+      await btn!.trigger("click");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    const more = host.findAll(".pinyin-cand").find((el) => el.text().includes("更多"));
+    expect(more, "候选超出行容量应出现「更多▼」").toBeTruthy();
+    expect(host.find(".pinyin-cand-overlay").attributes("style")).toContain("display: none");
+    await more!.trigger("click");                        // 展开浮层
+    const overlay = host.find(".pinyin-cand-overlay");
+    expect(overlay.attributes("style") ?? "").not.toContain("display: none");
+    const yi = overlay.findAll(".pinyin-cand").find((el) => el.text() === "一");
+    expect(yi, "浮层应含全部候选").toBeTruthy();
+    await yi!.trigger("click");
+    expect((w.vm as any).value).toBe("一");
+    expect(host.find(".pinyin-cand-overlay").attributes("style")).toContain("display: none");
   });
 
   it("✕清空后无陈旧候选条残留（web-070 评审修复）", async () => {
