@@ -897,3 +897,9 @@ pytest **842 passed**。
   mic-toggle 改高亮羊皮纸胶囊按钮（micro.png 图标+「语音」文案，与 VoiceBar 键盘钮对称语义）；
   输入框改 #fffdf6 亮底+3px 描边+内外阴影胶囊。
 - vitest **120 passed** / build ✓（pytest 856 服务端零改动）。
+
+**web-072 续（验收回归）**：①「更多▼」浮层写死 max-height 420px 顶穿 HomeView .panel
+（overflow:hidden）裁掉首行（30.png 实证）→ 改运行时量高（宿主顶到裁切祖先顶实测距离，
+下限 96 上限 420，测试钉 max-height 下发）；②语音钮/输入框与语音态观感统一——同用
+input_micro_bg.png 奶杏胶囊素材 + #6d5a42 文案色（此前 #fffdf6 亮白系与语音态差异过大）。
+vitest 120 / build ✓。
