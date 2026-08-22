@@ -45,7 +45,7 @@ def _default_session_factory(cfg: KioskConfig):
         )
         if cfg.story_enabled:                        # web-058：绘本编排全套真件注入
             from .story import (ImageClient, ScriptClient, StoryCache,
-                                StorySession)
+                                StorySession, classify_intent_llm)
 
             def story_factory(story_emit):
                 return StorySession(
@@ -58,6 +58,9 @@ def _default_session_factory(cfg: KioskConfig):
                     tts_factory, cfg)
 
             vs.set_story_session(story_factory)
+            # web-074：LLM 意图兜底注入（正则未中且非明显问答的模糊表达才调到，~1s）
+            vs.set_story_intent_classifier(
+                lambda text: classify_intent_llm(text, model=cfg.story_script_model))
         return vs
 
     return make

@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from .chat import AUDIO_FORMAT, BroadcastSession
-from .story import parse_story_intent
+from .story import parse_story_intent, resolve_story_intent
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class VoiceSession:
         self._closed = False
         # web-057：故事绘本集成（set_story_session 注入 factory 后启用意图拦截）
         self._story_factory = None
+        self._intent_classifier = None           # web-074：LLM 意图兜底（分层闸）
         self._story = None
         self._story_mode = False
 
@@ -66,7 +67,9 @@ class VoiceSession:
 
     def ask(self, text: str) -> None:
         """文本单点 funnel（WS ask + FSM submit 同路）：web-057 故事意图薄层拦截。"""
-        theme = parse_story_intent(text)
+        # web-074：分层闸——正则快路径零延迟；模糊表达经 LLM 兜底分类（未注入则仅正则）
+        theme = (resolve_story_intent(text, self._intent_classifier)
+                 if self._intent_classifier is not None else parse_story_intent(text))
         if self._story_mode:
             if self._story is not None:
                 self._story.cancel()                 # 防御：旧故事先停（web-057）
@@ -86,6 +89,10 @@ class VoiceSession:
     def set_story_session(self, factory) -> None:
         """注入故事会话工厂（voice_ws 接线；factory(emit)->StorySession）。"""
         self._story_factory = factory
+
+    def set_story_intent_classifier(self, fn) -> None:
+        """web-074：注入 LLM 意图分类器（fn(text)->{"intent","theme"}；voice_ws 接线）。"""
+        self._intent_classifier = fn
 
     def set_story_mode(self, on: bool) -> None:
         self._story_mode = bool(on)

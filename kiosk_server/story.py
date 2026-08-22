@@ -43,6 +43,79 @@ def parse_story_intent(text: str) -> str | None:
     return theme
 
 
+# ==================== web-074：意图分层闸（泛化性加强） ====================
+
+# 负向元问题（问能力/定义/内容，不是点故事）——最先拦，不进 LLM
+_META_QUESTION_RE = re.compile(
+    r"(会不会|能不能|可以不可以|可不可以)|"
+    r"(会|能|可以)(讲|说)(故事|绘本|童话)吗?$|"
+    r"什么是|"
+    r"(故事|绘本|童话).{0,6}(讲了什么|是什么|有哪些|怎么样)|"
+    r"(都|一共)?(会|能)讲(什么|哪些)(故事|绘本|童话)"
+)
+# 安全问答信号（几乎不会出现在故事请求里）——命中直接走问答，省 LLM 延迟
+_SAFE_QA_RE = re.compile(
+    r"几点|多少|为什么|怎么样|怎么办|什么意思|哪些|哪里|哪儿|哪个|开放|预约|展览|活动|时间"
+)
+
+INTENT_SYSTEM_PROMPT = (
+    "你是少儿图书馆一体机的意图分类器。判断用户的话是否为「想听故事/绘本」的请求，"
+    "只输出 JSON：{\"intent\":\"story\",\"theme\":\"主题\"} 或 {\"intent\":\"qa\",\"theme\":\"\"}。"
+    "判定 story：只要用户想听故事，无论怎么表达（我想听嫦娥奔月／给我讲讲后羿射日／"
+    "来一个三只小猪／有没有关于恐龙的故事）；theme 提取故事主题（人名/故事名/主题词），"
+    "没有主题则留空。特别注意：「你会讲/能讲 + 具体故事名 + 吗」（如你会讲西游记吗）"
+    "是想听这个故事，判 story 并提取该故事名。"
+    "判定 qa：知识问答、时间地点开放信息、闲聊、问你会不会讲故事（没有点名具体故事）、"
+    "询问某个故事的内容。"
+)
+
+
+def classify_intent_llm(text: str, *, model: str, timeout: float = 6.0) -> dict:
+    """LLM 意图分类+主题提取（web-074 兜底路径）。超时/异常向上抛（调用方回退）。"""
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(_generation_call, model=model,
+                          messages=[{"role": "system", "content": INTENT_SYSTEM_PROMPT},
+                                    {"role": "user", "content": text}],
+                          result_format="message", max_tokens=80,
+                          enable_thinking=False)
+        rsp = fut.result(timeout=timeout)
+    finally:
+        pool.shutdown(wait=False)
+    payload = _extract_payload(rsp)
+    intent = str(payload.get("intent") or "").strip()
+    if intent not in ("story", "qa"):
+        raise StoryScriptError(f"意图分类返回非法 intent: {intent!r}")
+    return {"intent": intent, "theme": str(payload.get("theme") or "").strip()}
+
+
+def resolve_story_intent(text: str, classify: Callable[[str], dict] | None = None) -> str | None:
+    """分层闸：①meta 元问题拦截 → ②正则快路径（零延迟）→ ③安全问答信号（省 LLM）
+    → ④LLM 兜底分类（模糊表达泛化识别，顺带提取主题）。LLM 故障回退 None（走问答）。"""
+    t = (text or "").strip()
+    if not t or len(t) > 50:
+        return None
+    if _META_QUESTION_RE.search(t):
+        return None
+    theme = parse_story_intent(t)
+    if theme:
+        return theme
+    if _SAFE_QA_RE.search(t):
+        return None
+    if classify is None:
+        return None
+    try:
+        res = classify(t)
+    except Exception as e:
+        logger.warning("意图分类失败，回退问答（%s）: %s", t, e)
+        return None
+    if res.get("intent") == "story":
+        theme = (res.get("theme") or "").strip(_THEME_STRIP)
+        if 2 <= len(theme) <= 20:
+            return theme
+    return None
+
+
 # ==================== web-052：分镜脚本（qwen-plus，固定云端） ====================
 
 # web-070：脚本换型 deepseek-v4-flash-0731 + 强忠实条款（「严格按照大家熟知的主流版本」——
